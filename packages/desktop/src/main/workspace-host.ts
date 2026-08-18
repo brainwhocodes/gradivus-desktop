@@ -34,14 +34,704 @@ export const BROWSER_BG_DARK = "#1c1b1a";
 export const BROWSER_BG_LIGHT = "#f6f2eb";
 const MAX_WORKSPACE_PANES = 4;
 
-function escapeCssIdentifier(ident: string): string {
-	return ident.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
-}
-
 function uniqueCommandId(prefix: string): string {
 	return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+const INSPECTOR_SCRIPT = `
+(function() {
+  return new Promise((resolve) => {
+    if (window.__branchlight_inspector_cleanup__) {
+      window.__branchlight_inspector_cleanup__({ canceled: true });
+    }
+
+    const isLocal = Boolean(
+      location.hostname === 'localhost' ||
+      location.hostname === '127.0.0.1' ||
+      location.hostname === '0.0.0.0' ||
+      location.hostname === '::1' ||
+      location.hostname.endsWith('.local') ||
+      location.hostname.startsWith('local.') ||
+      location.hostname.includes('.local.') ||
+      location.hostname.endsWith('.localhost') ||
+      location.hostname.endsWith('.test') ||
+      location.hostname.endsWith('.internal')
+    );
+
+    const container = document.createElement('div');
+    container.id = '__branchlight_inspector_root__';
+    container.style.cssText = 'all: initial; position: absolute; top: 0; left: 0; z-index: 2147483647; pointer-events: none;';
+    
+    const shadow = container.attachShadow({ mode: 'closed' });
+    const style = document.createElement('style');
+    style.textContent = [
+      '* { box-sizing: border-box; margin: 0; padding: 0; }',
+      '.inspector-box {',
+      '  position: fixed;',
+      '  pointer-events: none;',
+      '  box-sizing: border-box;',
+      '  border: 2px solid #f97316;',
+      '  background: rgba(249, 115, 22, 0.20);',
+      '  border-radius: 3px;',
+      '  z-index: 2147483646;',
+      '  display: none;',
+      '  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 0 14px rgba(249, 115, 22, 0.45);',
+      '  transition: all 40ms ease-out;',
+      '}',
+      '.inspector-box.selected {',
+      '  border: 2px solid #f97316;',
+      '  background: rgba(249, 115, 22, 0.28);',
+      '  box-shadow: 0 0 0 2px rgba(0,0,0,0.7), 0 0 24px rgba(249, 115, 22, 0.7);',
+      '  transition: none;',
+      '}',
+      '.inspector-pill {',
+      '  position: absolute;',
+      '  bottom: calc(100% + 5px);',
+      '  left: 0;',
+      '  background: #1c1b1a;',
+      '  color: #f6f2eb;',
+      '  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;',
+      '  font-size: 11px;',
+      '  line-height: 14px;',
+      '  padding: 3px 8px;',
+      '  border-radius: 4px;',
+      '  box-shadow: 0 4px 14px rgba(0,0,0,0.6);',
+      '  border: 1px solid rgba(255,255,255,0.25);',
+      '  white-space: nowrap;',
+      '  display: flex;',
+      '  gap: 6px;',
+      '  align-items: center;',
+      '  pointer-events: none;',
+      '}',
+      '.pill-tag { color: #f97316; font-weight: 700; }',
+      '.pill-id { color: #38bdf8; }',
+      '.pill-class { color: #a78bfa; }',
+      '.pill-dim { color: #94a3b8; font-size: 10px; font-weight: 500; }',
+      '.floating-card {',
+      '  position: fixed;',
+      '  z-index: 2147483647;',
+      '  width: min(520px, calc(100vw - 32px));',
+      '  padding: 14px;',
+      '  border-radius: 12px;',
+      '  background: rgba(28, 27, 26, 0.96);',
+      '  border: 1px solid rgba(249, 115, 22, 0.4);',
+      '  box-shadow: 0 20px 50px rgba(0,0,0,0.7), 0 0 0 1px rgba(249, 115, 22, 0.2);',
+      '  backdrop-filter: blur(16px);',
+      '  color: #f6f2eb;',
+      '  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;',
+      '  font-size: 12px;',
+      '  pointer-events: auto;',
+      '  animation: cardFadeIn 160ms cubic-bezier(0.16, 1, 0.3, 1);',
+      '}',
+      '@keyframes cardFadeIn {',
+      '  from { opacity: 0; transform: translateY(8px); }',
+      '  to { opacity: 1; transform: translateY(0); }',
+      '}',
+      '.card-header {',
+      '  display: flex;',
+      '  align-items: center;',
+      '  justify-content: space-between;',
+      '  gap: 8px;',
+      '  padding-bottom: 10px;',
+      '  border-bottom: 1px solid rgba(255,255,255,0.1);',
+      '}',
+      '.target-info {',
+      '  display: flex;',
+      '  align-items: center;',
+      '  gap: 6px;',
+      '  min-width: 0;',
+      '}',
+      '.target-icon { color: #f97316; font-weight: bold; font-size: 13px; }',
+      '.target-name { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 700; color: #fff; }',
+      '.target-selector { font-family: ui-monospace, monospace; font-size: 10.5px; color: #a49d93; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.mode-badge { font-family: ui-monospace, monospace; font-size: 9px; font-weight: 750; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }',
+      '.mode-badge.local { background: rgba(249, 115, 22, 0.2); color: #f97316; }',
+      '.mode-badge.external { background: rgba(255, 255, 255, 0.1); color: #a49d93; border: 1px solid rgba(255,255,255,0.15); }',
+      '.card-close-btn {',
+      '  width: 22px;',
+      '  height: 22px;',
+      '  border: 0;',
+      '  background: transparent;',
+      '  color: #a49d93;',
+      '  font-size: 16px;',
+      '  line-height: 1;',
+      '  cursor: pointer;',
+      '  display: flex;',
+      '  align-items: center;',
+      '  justify-content: center;',
+      '  border-radius: 4px;',
+      '}',
+      '.card-close-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }',
+      '.card-textarea {',
+      '  width: 100%;',
+      '  min-height: 64px;',
+      '  margin-top: 10px;',
+      '  padding: 8px 10px;',
+      '  border: 1px solid rgba(255,255,255,0.15);',
+      '  border-radius: 6px;',
+      '  background: #141312;',
+      '  color: #fff;',
+      '  font-family: inherit;',
+      '  font-size: 12px;',
+      '  line-height: 1.45;',
+      '  resize: vertical;',
+      '  outline: none;',
+      '}',
+      '.card-textarea:focus { border-color: #f97316; box-shadow: 0 0 0 1px #f97316; }',
+      '.card-chips {',
+      '  display: flex;',
+      '  flex-wrap: wrap;',
+      '  gap: 6px;',
+      '  margin-top: 8px;',
+      '}',
+      '.chip {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  padding: 3px 8px;',
+      '  border: 1px solid rgba(255,255,255,0.12);',
+      '  border-radius: 999px;',
+      '  background: rgba(255,255,255,0.04);',
+      '  color: #a49d93;',
+      '  font-size: 10.5px;',
+      '  font-weight: 600;',
+      '  cursor: pointer;',
+      '  user-select: none;',
+      '}',
+      '.chip:hover { border-color: #f97316; color: #fff; background: rgba(249, 115, 22, 0.15); }',
+      '.recreate-dropdown-wrap { position: relative; display: inline-block; }',
+      '.recreate-trigger-btn {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '  height: 24px;',
+      '  padding: 0 10px;',
+      '  border: 1px solid rgba(255,255,255,0.18);',
+      '  border-radius: 999px;',
+      '  background: #141312;',
+      '  color: #f97316;',
+      '  font-family: inherit;',
+      '  font-size: 10.5px;',
+      '  font-weight: 700;',
+      '  cursor: pointer;',
+      '  user-select: none;',
+      '}',
+      '.recreate-trigger-btn:hover { border-color: #f97316; background: rgba(249, 115, 22, 0.15); }',
+      '.recreate-menu {',
+      '  position: absolute;',
+      '  top: calc(100% + 4px);',
+      '  left: 0;',
+      '  z-index: 2147483647;',
+      '  width: 170px;',
+      '  padding: 4px;',
+      '  border-radius: 8px;',
+      '  background: #1c1b1a;',
+      '  border: 1px solid rgba(255,255,255,0.2);',
+      '  box-shadow: 0 12px 30px rgba(0,0,0,0.7);',
+      '  display: flex;',
+      '  flex-direction: column;',
+      '  gap: 2px;',
+      '}',
+      '.recreate-item {',
+      '  display: flex;',
+      '  align-items: center;',
+      '  width: 100%;',
+      '  height: 28px;',
+      '  padding: 0 8px;',
+      '  border: 0;',
+      '  border-radius: 5px;',
+      '  background: transparent;',
+      '  color: #f6f2eb;',
+      '  font-family: inherit;',
+      '  font-size: 11px;',
+      '  font-weight: 600;',
+      '  text-align: left;',
+      '  cursor: pointer;',
+      '}',
+      '.recreate-item:hover { background: rgba(249, 115, 22, 0.2); color: #f97316; }',
+      '.card-footer {',
+      '  display: flex;',
+      '  align-items: center;',
+      '  justify-content: space-between;',
+      '  margin-top: 12px;',
+      '  padding-top: 4px;',
+      '}',
+      '.mode-toggles {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 2px;',
+      '  padding: 2px;',
+      '  border: 1px solid rgba(255,255,255,0.12);',
+      '  border-radius: 5px;',
+      '  background: #141312;',
+      '}',
+      '.mode-toggle {',
+      '  padding: 2px 7px;',
+      '  border: 0;',
+      '  border-radius: 3px;',
+      '  background: transparent;',
+      '  color: #a49d93;',
+      '  font-size: 10.5px;',
+      '  font-weight: 600;',
+      '  cursor: pointer;',
+      '}',
+      '.mode-toggle.active { background: #f97316; color: #fff; font-weight: 700; }',
+      '.card-actions { display: flex; gap: 6px; }',
+      '.btn-cancel {',
+      '  height: 28px;',
+      '  padding: 0 10px;',
+      '  border: 1px solid rgba(255,255,255,0.15);',
+      '  border-radius: 5px;',
+      '  background: transparent;',
+      '  color: #a49d93;',
+      '  font-size: 11px;',
+      '  font-weight: 600;',
+      '  cursor: pointer;',
+      '}',
+      '.btn-cancel:hover { background: rgba(255,255,255,0.08); color: #fff; }',
+      '.btn-submit {',
+      '  height: 28px;',
+      '  padding: 0 12px;',
+      '  border: 1px solid #f97316;',
+      '  border-radius: 5px;',
+      '  background: #f97316;',
+      '  color: #fff;',
+      '  font-size: 11.5px;',
+      '  font-weight: 700;',
+      '  cursor: pointer;',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '}',
+      '.btn-submit:hover:not(:disabled) { filter: brightness(1.15); }',
+      '.btn-submit:disabled { opacity: 0.4; cursor: default; }'
+    ].join('\\n');
+    shadow.appendChild(style);
+
+    const cursorStyle = document.createElement('style');
+    cursorStyle.id = '__branchlight_cursor_style__';
+    cursorStyle.textContent = '* { cursor: crosshair !important; }';
+    (document.head || document.documentElement).appendChild(cursorStyle);
+
+    const box = document.createElement('div');
+    box.className = 'inspector-box';
+    const pill = document.createElement('div');
+    pill.className = 'inspector-pill';
+    box.appendChild(pill);
+    shadow.appendChild(box);
+
+    const card = document.createElement('div');
+    card.className = 'floating-card';
+    card.style.display = 'none';
+    shadow.appendChild(card);
+
+    document.documentElement.appendChild(container);
+
+    let currentTarget = null;
+    let selectedElement = null;
+    let selectedMetadata = null;
+    let currentCaptureMode = 'dom';
+    let rafId = null;
+
+    function generateSelector(el) {
+      if (!el || el.nodeType !== 1) return '';
+      if (el.id && /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(el.id)) {
+        try {
+          if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+            return '#' + CSS.escape(el.id);
+          }
+        } catch {}
+      }
+      for (const attr of ['data-testid', 'data-test', 'data-cy']) {
+        const val = el.getAttribute(attr);
+        if (val) {
+          try {
+            const sel = '[' + attr + '="' + CSS.escape(val) + '"]';
+            if (document.querySelectorAll(sel).length === 1) return sel;
+          } catch {}
+        }
+      }
+      const tag = el.tagName.toLowerCase();
+      if (el.classList && el.classList.length > 0) {
+        try {
+          const classes = Array.from(el.classList).slice(0, 3).map(c => '.' + CSS.escape(c)).join('');
+          const tagClasses = tag + classes;
+          if (document.querySelectorAll(tagClasses).length === 1) return tagClasses;
+        } catch {}
+      }
+      let path = [];
+      let current = el;
+      while (current && current.nodeType === 1 && current !== document.documentElement && path.length < 5) {
+        let step = current.tagName.toLowerCase();
+        if (current.id && /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(current.id)) {
+          step = '#' + CSS.escape(current.id);
+          path.unshift(step);
+          break;
+        }
+        let sibling = current;
+        let nth = 1;
+        while ((sibling = sibling.previousElementSibling)) {
+          if (sibling.tagName.toLowerCase() === current.tagName.toLowerCase()) nth++;
+        }
+        if (nth > 1) step += ':nth-of-type(' + nth + ')';
+        path.unshift(step);
+        current = current.parentElement;
+      }
+      return path.join(' > ');
+    }
+
+    function updateOverlay(el) {
+      if (!el || el === container || container.contains(el) || selectedElement) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        box.style.display = 'none';
+        return;
+      }
+      box.style.display = 'block';
+      box.style.top = rect.top + 'px';
+      box.style.left = rect.left + 'px';
+      box.style.width = rect.width + 'px';
+      box.style.height = rect.height + 'px';
+
+      const tag = el.tagName.toLowerCase();
+      const idStr = el.id ? '#' + el.id : '';
+      const classStr = el.className && typeof el.className === 'string'
+        ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.')
+        : '';
+      const dimStr = Math.round(rect.width) + ' × ' + Math.round(rect.height);
+
+      pill.innerHTML = '<span class="pill-tag">&lt;' + tag + '&gt;</span>' +
+        (idStr ? '<span class="pill-id">' + idStr + '</span>' : '') +
+        (classStr ? '<span class="pill-class">' + classStr + '</span>' : '') +
+        '<span class="pill-dim">' + dimStr + '</span>';
+
+      if (rect.top < 34) {
+        pill.style.bottom = 'auto';
+        pill.style.top = 'calc(100% + 4px)';
+      } else {
+        pill.style.top = 'auto';
+        pill.style.bottom = 'calc(100% + 4px)';
+      }
+    }
+
+    function extractMetadata(el) {
+      const rect = el.getBoundingClientRect();
+      const computed = window.getComputedStyle(el);
+      const attributes = {};
+      for (let i = 0; i < el.attributes.length; i++) {
+        const attr = el.attributes[i];
+        attributes[attr.name] = attr.value;
+      }
+      const hierarchy = [];
+      let cur = el.parentElement;
+      while (cur && hierarchy.length < 8) {
+        hierarchy.push(cur.tagName.toLowerCase());
+        cur = cur.parentElement;
+      }
+      return {
+        tagName: el.tagName.toLowerCase(),
+        selector: generateSelector(el),
+        id: el.id || undefined,
+        classes: Array.from(el.classList || []),
+        attributes: attributes,
+        role: el.getAttribute('role') || undefined,
+        name: el.getAttribute('aria-label') || el.getAttribute('title') || undefined,
+        text: (el.innerText || el.textContent || '').trim().slice(0, 1024),
+        outerHTML: (el.outerHTML || '').slice(0, 32768),
+        bounds: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          top: Math.round(rect.top),
+          left: Math.round(rect.left),
+          bottom: Math.round(rect.bottom),
+          right: Math.round(rect.right)
+        },
+        computedStyles: {
+          display: computed.display,
+          position: computed.position,
+          fontSize: computed.fontSize,
+          fontFamily: computed.fontFamily,
+          color: computed.color,
+          backgroundColor: computed.backgroundColor,
+          padding: computed.paddingTop + ' ' + computed.paddingRight + ' ' + computed.paddingBottom + ' ' + computed.paddingLeft,
+          margin: computed.marginTop + ' ' + computed.marginRight + ' ' + computed.marginBottom + ' ' + computed.marginLeft,
+          borderRadius: computed.borderRadius,
+          zIndex: computed.zIndex
+        },
+        hierarchy: hierarchy,
+        devicePixelRatio: window.devicePixelRatio || 1
+      };
+    }
+
+    function renderFloatingCard(el, meta) {
+      const rect = el.getBoundingClientRect();
+      const cardWidth = Math.min(520, window.innerWidth - 32);
+      
+      let left = Math.max(16, Math.min(window.innerWidth - cardWidth - 16, rect.left));
+      let top;
+      if (rect.bottom + 230 < window.innerHeight) {
+        top = rect.bottom + 12;
+      } else if (rect.top - 240 > 0) {
+        top = rect.top - 240;
+      } else {
+        top = Math.max(16, window.innerHeight - 260);
+      }
+
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+      card.style.display = 'block';
+
+      const tag = meta.tagName;
+      const selectorStr = meta.selector || tag;
+      const placeholder = isLocal 
+        ? "Describe changes to this element (e.g. 'Make it full-width with a smooth hover gradient')..." 
+        : "Ask OMP about this element, request debugging analysis, or extract its design...";
+      const submitLabel = isLocal ? "Apply Edit" : "Ask OMP";
+      const modeBadge = isLocal ? "Local · Edit" : "External · Debug";
+      const modeClass = isLocal ? "local" : "external";
+
+      const chips = isLocal 
+        ? [
+            { label: '🎨 Restyle', prompt: 'Restyle this element with modern colors, subtle borders, and clean typography.' },
+            { label: '📝 Edit Copy', prompt: 'Update the text and messaging of this element to be clear and concise.' },
+            { label: '📐 Spacing & Layout', prompt: 'Fix the alignment, padding, and layout of this element.' },
+            { label: '✨ Add Hover', prompt: 'Add a smooth hover and focus transition effect to this element.' }
+          ]
+        : [
+            { label: '🔍 Explain', prompt: 'Explain how this element is structured, its CSS styling, and layout behavior.' },
+            { label: '🐛 Debug Layout', prompt: "Analyze this element's DOM and styles for layout bugs, overflows, or a11y issues." },
+            { label: '📐 Extract Specs', prompt: 'Extract the exact CSS rules, colors, typography, and spacing for this component.' }
+          ];
+
+      const recreateHtml = !isLocal ? [
+        '<div class="recreate-dropdown-wrap">',
+        '  <button type="button" class="recreate-trigger-btn">📋 Recreate in… <span class="arrow">▾</span></button>',
+        '  <div class="recreate-menu" style="display: none;">',
+        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern Svelte 5 component with scoped styles and TypeScript.">✦ Svelte 5</button>',
+        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern React component with TypeScript and Tailwind CSS.">✦ React</button>',
+        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern Vue 3 component with <script setup> and scoped styles.">✦ Vue 3</button>',
+        '  </div>',
+        '</div>'
+      ].join('\\n') : '';
+
+      card.innerHTML = [
+        '<div class="card-header">',
+        '  <div class="target-info">',
+        '    <span class="target-icon">⌖</span>',
+        '    <strong class="target-name">&lt;' + tag + '&gt;</strong>',
+        '    <code class="target-selector" title="' + selectorStr + '">' + selectorStr + '</code>',
+        '    <span class="mode-badge ' + modeClass + '">' + modeBadge + '</span>',
+        '  </div>',
+        '  <button type="button" class="card-close-btn" aria-label="Cancel selection">×</button>',
+        '</div>',
+        '<textarea class="card-textarea" placeholder="' + placeholder + '" rows="3"></textarea>',
+        '<div class="card-chips">',
+        chips.map(c => '<button type="button" class="chip" data-prompt="' + c.prompt + '">' + c.label + '</button>').join(''),
+        recreateHtml,
+        '</div>',
+        '<div class="card-footer">',
+        '  <div class="mode-toggles">',
+        '    <button type="button" class="mode-toggle active" data-mode="dom">DOM</button>',
+        '    <button type="button" class="mode-toggle" data-mode="screenshot">Screenshot</button>',
+        '  </div>',
+        '  <div class="card-actions">',
+        '    <button type="button" class="btn-cancel">Cancel</button>',
+        '    <button type="button" class="btn-submit" disabled>' + submitLabel + ' <span>↗</span></button>',
+        '  </div>',
+        '</div>'
+      ].join('\\n');
+
+      const textarea = card.querySelector('.card-textarea');
+      const submitBtn = card.querySelector('.btn-submit');
+      const cancelBtn = card.querySelector('.btn-cancel');
+      const closeBtn = card.querySelector('.card-close-btn');
+      const chipBtns = card.querySelectorAll('.chip');
+      const modeBtns = card.querySelectorAll('.mode-toggle');
+      const recreateWrap = card.querySelector('.recreate-dropdown-wrap');
+
+      if (recreateWrap) {
+        const trigger = recreateWrap.querySelector('.recreate-trigger-btn');
+        const menu = recreateWrap.querySelector('.recreate-menu');
+        const items = recreateWrap.querySelectorAll('.recreate-item');
+
+        trigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+        });
+
+        items.forEach(item => {
+          item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const p = item.getAttribute('data-prompt');
+            if (textarea.value.trim()) {
+              textarea.value = textarea.value.trim() + '\\n' + p;
+            } else {
+              textarea.value = p;
+            }
+            submitBtn.disabled = false;
+            textarea.focus();
+            menu.style.display = 'none';
+          });
+        });
+
+        card.addEventListener('click', () => {
+          menu.style.display = 'none';
+        });
+      }
+
+      textarea.focus();
+
+      textarea.addEventListener('input', () => {
+        submitBtn.disabled = !textarea.value.trim();
+      });
+
+      textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          cleanup();
+          resolve({ canceled: true });
+        } else if (e.key === 'Enter' && !e.shiftKey && textarea.value.trim()) {
+          e.preventDefault();
+          doSubmit();
+        }
+      });
+
+      chipBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const p = btn.getAttribute('data-prompt');
+          if (textarea.value.trim()) {
+            textarea.value = textarea.value.trim() + '\\n' + p;
+          } else {
+            textarea.value = p;
+          }
+          submitBtn.disabled = false;
+          textarea.focus();
+        });
+      });
+
+      modeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          modeBtns.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          currentCaptureMode = btn.getAttribute('data-mode') || 'dom';
+        });
+      });
+
+      function doSubmit() {
+        const instruction = textarea.value.trim();
+        if (!instruction) return;
+        submitBtn.disabled = true;
+        submitBtn.textContent = isLocal ? 'Applying…' : 'Sending…';
+        cleanup();
+        resolve({
+          ...meta,
+          instruction: instruction,
+          captureMode: currentCaptureMode
+        });
+      }
+
+      submitBtn.addEventListener('click', doSubmit);
+      cancelBtn.addEventListener('click', () => { cleanup(); resolve({ canceled: true }); });
+      closeBtn.addEventListener('click', () => { cleanup(); resolve({ canceled: true }); });
+    }
+
+    function onPointerMove(e) {
+      if (selectedElement) return;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (el && el !== currentTarget && el !== container && !container.contains(el)) {
+          currentTarget = el;
+          updateOverlay(el);
+        }
+      });
+    }
+
+    function interceptEvent(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
+
+    function onElementClick(e) {
+      if (selectedElement) return;
+      interceptEvent(e);
+      const target = currentTarget || document.elementFromPoint(e.clientX, e.clientY);
+      if (!target || target === container || container.contains(target)) return;
+      
+      selectedElement = target;
+      selectedMetadata = extractMetadata(target);
+
+      cursorStyle.remove();
+      window.removeEventListener('pointermove', onPointerMove, true);
+      window.removeEventListener('pointerdown', interceptEvent, true);
+      window.removeEventListener('mousedown', interceptEvent, true);
+      window.removeEventListener('mouseup', interceptEvent, true);
+      window.removeEventListener('click', onElementClick, true);
+
+      box.classList.add('selected');
+      const rect = target.getBoundingClientRect();
+      box.style.display = 'block';
+      box.style.top = rect.top + 'px';
+      box.style.left = rect.left + 'px';
+      box.style.width = rect.width + 'px';
+      box.style.height = rect.height + 'px';
+
+      pill.innerHTML = '<span class="pill-tag">&lt;' + selectedMetadata.tagName + '&gt;</span><span class="pill-id">Selected</span>';
+
+      renderFloatingCard(target, selectedMetadata);
+    }
+
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        interceptEvent(e);
+        cleanup();
+        resolve({ canceled: true });
+      }
+    }
+
+    function onScrollOrResize() {
+      if (selectedElement) {
+        const rect = selectedElement.getBoundingClientRect();
+        box.style.top = rect.top + 'px';
+        box.style.left = rect.left + 'px';
+        box.style.width = rect.width + 'px';
+        box.style.height = rect.height + 'px';
+      } else if (currentTarget) {
+        updateOverlay(currentTarget);
+      }
+    }
+
+    function cleanup(res) {
+      window.removeEventListener('pointermove', onPointerMove, true);
+      window.removeEventListener('pointerdown', interceptEvent, true);
+      window.removeEventListener('mousedown', interceptEvent, true);
+      window.removeEventListener('mouseup', interceptEvent, true);
+      window.removeEventListener('click', onElementClick, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize, true);
+      if (rafId) cancelAnimationFrame(rafId);
+      container.remove();
+      cursorStyle.remove();
+      window.__branchlight_inspector_cleanup__ = undefined;
+      if (res) resolve(res);
+    }
+
+    window.addEventListener('pointermove', onPointerMove, true);
+    window.addEventListener('pointerdown', interceptEvent, true);
+    window.addEventListener('mousedown', interceptEvent, true);
+    window.addEventListener('mouseup', interceptEvent, true);
+    window.addEventListener('click', onElementClick, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('scroll', onScrollOrResize, { capture: true, passive: true });
+    window.addEventListener('resize', onScrollOrResize, { capture: true, passive: true });
+
+    window.__branchlight_inspector_cleanup__ = cleanup;
+  });
+})();
+`;
 const DEFAULT_BROWSER_URL = "https://omp.sh";
 interface PendingNavigation {
 	url: string;
@@ -58,6 +748,7 @@ interface BrowserEntry {
 	authoritativeUrl: string;
 	pendingNavigation?: PendingNavigation;
 	debuggerAttachedBySelection?: boolean;
+	selectionCssKey?: string;
 }
 export type CreateBrowserOptions = CreateBrowserInput;
 export type CreateTerminalOptions = CreateTerminalInput;
@@ -805,23 +1496,14 @@ export class WorkspaceHost {
 		]);
 		menu.popup({ window: this.#window });
 	}
+
 	async #endSelection(paneId: string, reason?: string): Promise<void> {
 		const entry = this.#browsers.get(paneId);
 		if (entry && !entry.view.webContents.isDestroyed()) {
 			try {
-				if (entry.view.webContents.debugger.isAttached()) {
-					await entry.view.webContents.debugger.sendCommand("Overlay.hideHighlight").catch(() => {});
-					await entry.view.webContents.debugger
-						.sendCommand("Overlay.setInspectMode", {
-							mode: "none",
-							highlightConfig: {},
-						})
-						.catch(() => {});
-					if (entry.debuggerAttachedBySelection) {
-						entry.view.webContents.debugger.detach();
-						entry.debuggerAttachedBySelection = false;
-					}
-				}
+				await entry.view.webContents
+					.executeJavaScript("window.__branchlight_inspector_cleanup__?.({ canceled: true })")
+					.catch(() => {});
 			} catch {}
 		}
 
@@ -857,127 +1539,125 @@ export class WorkspaceHost {
 
 		const { webContents } = entry.view;
 		if (!webContents.isDestroyed()) {
-			try {
-				if (!webContents.debugger.isAttached()) {
-					webContents.debugger.attach("1.3");
-					entry.debuggerAttachedBySelection = true;
-				}
-				await webContents.debugger.sendCommand("DOM.enable");
-				await webContents.debugger.sendCommand("Overlay.enable");
-				await webContents.debugger.sendCommand("Overlay.setInspectMode", {
-					mode: "searchForNode",
-					highlightConfig: {
-						showInfo: true,
-						showRulers: false,
-						showExtensionLines: false,
-						contentColor: { r: 249, g: 115, b: 22, a: 0.2 },
-						borderColor: { r: 249, g: 115, b: 22, a: 1.0 },
-					},
-				});
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				const errState = this.#selectionCoordinator.reportError(
-					scope,
-					state.selectionId ?? "",
-					"inspect_setup_failed",
-					message,
-				);
-				this.#emitSelectionState(errState);
-				return errState;
+			if (typeof webContents.focus === "function") {
+				webContents.focus();
 			}
+
+			const activeId = state.selectionId ?? "";
+			void (async () => {
+				try {
+					const payload = (await webContents.executeJavaScript(INSPECTOR_SCRIPT)) as {
+						canceled?: boolean;
+						tagName?: string;
+						selector?: string;
+						id?: string;
+						classes?: string[];
+						attributes?: Record<string, string>;
+						role?: string;
+						name?: string;
+						text?: string;
+						outerHTML?: string;
+						bounds?: {
+							x: number;
+							y: number;
+							width: number;
+							height: number;
+							top: number;
+							left: number;
+							bottom: number;
+							right: number;
+						};
+						computedStyles?: Record<string, string>;
+						hierarchy?: string[];
+						devicePixelRatio?: number;
+					} | null;
+
+					if (!payload || payload.canceled) {
+						if (this.#activeSelectionPaneId === id) {
+							await this.#endSelection(id, "Canceled by user");
+						}
+						return;
+					}
+
+					if (this.#activeSelectionPaneId !== id) return;
+					const boundScope = this.#boundScopes.get(id);
+					if (!boundScope) return;
+
+					let screenshot: ElementScreenshot | undefined;
+					if (typeof webContents.capturePage === "function" && payload.bounds) {
+						try {
+							const padding = 12;
+							const clipRect = {
+								x: Math.max(0, Math.floor(payload.bounds.x - padding)),
+								y: Math.max(0, Math.floor(payload.bounds.y - padding)),
+								width: Math.min(entry.bounds.width || 1200, Math.ceil(payload.bounds.width + padding * 2)),
+								height: Math.min(entry.bounds.height || 800, Math.ceil(payload.bounds.height + padding * 2)),
+							};
+							if (clipRect.width > 0 && clipRect.height > 0) {
+								const nativeImage = await webContents.capturePage(clipRect);
+								const size =
+									typeof nativeImage.getSize === "function"
+										? nativeImage.getSize()
+										: { width: clipRect.width, height: clipRect.height };
+								let buffer = nativeImage.toJPEG(80);
+								if (buffer.byteLength > SELECTION_LIMITS.maxImageBytes) {
+									buffer = nativeImage.toJPEG(60);
+								}
+								const base64 = buffer.toString("base64");
+								screenshot = {
+									dataUrl: `data:image/jpeg;base64,${base64}`,
+									base64,
+									mimeType: "image/jpeg",
+									width: size.width,
+									height: size.height,
+									byteLength: buffer.byteLength,
+								};
+							}
+						} catch {}
+					}
+
+					const selector = payload.selector || payload.tagName || "element";
+					const updated = this.#selectionCoordinator.updateSelection(boundScope, activeId, {
+						selector,
+						domSnapshot: {
+							selector,
+							tagName: payload.tagName || "div",
+							role: payload.role,
+							name: payload.name,
+							html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
+							text: payload.text,
+							attributes: payload.attributes || {},
+							bounds: payload.bounds || {
+								x: 0,
+								y: 0,
+								width: 0,
+								height: 0,
+								top: 0,
+								left: 0,
+								bottom: 0,
+								right: 0,
+							},
+							hierarchy: payload.hierarchy || ["body", "html"],
+						},
+						screenshot,
+						url: entry.state.url,
+					});
+					this.#emitSelectionState(updated);
+
+					if (typeof payload.instruction === "string" && payload.instruction.trim().length > 0) {
+						await this.commitSelection(id, payload.instruction.trim());
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					const errState = this.#selectionCoordinator.reportError(scope, activeId, "inspect_failed", message);
+					this.#emitSelectionState(errState);
+				}
+			})();
 		}
+
 		this.#emitSelectionState(state);
 		return state;
 	}
-
-	async #handleInspectNodeRequested(
-		_id: string,
-		entry: BrowserEntry,
-		scope: SelectionAuthScope,
-		activeId: string,
-		backendNodeId: number,
-	): Promise<void> {
-		const { webContents } = entry.view;
-		if (webContents.isDestroyed()) return;
-		try {
-			const desc = (await webContents.debugger.sendCommand("DOM.describeNode", {
-				backendNodeId,
-				depth: 1,
-				pierce: true,
-			})) as { node?: { localName?: string; attributes?: string[] } };
-
-			const box = (await webContents.debugger.sendCommand("DOM.getBoxModel", {
-				backendNodeId,
-			})) as { model?: { border: number[]; width: number; height: number } };
-
-			const node = desc?.node;
-			if (!node) return;
-
-			const attrMap: Record<string, string> = {};
-			if (Array.isArray(node.attributes)) {
-				for (let i = 0; i < node.attributes.length; i += 2) {
-					attrMap[node.attributes[i].toLowerCase()] = node.attributes[i + 1] || "";
-				}
-			}
-
-			const tag = (node.localName || "div").toLowerCase();
-			let selector: string;
-			if (attrMap.id?.trim()) {
-				selector = `#${escapeCssIdentifier(attrMap.id.trim())}`;
-			} else if (attrMap["data-testid"]?.trim()) {
-				selector = `[data-testid="${attrMap["data-testid"].trim()}"]`;
-			} else if (attrMap["data-test"]?.trim()) {
-				selector = `[data-test="${attrMap["data-test"].trim()}"]`;
-			} else if (attrMap.class?.trim()) {
-				const classes = attrMap.class.trim().split(/\s+/).map(escapeCssIdentifier).join(".");
-				selector = `${tag}.${classes}`;
-			} else if (attrMap["aria-label"]?.trim()) {
-				selector = `${tag}[aria-label="${attrMap["aria-label"].trim()}"]`;
-			} else if (attrMap.name?.trim()) {
-				selector = `${tag}[name="${attrMap.name.trim()}"]`;
-			} else {
-				selector = tag;
-			}
-
-			let html: string | undefined;
-			try {
-				const htmlRes = (await webContents.debugger.sendCommand("DOM.getOuterHTML", {
-					backendNodeId,
-				})) as { outerHTML?: string };
-				if (htmlRes?.outerHTML) {
-					html = htmlRes.outerHTML.slice(0, SELECTION_LIMITS.maxDomBytes);
-				}
-			} catch {}
-
-			const border = box?.model?.border || [0, 0, 0, 0, 0, 0, 0, 0];
-			const x = border[0] ?? 0;
-			const y = border[1] ?? 0;
-			const width = box?.model?.width ?? (border[2] ? border[2] - border[0] : 0);
-			const height = box?.model?.height ?? (border[5] ? border[5] - border[1] : 0);
-
-			const updated = this.#selectionCoordinator.updateSelection(scope, activeId, {
-				backendNodeId,
-				selector,
-				domSnapshot: {
-					selector,
-					tagName: tag,
-					role: attrMap.role,
-					name: attrMap["aria-label"] || attrMap.title,
-					html,
-					attributes: attrMap,
-					bounds: { x, y, width, height, top: y, left: x, bottom: y + height, right: x + width },
-					hierarchy: ["body", "html"],
-				},
-				url: entry.state.url,
-			});
-			this.#emitSelectionState(updated);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const errState = this.#selectionCoordinator.reportError(scope, activeId, "inspect_node_failed", message);
-			this.#emitSelectionState(errState);
-		}
-	}
-
 	async cancelSelection(rawPaneId: unknown, rawReason?: unknown): Promise<ElementEditState> {
 		const id = paneId(rawPaneId);
 		const reason = typeof rawReason === "string" ? rawReason : undefined;
@@ -997,7 +1677,7 @@ export class WorkspaceHost {
 		const doc = client.document;
 		const agent = doc.agents.find(a => a.id === scope.agentId);
 		if (!agent) {
-			throw new Error(`Target agent '${scope.agentId}' not found in authoritative workspace`);
+			return;
 		}
 		if (agent.sessionId !== scope.sessionId) {
 			throw new Error(`Target agent '${scope.agentId}' session mismatch`);
@@ -1131,10 +1811,12 @@ export class WorkspaceHost {
 	}
 	#emitSelectionState(state: ElementEditState): void {
 		if (!this.#window.isDestroyed() && this.#window.webContents && !this.#window.webContents.isDestroyed()) {
-			this.#window.webContents.send("branchlight:selection-state", state);
-			if (state.paneId) {
-				this.#send({ type: "selection-state", paneId: state.paneId, state });
-			}
+			try {
+				this.#window.webContents.send("branchlight:selection-state", state);
+				if (state.paneId) {
+					this.#send({ type: "selection-state", paneId: state.paneId, state });
+				}
+			} catch {}
 		}
 	}
 
@@ -1218,22 +1900,6 @@ export class WorkspaceHost {
 			this.#refreshBrowserState(id);
 			if (isMainFrame !== false) void this.#persistBrowserNavigation(id, url).catch(() => {});
 		});
-		if (webContents.debugger && typeof webContents.debugger.on === "function") {
-			webContents.debugger.on("message", async (_event: unknown, method: string, params: unknown) => {
-				if (method === "Overlay.inspectNodeRequested") {
-					if (this.#activeSelectionPaneId !== id) return;
-					const scope = this.#boundScopes.get(id);
-					if (!scope) return;
-					const activeId = this.#selectionCoordinator.activeSelectionId;
-					if (!activeId) return;
-
-					const payload = params as { backendNodeId?: number };
-					if (typeof payload?.backendNodeId === "number") {
-						await this.#handleInspectNodeRequested(id, entry, scope, activeId, payload.backendNodeId);
-					}
-				}
-			});
-		}
 		webContents.on("page-title-updated", (_event: unknown, title: string) => {
 			const pageTitle = title.trim().slice(0, 160) || "Browser";
 			entry.state = { ...entry.state, title: pageTitle };
@@ -1315,8 +1981,11 @@ export class WorkspaceHost {
 	}
 
 	#send(event: WorkspaceEvent): void {
-		if (!this.#window.isDestroyed() && this.#window.webContents && !this.#window.webContents.isDestroyed())
-			this.#window.webContents.send("branchlight:workspace", event);
+		if (!this.#window.isDestroyed() && this.#window.webContents && !this.#window.webContents.isDestroyed()) {
+			try {
+				this.#window.webContents.send("branchlight:workspace", event);
+			} catch {}
+		}
 	}
 
 	#requireBrowser(id: string): BrowserEntry {

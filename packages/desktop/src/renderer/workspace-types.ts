@@ -90,3 +90,27 @@ export function getAgentSwatch(idOrName: string): string {
 	}
 	return SWATCH_PALETTE[hash % SWATCH_PALETTE.length];
 }
+
+export function isLocalUrl(urlString?: string): boolean {
+	if (!urlString) return false;
+	try {
+		const parsed = new URL(urlString);
+		const host = parsed.hostname.toLowerCase();
+		return (
+			host === "localhost" ||
+			host === "127.0.0.1" ||
+			host === "0.0.0.0" ||
+			host === "::1" ||
+			host === "[::1]" ||
+			host.endsWith(".localhost") ||
+			host.endsWith(".local") ||
+			host.startsWith("local.") ||
+			host.includes(".local.") ||
+			host.endsWith(".internal") ||
+			host.endsWith(".test") ||
+			host.endsWith(".example")
+		);
+	} catch {
+		return false;
+	}
+}

@@ -88,13 +88,67 @@
   let diffLoading = false;
   let diffError = "";
   let diffRequestToken = 0;
-  let inspectorPanel: HTMLElement | undefined;
+  let selectedProviderOverride = "";
+  let contextPopoverOpen = false;
 
-  $: sessions = bootstrap?.registry.sessions.filter(session => session.kind === kind) ?? [];
+  $: currentModelParts = current?.model ? (current.model.includes("/") ? current.model.split("/") : ["", current.model]) : ["", ""];
+  $: currentProviderFromModel = currentModelParts[0] || (availableModels.find(m => m.id === currentModelParts[1])?.provider ?? "");
+  $: activeProvider = selectedProviderOverride || currentProviderFromModel || modelProviders[0] || "";
+  $: modelsForActiveProvider = availableModels.filter(model => model.provider === activeProvider);
+  $: activeModelId = (selectedModelOption?.provider === activeProvider ? selectedModelOption.id : undefined) ?? currentModelParts[1] ?? (modelsForActiveProvider[0]?.id ?? "");
+
+  $: contextLimit = current?.contextWindow ?? selectedModelOption?.contextWindow ?? 200_000;
+  $: usedTokens = current?.contextTokens ?? 0;
+  $: contextRatio = Math.min(1, Math.max(0, usedTokens / (contextLimit || 1)));
+  $: contextPercent = Math.round(contextRatio * 100);
+  $: contextColorClass = contextRatio >= 0.85 ? "danger" : contextRatio >= 0.65 ? "warning" : "normal";
+
+  function handleProviderDropdownChange(newProvider: string): void {
+    selectedProviderOverride = newProvider;
+    const firstModel = availableModels.find(model => model.provider === newProvider);
+    if (firstModel) {
+      void changeModel(firstModel);
+    }
+  }
+
+  function handleModelDropdownChange(newModelId: string): void {
+    const target = availableModels.find(model => model.provider === activeProvider && model.id === newModelId)
+      ?? availableModels.find(model => model.id === newModelId);
+    if (target) {
+      void changeModel(target);
+    }
+  }
+
+  function formatProviderName(provider: string): string {
+    if (!provider) return "Default";
+    const map: Record<string, string> = {
+      anthropic: "Anthropic",
+      openai: "OpenAI",
+      google: "Google",
+      openrouter: "OpenRouter",
+      deepseek: "DeepSeek",
+      groq: "Groq",
+      ollama: "Ollama",
+      xai: "xAI",
+      mistral: "Mistral",
+      bedrock: "AWS Bedrock",
+      vertex: "Google Vertex",
+      azure: "Azure OpenAI",
+    };
+    return map[provider.toLowerCase()] ?? (provider.charAt(0).toUpperCase() + provider.slice(1));
+  }
+
+  function sessionDisplayName(record?: { title?: string | null; cwd?: string }, fallbackKind: SessionKind = kind): string {
+    if (!record) return fallbackKind === "work" ? "Untitled workspace" : "Untitled code workspace";
+    if (record.title && record.title.trim().length > 0) return record.title.trim();
+    const folderName = record.cwd ? record.cwd.split(/[\\/]/).filter(Boolean).pop() : undefined;
+    return folderName || (fallbackKind === "work" ? "Untitled workspace" : "Untitled code workspace");
+  }
+  $: sessions = bootstrap?.registry.sessions ?? [];
   $: hasSessions = sessions.length > 0;
   $: isRunning = current?.state === "running";
   $: canCompose = current !== undefined && current.state !== "starting" && current.state !== "stopping" && current.state !== "error";
-  $: timelineItems = projectTimeline(kind, current?.timeline ?? []);
+  $: timelineItems = projectTimeline(current?.record.kind ?? "work", current?.timeline ?? []);
   $: {
     const sessionId = current?.record.id;
     if (timelineItems !== timelineSource || sessionId !== timelineSessionSource) {
@@ -137,8 +191,9 @@
     void (async () => {
       try {
         bootstrap = await window.branchlight.bootstrap();
+        availableModels = bootstrap.models ?? [];
         authAccounts = await window.branchlight.getAuthStatus();
-        const initial = bootstrap.registry.activeByKind[kind] ?? bootstrap.registry.sessions.find(session => session.kind === kind)?.id;
+        const initial = bootstrap.registry.activeByKind.work ?? bootstrap.registry.activeByKind.code ?? bootstrap.registry.sessions[0]?.id;
         if (initial) await selectSession(initial);
       } catch (error) { showError(error); }
     })();
@@ -147,7 +202,6 @@
 
   async function selectSession(id: string): Promise<void> {
     const requestToken = ++sessionSelectionToken;
-    const requestedKind = kind;
     resetFileDiff();
     resetOpenRouterModelState();
     if (current?.record.id !== id) resetSubagentSelection();
@@ -156,17 +210,18 @@
     errorMessage = "";
     try {
       const snapshot = await window.branchlight.openSession(id);
-      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
+      if (requestToken !== sessionSelectionToken || activeId !== id) return;
       current = snapshot;
       availableCommands = snapshot.commands ?? [];
       commandError = "";
-      availableModels = [];
-      if (bootstrap) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, activeByKind: { ...bootstrap.registry.activeByKind, [requestedKind]: id } } };
-      await tick();
-      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
+      if (snapshot.models && snapshot.models.length > 0) availableModels = snapshot.models;
+      void loadModels(id);
+      void loadCommands(id);
+      if (bootstrap && current) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, activeByKind: { ...bootstrap.registry.activeByKind, [current.record.kind]: id } } };
+      if (requestToken !== sessionSelectionToken || activeId !== id) return;
       await scrollTimelineToEnd(true, id);
     } catch (error) {
-      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
+      if (requestToken !== sessionSelectionToken || activeId !== id) return;
       activeId = current?.record.id ?? "";
       showError(error);
     }
@@ -200,7 +255,7 @@
     diffLoading = true;
     diffError = "";
     await tick();
-    inspectorPanel?.focus();
+    composerInput?.focus();
     try {
       const result = await window.branchlight.loadFileDiff(sessionId, path);
       if (requestToken !== diffRequestToken || current?.record.id !== sessionId) return;
@@ -223,7 +278,7 @@
 
   function closeFileDiff(): void {
     resetFileDiff();
-    void tick().then(() => inspectorPanel?.focus());
+    void tick().then(() => composerInput?.focus());
   }
 
   async function openSelectedFile(): Promise<void> {
@@ -413,6 +468,7 @@
   async function changeModel(model: ModelOption): Promise<void> {
     if (!current) return;
     const sessionId = current.record.id;
+    selectedProviderOverride = model.provider;
     await saveSessionSetting(
       "model",
       () => window.branchlight.setModel(sessionId, model.provider, model.id),
@@ -1001,65 +1057,96 @@
 <div class="app-shell">
   <header class="topbar">
     <div class="brand"><BranchMark size={28} /><div><strong>OMP Chat</strong><span>Oh My Pi runtime</span></div></div>
-    <div class="mode-tabs" role="tablist" aria-label="Session type">
-      <button class:active={kind === "work"} role="tab" aria-selected={kind === "work"} aria-controls="session-rail" onclick={() => void selectKind("work")}><span class="tab-kicker">01</span>Work</button>
-      <button class:active={kind === "code"} role="tab" aria-selected={kind === "code"} aria-controls="session-rail" onclick={() => void selectKind("code")}><span class="tab-kicker">02</span>Code</button>
-    </div>
-    <div class="top-actions"><span class="connection"><span class="status-dot"></span>{extensionStatus || "Local runtime"}</span><button class="text-button settings-link" aria-label="Open settings" onclick={openSettings}>Settings</button><button bind:this={aboutButton} class="icon-button" title="About Branchlight" aria-label="About Branchlight" onclick={() => aboutOpen = true}><InfoCircle size={18} aria-hidden="true" /></button></div>
+    <div class="top-actions"><button class="text-button settings-link" aria-label="Open settings" onclick={openSettings}>Settings</button><button bind:this={aboutButton} class="icon-button" title="About Branchlight" aria-label="About Branchlight" onclick={() => aboutOpen = true}><InfoCircle size={18} aria-hidden="true" /></button></div>
   </header>
   {#if view === "workspace"}
 
-  <div class="workspace-grid" class:work-layout={kind === "work"}>
-    <aside id="session-rail" class="session-rail" aria-label="{kind === 'work' ? 'Workspaces' : 'Code workspaces'}">
-      <div class="rail-heading"><div><span class="eyebrow">{kind === "work" ? "Workspaces" : "Code workspaces"}</span><h1>{kind === "work" ? "Work" : "Code"}</h1></div><button class="small-action" aria-label="Create {kind} session" title="Create {kind} session" disabled={loading} onclick={() => void createSession()}>+</button></div>
-      <p class="rail-summary">{kind === "work" ? "Outcome-first sessions for research, documents, and files." : "High-density sessions for implementation, debugging, and review."}</p>
+  <div class="workspace-grid">
+    <aside id="session-rail" class="session-rail" aria-label="Workspaces">
+      <div class="rail-heading"><h1>Workspaces</h1><button class="small-action" aria-label="Create workspace" title="Create workspace" disabled={loading} onclick={() => void createSession()}>+</button></div>
+      <p class="rail-summary">Local sessions powered by the Oh My Pi runtime.</p>
       <div class="session-list" role="listbox" aria-label="Sessions">
         {#each sessions as session (session.id)}
           <button class="session-row" class:selected={activeId === session.id} role="option" aria-selected={activeId === session.id} onclick={() => void selectSession(session.id)}>
-            <span class="session-row-mark">{session.title ? session.title.slice(0, 1).toUpperCase() : kind === "work" ? "W" : "C"}</span>
-            <span class="session-row-copy"><strong>{session.title ?? (kind === "work" ? "Untitled workspace" : "Untitled code workspace")}</strong><span>{session.cwd}</span></span>
-            <span class="session-row-state">{activeId === session.id && current ? current.state : "stopped"}</span>
+            <span class="session-row-mark">{sessionDisplayName(session).slice(0, 1).toUpperCase()}</span>
+            <span class="session-row-copy"><strong>{sessionDisplayName(session)}</strong><span>{session.cwd}</span></span>
           </button>
         {:else}
-          <div class="rail-empty"><span class="empty-index">00</span><p>No {kind} sessions yet.</p><button class="text-button" onclick={() => void createSession()}>Choose a folder <span>→</span></button></div>
+          <div class="rail-empty"><span class="empty-index">00</span><p>No workspace sessions yet.</p><button class="text-button" onclick={() => void createSession()}>Choose a folder <span>→</span></button></div>
         {/each}
       </div>
-      <div class="rail-footer"><span>Sessions are local</span><span class="mono">v0.1</span></div>
     </aside>
     <main class="transcript-pane" aria-live="polite">
       {#if !current}
-        <section class="welcome-state"><div class="welcome-mark"><BranchMark size={64} /></div><span class="eyebrow">{kind === "work" ? "Outcome workspace" : "Operator workspace"}</span><h2>{kind === "work" ? "Make the next useful thing." : "Keep the whole technical record in view."}</h2><p>{kind === "work" ? "Choose a local folder to start a focused conversation with OMP. Outputs and collaborators surface here without the implementation noise." : "Start in a repository folder. Tool calls, diffs, commands, reasoning, and subagents stay paired in one reviewable timeline."}</p><button class="primary-button" onclick={() => void createSession()} disabled={loading}>Choose a {kind === "work" ? "workspace" : "code workspace"} <span>→</span></button><div class="prompt-suggestions"><span>{kind === "work" ? "Try asking" : "Start with"}</span><button onclick={() => draft = kind === "work" ? "Research this folder and summarize the useful files." : "Inspect this repository and identify the next implementation step."}>“{kind === "work" ? "Research this folder…" : "Inspect this repository…"}”</button></div></section>
+        <section class="welcome-state"><div class="welcome-mark"><BranchMark size={64} /></div><span class="eyebrow">Workspace</span><h2>Make the next useful thing.</h2><p>Choose a local repository or folder to start a conversation with OMP. Tool calls, diffs, commands, reasoning, and edits stay paired in one reviewable timeline.</p><button class="primary-button" onclick={() => void createSession()} disabled={loading}>Choose a workspace <span>→</span></button><div class="prompt-suggestions"><span>Start with</span><button onclick={() => draft = "Inspect this repository and identify the next implementation step."}>“Inspect this repository…”</button></div></section>
       {:else}
-        <div class="transcript-header"><div class="transcript-title"><span class="eyebrow">{kind === "work" ? "Workspace narrative" : "Technical record"}</span><div class="title-line">{#if renaming}<input class="rename-input" bind:value={renameValue} aria-label="Session name" onkeydown={(event) => event.key === "Enter" && void saveRename()} /><button class="inline-save" onclick={() => void saveRename()}>Save</button>{:else}<h2>{current.record.title ?? current.record.cwd.split(/[\\/]/).pop()}</h2><button class="rename-button" title="Rename session" aria-label="Rename session" onclick={() => { renameValue = current?.record.title ?? ""; renaming = true; }}>✎</button>{/if}</div><span class="path-label">{current.record.cwd}</span></div><div class="transcript-actions"><span class="state-pill state-{current.state}"><span></span>{current.state}</span>{#if current.state === "stopped" || current.state === "error"}<button class="secondary-button" onclick={() => void resumeSession()} disabled={loading}>Resume</button>{:else}<button class="danger-button" onclick={() => void stopSession()} disabled={loading}>{current.state === "running" ? "Stop" : "Stop session"}</button>{/if}</div></div>
+        <div class="transcript-header"><div class="transcript-title"><span class="eyebrow">Workspace narrative</span><div class="title-line">{#if renaming}<input class="rename-input" bind:value={renameValue} aria-label="Session name" onkeydown={(event) => event.key === "Enter" && void saveRename()} /><button class="inline-save" onclick={() => void saveRename()}>Save</button>{:else}<h2>{sessionDisplayName(current.record)}</h2><button class="rename-button" title="Rename session" aria-label="Rename session" onclick={() => { renameValue = current?.record.title || sessionDisplayName(current?.record); renaming = true; }}>✎</button>{/if}</div><span class="path-label">{current.record.cwd}</span></div></div>
         <div class="timeline-scroll" bind:this={timelineScroller} onscroll={handleTimelineScroll}>
-          {#if current.timeline.length === 0 && current.state === "ready"}<div class="session-empty"><span class="empty-index">01</span><h3>{kind === "work" ? "What outcome should we pursue?" : "What should we inspect or change?"}</h3><p>{kind === "work" ? "Ask for research, a summary, a document, or a set of files." : "Ask for an implementation plan, a debug pass, or a review of the current tree."}</p><div class="suggestion-grid"><button onclick={() => draft = kind === "work" ? "Find the important documents in this workspace and explain them." : "Review the current repository for risks and open issues."}>{kind === "work" ? "Find important documents" : "Review repository risks"}<span>→</span></button><button onclick={() => draft = kind === "work" ? "Create a concise brief from the relevant files." : "Trace the main path and propose a safe fix."}>{kind === "work" ? "Create a concise brief" : "Trace a main path"}<span>→</span></button></div></div>{/if}
+          {#if current.timeline.length === 0 && current.state === "ready"}<div class="session-empty"><span class="empty-index">01</span><h3>What outcome should we pursue?</h3><p>Ask for research, a summary, an implementation plan, or a review of the current tree.</p><div class="suggestion-grid"><button onclick={() => draft = "Find the important documents in this workspace and explain them."}>Find important documents<span>→</span></button><button onclick={() => draft = "Review the current repository for risks and open issues."}>Review repository risks<span>→</span></button></div></div>{/if}
           {#if hiddenTimelineCount > 0}<button class="secondary-button older-entries" onclick={() => void revealOlder()} disabled={loadingOlder}>Load 100 older entries <span>({hiddenTimelineCount} remaining)</span></button>{/if}
           {#each visibleTimeline as item (item.id)}
-            <TimelineEntry item={item} kind={kind} reasoningLoading={reasoningLoading} openReasoning={openReasoning} onReasoning={loadReasoning} onFile={openFileDiff} />
+            <TimelineEntry item={item} kind={current?.record.kind ?? "work"} reasoningLoading={reasoningLoading} openReasoning={openReasoning} onReasoning={loadReasoning} onFile={openFileDiff} />
           {/each}
           {#if current.state === "starting"}<div class="lifecycle-card"><span class="spinner"></span><div><strong>Starting local runtime</strong><span>Loading OMP state and transcript…</span></div></div>{/if}
-          {#if current.state === "running"}<div class="lifecycle-card live"><span class="pulse"></span><div><strong>Turn in progress</strong><span>{kind === "work" ? "Building the outcome…" : "Streaming technical work…"}</span></div></div>{/if}
+          {#if current.state === "running"}<div class="lifecycle-card live"><span class="pulse"></span><div><strong>Turn in progress</strong><span>Streaming technical work…</span></div></div>{/if}
           {#if current.state === "error"}<div class="error-card"><strong>Runtime stopped unexpectedly</strong><span>{current.warning ?? "Resume to reconnect and recover the saved transcript."}</span><button class="secondary-button" onclick={() => void resumeSession()}>Reconnect</button></div>{/if}
         </div>
       {/if}
 
       {#if current}
         <section class="composer-wrap">
-        {#if extensionWidget}<pre class="extension-widget" role="status">{extensionWidget}</pre>{/if}
-      {#if commandMenuVisible}
-        <CommandMenu
-          commands={commandMatches}
-          error={commandError}
-          loading={commandsLoading}
-          selectedIndex={selectedCommandIndex}
-          onSelect={applyCommand}
-          onHighlight={(index) => selectedCommandIndex = index}
-        />
-      {/if}
-          <div class="composer-meta">
-            <span>{commandError && commandQuery !== null ? commandError : isRunning ? "Steer the current turn or queue the next one" : "Enter sends · Shift+Enter adds a line break · / opens commands"}</span>
-            <span class="mono">{current.queuedMessageCount ?? 0} queued</span>
+          {#if extensionWidget}<pre class="extension-widget" role="status">{extensionWidget}</pre>{/if}
+          {#if commandMenuVisible}
+            <CommandMenu
+              commands={commandMatches}
+              error={commandError}
+              loading={commandsLoading}
+              selectedIndex={selectedCommandIndex}
+              onSelect={applyCommand}
+              onHighlight={(index) => selectedCommandIndex = index}
+            />
+          {/if}
+
+          <!-- Model & Provider Selection Dropdowns above chatbox -->
+          <div class="composer-top-bar">
+            <div class="model-dropdown-group">
+              <label class="model-select-item">
+                <span class="select-title">Provider</span>
+                <select
+                  aria-label="Model provider"
+                  value={activeProvider}
+                  disabled={settingsBusy.has("model") || !canCompose || modelProviders.length === 0}
+                  onchange={(e) => handleProviderDropdownChange(e.currentTarget.value)}
+                >
+                  {#each modelProviders as provider}
+                    <option value={provider}>{formatProviderName(provider)}</option>
+                  {/each}
+                </select>
+              </label>
+
+              <label class="model-select-item">
+                <span class="select-title">Model</span>
+                <select
+                  aria-label="Select AI model"
+                  value={activeModelId}
+                  disabled={settingsBusy.has("model") || !canCompose || modelsForActiveProvider.length === 0}
+                  onchange={(e) => handleModelDropdownChange(e.currentTarget.value)}
+                >
+                  {#each modelsForActiveProvider as model}
+                    <option value={model.id}>{model.name || model.id}</option>
+                  {/each}
+                </select>
+              </label>
+            </div>
+
+            <div class="composer-hint-meta">
+              <span>{commandError && commandQuery !== null ? commandError : isRunning ? "Steer the current turn or queue the next one" : "Enter sends · Shift+Enter adds a break · / commands"}</span>
+              {#if current.queuedMessageCount > 0}
+                <span class="mono queue-pill">{current.queuedMessageCount} queued</span>
+              {/if}
+            </div>
           </div>
+
           <div class="composer">
             <textarea
               bind:this={composerInput}
@@ -1077,19 +1164,16 @@
               onkeydown={handleComposerKeydown}
             ></textarea>
             <div class="composer-actions">
-              {#if isRunning}
-                <button class="secondary-button" onclick={() => void queueNext()} disabled={!draft.trim()}>Queue next</button>
-                <button class="danger-button" onclick={() => void abortTurn()}>Abort</button>
-                <button class="primary-button" onclick={() => void sendPrimary()} disabled={!draft.trim()}>Steer <span>↗</span></button>
-              {:else}
-                <label class="select-control">{current.thinkingLevel ?? "inherit"}
+              <div class="composer-tools">
+                <label class="thinking-select">
+                  <span class="thinking-label">Thinking</span>
                   <select
                     aria-label="Thinking level"
                     value={current.thinkingLevel ?? "inherit"}
                     disabled={settingsBusy.has("thinking")}
                     onchange={(event) => void changeSetting("thinking", (event.currentTarget as HTMLSelectElement).value as ThinkingLevel)}
                   >
-                    <option value="inherit">session default</option>
+                    <option value="inherit">default</option>
                     <option value="off">off</option>
                     <option value="minimal">minimal</option>
                     <option value="low">low</option>
@@ -1099,59 +1183,135 @@
                     <option value="max">max</option>
                   </select>
                 </label>
-                <button class="primary-button" onclick={() => void sendPrimary()} disabled={!draft.trim()}>Send <span>↗</span></button>
+
+                <!-- Donut Graph Context Usage Meter -->
+                <div class="context-meter-anchor">
+                  <button
+                    type="button"
+                    class="context-donut-btn"
+                    class:warning={contextColorClass === "warning"}
+                    class:danger={contextColorClass === "danger"}
+                    class:is-active={contextPopoverOpen}
+                    title={`Context: ${contextPercent}% (${usedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens)`}
+                    aria-label={`Context window: ${contextPercent} percent used. Click for details.`}
+                    aria-expanded={contextPopoverOpen}
+                    onclick={() => contextPopoverOpen = !contextPopoverOpen}
+                  >
+                    <svg class="donut-svg" width="20" height="20" viewBox="0 0 24 24">
+                      <circle class="donut-bg" cx="12" cy="12" r="8.5" fill="none" stroke-width="3" />
+                      <circle
+                        class="donut-fill"
+                        cx="12"
+                        cy="12"
+                        r="8.5"
+                        fill="none"
+                        stroke-width="3"
+                        stroke-dasharray="53.4"
+                        stroke-dashoffset={53.4 * (1 - contextRatio)}
+                        transform="rotate(-90 12 12)"
+                      />
+                    </svg>
+                    <span class="donut-percent-text">{contextPercent}%</span>
+                  </button>
+
+                  {#if contextPopoverOpen}
+                    <div class="context-popover" role="dialog" aria-label="Context window information">
+                      <header class="context-popover-header">
+                        <strong>Context Window</strong>
+                        <button
+                          type="button"
+                          class="context-popover-close"
+                          aria-label="Close context details"
+                          onclick={() => contextPopoverOpen = false}
+                        >×</button>
+                      </header>
+
+                      <div class="context-popover-body">
+                        <div class="context-metric-row">
+                          <span class="metric-label">Model limit</span>
+                          <strong class="metric-value">{contextLimit.toLocaleString()} tokens</strong>
+                        </div>
+                        <div class="context-metric-row">
+                          <span class="metric-label">Used tokens</span>
+                          <strong class="metric-value" class:text-warning={contextColorClass === "warning"} class:text-danger={contextColorClass === "danger"}>
+                            {usedTokens.toLocaleString()} ({contextPercent}%)
+                          </strong>
+                        </div>
+                        <div class="context-metric-row">
+                          <span class="metric-label">Remaining</span>
+                          <span class="metric-value">{Math.max(0, contextLimit - usedTokens).toLocaleString()} tokens</span>
+                        </div>
+
+                        <div class="context-progress-track">
+                          <div
+                            class="context-progress-bar"
+                            class:warning={contextColorClass === "warning"}
+                            class:danger={contextColorClass === "danger"}
+                            style={`width: ${Math.min(100, Math.max(2, contextPercent))}%`}
+                          ></div>
+                        </div>
+
+                        {#if current.tokensPerSecond}
+                          <div class="context-metric-row">
+                            <span class="metric-label">Throughput</span>
+                            <span class="metric-value">{Math.round(current.tokensPerSecond)} tok/s</span>
+                          </div>
+                        {/if}
+
+                        <div class="context-model-name">
+                          <span>Active Model:</span>
+                          <code>{selectedModelOption?.name || current.model || "Provider default"}</code>
+                        </div>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+
+              {#if isRunning}
+                <button
+                  type="button"
+                  class="action-button stop-turn-btn"
+                  title="Stop generation"
+                  aria-label="Stop generation"
+                  onclick={() => void abortTurn()}
+                >
+                  <span class="stop-glyph" aria-hidden="true">■</span>
+                </button>
+              {:else}
+                <button
+                  type="button"
+                  class="action-button send-turn-btn"
+                  title="Send message (Enter)"
+                  aria-label="Send message"
+                  disabled={!draft.trim()}
+                  onclick={() => void sendPrimary()}
+                >
+                  <span class="send-glyph" aria-hidden="true">↑</span>
+                </button>
               {/if}
             </div>
           </div>
         </section>
       {/if}
     </main>
-
-    <aside
-      bind:this={inspectorPanel}
-      class="inspector"
-      aria-label={selectedDiffPath ? `Git diff for ${selectedDiffPath}` : "Session inspector"}
-      tabindex="-1"
-    >
-      {#if current}
-        {#if selectedDiffPath}
-          <FileDiffInspector
-            path={selectedDiffPath}
-            diff={selectedDiff}
-            loading={diffLoading}
-            error={diffError}
-            onClose={closeFileDiff}
-            onOpenFile={openSelectedFile}
-          />
-        {:else}
-          <section class="inspector-section">
-            <div class="section-heading"><span class="eyebrow">Session</span><button class="icon-button" title="Toggle fast mode" aria-label="Toggle fast mode" class:active={current.fastMode} onclick={() => void changeSetting("fast", !current?.fastMode)}>速</button></div>
-            <div class="stats-grid"><div><span>Model</span><strong>{current.model?.split("/").pop() ?? "Provider default"}</strong></div><div><span>Thinking</span><strong>{current.thinkingLevel ?? "auto"}</strong></div><div><span>Context</span><strong>{current.contextTokens ? `${Math.round((current.contextTokens / (current.contextWindow ?? current.contextTokens)) * 100)}%` : "—"}</strong></div><div><span>Throughput</span><strong>{current.tokensPerSecond ? `${Math.round(current.tokensPerSecond)} tok/s` : "—"}</strong></div></div>
-          </section>
-          <section class="inspector-section">
-            <div class="section-heading"><span class="eyebrow">Changes</span><span class="count-badge">{outputFiles.length}</span></div>
-            {#if outputFiles.length === 0}
-              <p class="muted-copy">Successful file edits and writes will appear here with an on-demand Git diff.</p>
-            {:else}
-              <div class="output-list">
-                {#each outputFiles as file (file.path)}
-                  <button aria-label={`View git diff for ${file.path}`} onclick={() => void openFileDiff(file.path)}><span class="file-mark">↳</span><code>{file.path}</code><span>{file.operation === "edit" ? "Edited" : "Wrote"}</span></button>
-                {/each}
-              </div>
-            {/if}
-          </section>
-          <section class="inspector-section collaborators">
-            <div class="section-heading"><span class="eyebrow">Collaborators</span><span class="count-badge">{current.subagents.length}</span></div>
-            {#if current.subagents.length === 0}<p class="muted-copy">No subagents in this session.</p>{:else}<div class="agent-list">{#each current.subagents as agent (agent.id)}<button class:selected={selectedSubagent === agent.id} class="agent-card" onclick={() => void inspectSubagent(agent)}><span class="agent-icon">{agent.status === "running" ? "◌" : "✓"}</span><span><strong>{agent.agent}</strong><small>{agent.progress?.currentTool ?? agent.progress?.lastIntent ?? agent.status}</small></span><span class="agent-status">{agent.progress?.tokens ? `${agent.progress.tokens} tok` : agent.status}</span></button>{/each}</div>{/if}
-          </section>
-          {#if selectedAgent}<section class="inspector-section agent-detail"><div class="section-heading"><span class="eyebrow">Subagent inspector</span><span class="mono">{selectedAgent.agent}</span></div><p>{selectedAgent.task ?? selectedAgent.assignment ?? "No assignment text"}</p>{#if selectedAgent.progress}<div class="agent-metrics"><span>{selectedAgent.progress.resolvedModel ?? "fallback"}</span><span>{selectedAgent.progress.cost !== undefined ? `$${selectedAgent.progress.cost.toFixed(3)}` : "—"}</span><span>{selectedAgent.progress.durationMs ? `${Math.round(selectedAgent.progress.durationMs / 1000)}s` : "—"}</span></div>{/if}<pre class="subagent-transcript">{subagentLoading ? "Loading transcript…" : subagentTranscript || "No transcript bytes yet."}</pre></section>{/if}
-          <section class="inspector-section technical-summary"><details><summary>Technical details</summary><dl><dt>Session ID</dt><dd>{current.record.ompSessionId || "pending"}</dd><dt>Session file</dt><dd>{current.record.sessionFile || "pending"}</dd><dt>Kind</dt><dd>{current.record.kind}</dd></dl></details></section>
-        {/if}
-      {:else}
-        <div class="inspector-empty"><span class="eyebrow">Inspector</span><p>Select a session to see state, changes, collaborators, and technical details.</p></div>
-      {/if}
-    </aside>
   </div>
+  {/if}
+
+  {#if selectedDiffPath}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeFileDiff(); }}>
+      <div class="file-diff-dialog" role="dialog" aria-label={`Git diff for ${selectedDiffPath}`}>
+        <FileDiffInspector
+          path={selectedDiffPath}
+          diff={selectedDiff}
+          loading={diffLoading}
+          error={diffError}
+          onClose={closeFileDiff}
+          onOpenFile={openSelectedFile}
+        />
+      </div>
+    </div>
   {/if}
   {#if view === "settings"}
     <main class="settings-page" aria-labelledby="settings-title">
@@ -1176,9 +1336,9 @@
         {#if !current}
           <div class="settings-empty"><strong>No active session</strong><p>Choose a workspace before configuring its model and reasoning behavior.</p></div>
         {:else if current.state === "stopped" || current.state === "error"}
-          <div class="settings-empty"><strong>{current.record.title ?? current.record.cwd}</strong><p>Resume this session before changing runtime settings.</p><button class="secondary-button" disabled={loading} onclick={() => void resumeSettingsSession()}>{loading ? "Resuming…" : "Resume session"}</button></div>
+          <div class="settings-empty"><strong>{sessionDisplayName(current.record)}</strong><p>Resume this session before changing runtime settings.</p><button class="secondary-button" disabled={loading} onclick={() => void resumeSettingsSession()}>{loading ? "Resuming…" : "Resume session"}</button></div>
         {:else}
-          <p class="settings-context">{current.record.title ?? current.record.cwd}<span>{current.record.cwd}</span></p>
+          <p class="settings-context">{sessionDisplayName(current.record)}<span>{current.record.cwd}</span></p>
           <div class="model-picker">
             <div class="model-picker-head">
               <div>

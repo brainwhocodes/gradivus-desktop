@@ -14,6 +14,16 @@ import { safeExternalUrl } from "./guards";
 import { shutdownDesktopServices } from "./shutdown";
 import { WorkspaceHost } from "./workspace-host";
 
+process.stdout?.on?.("error", (err: unknown) => {
+	if ((err as { code?: string })?.code === "EIO") return;
+});
+process.stderr?.on?.("error", (err: unknown) => {
+	if ((err as { code?: string })?.code === "EIO") return;
+});
+process.on("uncaughtException", (err: unknown) => {
+	if ((err as { code?: string })?.code === "EIO") return;
+	logger.error("Uncaught exception in main process", { error: err instanceof Error ? err.message : String(err) });
+});
 const DEV_SERVER =
 	typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "string" ? new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL) : undefined;
 const CONTENT_SECURITY_POLICY =
@@ -177,10 +187,12 @@ if (!gotLock) {
 				if (reconnecting || quitting) return;
 				reconnecting = true;
 				if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-					mainWindow.webContents.send("branchlight:workspace", {
-						type: "connection-state",
-						state: "reconnecting",
-					});
+					try {
+						mainWindow.webContents.send("branchlight:workspace", {
+							type: "connection-state",
+							state: "reconnecting",
+						});
+					} catch {}
 				}
 
 				let attempts = 0;
@@ -201,10 +213,12 @@ if (!gotLock) {
 						runtimeClient = nextClient;
 						await bindRuntimeClient(nextClient);
 						if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-							mainWindow.webContents.send("branchlight:workspace", {
-								type: "connection-state",
-								state: "connected",
-							});
+							try {
+								mainWindow.webContents.send("branchlight:workspace", {
+									type: "connection-state",
+									state: "connected",
+								});
+							} catch {}
 						}
 						reconnecting = false;
 						return;
@@ -231,7 +245,9 @@ if (!gotLock) {
 						host?.setWorkspaceAuthority(client.principal, d);
 						workspace?.syncWithDocument(d);
 					}
-					mainWindow.webContents.send("branchlight:workspace-document", d);
+					try {
+						mainWindow.webContents.send("branchlight:workspace-document", d);
+					} catch {}
 				});
 
 				client.onConnectionState(state => {
@@ -249,11 +265,13 @@ if (!gotLock) {
 			if (host.bootstrap().warning) {
 				mainWindow.webContents.once("did-finish-load", () => {
 					if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-						mainWindow.webContents.send("branchlight:event", {
-							sessionId: "",
-							type: "warning",
-							message: host?.bootstrap().warning,
-						});
+						try {
+							mainWindow.webContents.send("branchlight:event", {
+								sessionId: "",
+								type: "warning",
+								message: host?.bootstrap().warning,
+							});
+						} catch {}
 					}
 				});
 			}

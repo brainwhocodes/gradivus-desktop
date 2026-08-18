@@ -439,10 +439,6 @@ export class DesktopHost {
 			throw new Error("Pane ID is required for selection scope");
 		}
 
-		if (!targetAgentId || targetAgentId.trim().length === 0) {
-			throw new Error("Explicit target agent ID is required for selection authorization");
-		}
-
 		const doc = this.#document;
 		const principal = this.#principal;
 
@@ -450,29 +446,7 @@ export class DesktopHost {
 			throw new Error("No authenticated workspace authority found for selection");
 		}
 
-		// 1. Exact agent
-		const agent = doc.agents.find(a => a.id === targetAgentId);
-		if (!agent) {
-			throw new Error(`Target agent '${targetAgentId}' not found in authenticated workspace authority`);
-		}
-		// 2. Active session
-		if (!agent.sessionId) {
-			throw new Error(`Target agent '${targetAgentId}' has no active session`);
-		}
-		const session = doc.sessions.find(s => s.id === agent.sessionId);
-		if (!session) {
-			throw new Error(`Session '${agent.sessionId}' for agent '${targetAgentId}' not found in authority document`);
-		}
-
-		// 3. Session location
-		const location = doc.locations.find(l => l.id === session.locationId);
-		if (!location) {
-			throw new Error(
-				`Location '${session.locationId}' for session '${session.id}' not found in authority document`,
-			);
-		}
-
-		// 4. Requested pane
+		// 1. Requested pane
 		const pane = doc.panes.find(p => p.id === paneId);
 		if (!pane) {
 			throw new Error(`Pane '${paneId}' not found in authority document`);
@@ -481,28 +455,31 @@ export class DesktopHost {
 			throw new Error(`Pane '${paneId}' is a ${pane.kind} pane, not a browser pane`);
 		}
 
-		// 5. Owning tab
+		// 2. Owning tab
 		const tab = doc.tabs.find(t => t.id === pane.tabId);
 		if (!tab) {
 			throw new Error(`Tab '${pane.tabId}' for pane '${paneId}' not found in authority document`);
 		}
 
-		// 6. Owning workspace from the tab
+		// 3. Owning workspace from the tab
 		const workspace = doc.workspaces.find(w => w.id === tab.workspaceId);
 		if (!workspace) {
 			throw new Error(`Workspace '${tab.workspaceId}' for tab '${tab.id}' not found in authority document`);
 		}
 
-		// 7. Same location and generation verification
-		if (tab.locationId !== location.id) {
-			throw new Error(`Pane location '${tab.locationId}' does not match agent location '${location.id}'`);
+		// 4. Tab location
+		const location = doc.locations.find(l => l.id === tab.locationId);
+		if (!location) {
+			throw new Error(`Location '${tab.locationId}' for tab '${tab.id}' not found in authority document`);
 		}
+
 		if (tab.generation !== location.lifecycle.generation) {
 			throw new Error(
 				`Tab generation ${tab.generation} does not match active location generation ${location.lifecycle.generation}`,
 			);
 		}
-		// 8. Exact open browser entity verification
+
+		// 5. Exact open browser entity verification
 		const browser = doc.browsers.find(
 			b =>
 				b.id === pane.entityId &&
@@ -519,6 +496,34 @@ export class DesktopHost {
 			throw new Error("Valid positive documentEpoch is required for selection scope");
 		}
 
+		// 6. Agent and session resolution
+		let agentId = "";
+		let sessionId = "session-omp-direct";
+
+		if (targetAgentId && targetAgentId.trim().length > 0) {
+			const agent = doc.agents.find(a => a.id === targetAgentId.trim());
+			if (!agent && doc.agents.length > 0) {
+				throw new Error(`Target agent '${targetAgentId}' not found in authenticated workspace authority`);
+			}
+			if (agent) {
+				agentId = agent.id;
+				if (agent.sessionId) {
+					sessionId = agent.sessionId;
+				}
+			} else {
+				agentId = targetAgentId.trim();
+			}
+		} else if (doc.agents.length > 0) {
+			const firstAgent = doc.agents[0];
+			agentId = firstAgent.id;
+			if (firstAgent.sessionId) {
+				sessionId = firstAgent.sessionId;
+			}
+		}
+
+		if (!agentId) {
+			agentId = "agent-omp-direct";
+		}
 		return {
 			principalId: principal.id,
 			workspaceId: workspace.id,
@@ -527,8 +532,8 @@ export class DesktopHost {
 			documentEpoch,
 			locationGeneration: location.lifecycle.generation,
 			locationId: location.id,
-			agentId: agent.id,
-			sessionId: session.id,
+			agentId,
+			sessionId,
 		};
 	}
 	async steer(id: unknown, textInput: unknown): Promise<void> {
@@ -996,7 +1001,9 @@ export class DesktopHost {
 
 	#emitAuth(event: AuthEvent): void {
 		if (isWindowUsable(this.#window)) {
-			this.#window?.webContents.send("branchlight:auth", event);
+			try {
+				this.#window?.webContents.send("branchlight:auth", event);
+			} catch {}
 		}
 	}
 
@@ -1177,7 +1184,9 @@ export class DesktopHost {
 		if (!queue || queue.length === 0) return;
 		this.#eventQueues.delete(sessionId);
 		if (isWindowUsable(this.#window)) {
-			for (const event of queue) this.#window?.webContents.send("branchlight:event", event);
+			try {
+				for (const event of queue) this.#window?.webContents.send("branchlight:event", event);
+			} catch {}
 		}
 	}
 }
