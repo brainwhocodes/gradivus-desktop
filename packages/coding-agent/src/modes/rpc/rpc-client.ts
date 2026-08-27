@@ -709,6 +709,22 @@ export class RpcClient {
 	}
 
 	/**
+	 * Enable or disable plan mode for the session.
+	 */
+	async setPlanMode(
+		enabled: boolean,
+		options?: { planFilePath?: string; workflow?: "parallel" | "iterative" },
+	): Promise<{ planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" } }> {
+		const response = await this.#send({
+			type: "set_plan_mode",
+			enabled,
+			planFilePath: options?.planFilePath,
+			workflow: options?.workflow,
+		});
+		return this.#getData(response);
+	}
+
+	/**
 	 * Configure subagent frames emitted by the RPC server. Servers default to "off".
 	 * "progress" emits lifecycle/progress frames; "events" additionally emits raw subagent session events.
 	 */

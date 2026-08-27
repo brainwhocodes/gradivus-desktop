@@ -11,4 +11,4 @@ playwright-report/
 blob-report/
 
 # Local RPC fixture state
-.branchlight-fixture.jsonl
+.gradivus-fixture.jsonl

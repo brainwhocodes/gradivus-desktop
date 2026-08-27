@@ -1270,15 +1270,6 @@ export class WorkerCore {
 	}
 
 	async #run(msg: Extract<WorkerInbound, { type: "run" }>): Promise<void> {
-		if (this.#active) {
-			this.#transport.send({
-				type: "result",
-				id: msg.id,
-				ok: false,
-				error: errorPayload(new ToolError("Tab worker is busy")),
-			});
-			return;
-		}
 		const timeoutSignal = AbortSignal.timeout(msg.timeoutMs);
 		const ac = new AbortController();
 		const runAc = new AbortController();

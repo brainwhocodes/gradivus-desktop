@@ -161,6 +161,42 @@ are JSON-encoded into `Command.payload_json`.
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+- `{ id?, type: "get_agent_hub" }`
+- `{ id?, type: "get_agent_hub_messages", agentId: string, fromByte?: number }`
+- `{ id?, type: "agent_hub_message", agentId: string, message: string }`
+- `{ id?, type: "agent_hub_kill", agentId: string }`
+- `{ id?, type: "agent_hub_revive", agentId: string }`
+
+Agent Hub commands operate only on the selected host session's coding-agent
+process; there is no cross-chat or global hub. `get_agent_hub` hydrates retained
+subagents before returning the full snapshot in `{ agents: [...] }`. It excludes
+`Main`, includes ordinary subagents and read-only `advisor` rows, and each row
+carries:
+
+- `id`, `displayName`, `kind`, and `parentId` when lineage is known;
+- lifecycle status, current activity/task when present, and creation/last-activity timestamps;
+- transcript availability and a `readOnly` flag;
+- persisted identity/model information and token, context, or cost metrics when
+  available; and
+- bounded active progress merged by agent ID when a turn is running.
+
+The server may emit `agent_hub_update` pushes with this same full-snapshot
+shape whenever the retained roster or active progress changes. Hosts should
+replace their hub projection from the update rather than assuming that a push
+contains only the changed row.
+
+`get_agent_hub_messages` resolves the transcript through the server's
+`AgentRegistry` by `agentId` and supports incremental `fromByte` reads. This
+command never accepts a renderer-provided session-file path. `agent_hub_message`
+rejects empty text, unknown IDs, advisors, and aborted targets. A parked target
+is revived through `AgentLifecycleManager.ensureLive()` before the message is
+prompted with `streamingBehavior: "steer"`.
+
+Desktop hosts must obtain explicit UI confirmation before issuing
+`agent_hub_kill`. The command aborts a running target and releases it with a
+`{ tombstone: true }` record, retaining its aborted row as history. Advisors
+and invalid lifecycle transitions are rejected. `agent_hub_revive` accepts only
+parked, non-advisor agents and uses the selected process's lifecycle manager.
 
 ### Settings
 

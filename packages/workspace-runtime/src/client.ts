@@ -61,6 +61,7 @@ export class WorkspaceClient {
 	#closing = false;
 	#document?: WorkspaceDocumentV1;
 	#authenticatedPrincipal?: WorkspacePrincipalV1;
+	#runtimeVersion?: number;
 	readonly #terminalOutputListeners = new Map<string, Set<(frame: TerminalOutputFrame) => void>>();
 	#requestIdCounter = 0;
 	constructor(options: WorkspaceClientOptions) {
@@ -74,6 +75,9 @@ export class WorkspaceClient {
 
 	get isConnected(): boolean {
 		return this.#isConnected;
+	}
+	get runtimeVersion(): number | undefined {
+		return this.#runtimeVersion;
 	}
 	get document(): WorkspaceDocumentV1 | undefined {
 		return this.#document;
@@ -128,6 +132,10 @@ export class WorkspaceClient {
 						this.#isConnected = true;
 						this.#closing = false;
 						clearTimeout(timer);
+						this.#runtimeVersion =
+							typeof msg.runtimeVersion === "number" && Number.isSafeInteger(msg.runtimeVersion)
+								? msg.runtimeVersion
+								: undefined;
 						const doc = parseWorkspaceDocumentV1(msg.document);
 						this.#document = doc;
 						if (msg.principal && typeof msg.principal === "object") {

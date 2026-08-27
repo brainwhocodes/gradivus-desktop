@@ -56,7 +56,7 @@ describe("Concurrent terminal and browser startup with revision retries", () => 
 	let workspaceHost: WorkspaceHost;
 
 	beforeEach(async () => {
-		const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "branchlight-concurrent-test-"));
+		const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "gradivus-concurrent-test-"));
 		testDir = await fs.realpath(rawDir);
 		server = new WorkspaceServer({ runtimeRoot: testDir });
 		await server.start();

@@ -21,6 +21,7 @@ import {
 import { ToolAbortError, ToolError, throwIfAborted } from "../../tool-errors";
 import { type AriaSnapshotOptions, assertSelectorString, buildAriaSnapshotScript } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
+import { assertNoBrowserTabRecursion } from "../ownership";
 import { extractReadableFromHtml, type ReadableFormat } from "../readable";
 import { cloneSafe, RunOutput } from "../run-output";
 import type { Observation, ReadyInfo, RunResultOk, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
@@ -261,6 +262,7 @@ export interface RunCmuxCodeOptions {
 	signal?: AbortSignal;
 	session: ToolSession;
 	snapshot: SessionSnapshot;
+	activeTabName?: string;
 }
 
 interface ActiveCmuxRun {
@@ -1473,6 +1475,7 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 			},
 			callTool: (name, args) => {
 				throwIfAborted(signal);
+				if (opts.activeTabName) assertNoBrowserTabRecursion(opts.activeTabName, name, args, opts.session);
 				return callSessionTool(name, args, { session: opts.session, signal });
 			},
 		};

@@ -7,6 +7,7 @@ export * from "./fs";
 export * from "./input";
 export * from "./messages";
 export * from "./mismatch";
+export * from "./mutation-coordinator";
 export * from "./normalize";
 export * from "./parser";
 export * from "./patcher";

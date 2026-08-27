@@ -1,0 +1,782 @@
+.composer-drop-overlay {
+	position: absolute;
+	inset: 8px clamp(20px, 3vw, 38px) 14px;
+	z-index: var(--z-overlay);
+	display: grid;
+	place-items: center;
+	pointer-events: none;
+	border: 1px dashed var(--accent-boundary);
+	border-radius: var(--radius-large);
+	background: color-mix(in srgb, var(--selection-surface) 86%, transparent);
+	color: var(--foreground-strong);
+	font-size: 14px;
+	font-weight: 700;
+}
+
+.composer-top-bar {
+	grid-area: top;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2);
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	padding: var(--space-1) var(--space-2) 0;
+}
+
+
+.plan-mode-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	background: rgba(139, 92, 246, 0.15);
+	border: 1px solid rgba(139, 92, 246, 0.4);
+	color: #a78bfa;
+	font-family: var(--font-mono);
+	font-size: 14px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+
+	.plan-mode-icon {
+		font-size: 14px;
+	}
+
+	.plan-mode-exit {
+		margin-left: 2px;
+		padding: 1px 5px;
+		border: 0;
+		border-radius: 4px;
+		background: rgba(139, 92, 246, 0.25);
+		color: #c4b5fd;
+		font-family: var(--font-sans);
+		font-size: 14px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background-color 140ms ease;
+
+		&:hover {
+			background: rgba(139, 92, 246, 0.45);
+			color: #ffffff;
+		}
+	}
+}
+
+
+.model-select-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	max-width: 100%;
+	color: var(--foreground);
+	font-size: 12px;
+
+	.select-title {
+		color: var(--foreground-muted);
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		flex-shrink: 0;
+	}
+
+	.custom-dropdown-trigger {
+		min-height: 24px;
+		height: 24px;
+		padding: 0 6px;
+		font-size: 12px;
+		font-weight: 600;
+		border-radius: var(--radius-small);
+	}
+}
+
+.runtime-picker {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.runtime-picker-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+	width: auto;
+	height: var(--control-height);
+	min-height: var(--control-height);
+	max-width: 100%;
+	padding: 0 var(--space-3);
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	background: var(--shell);
+	color: var(--foreground);
+	font-family: var(--font-sans);
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1;
+	cursor: pointer;
+	transition:
+		border-color 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard);
+
+	&:hover {
+		border-color: var(--accent-boundary);
+		background: var(--shell-raised);
+	}
+
+	&:focus-visible {
+		outline: 2px solid var(--focus-inner);
+		outline-offset: 2px;
+		box-shadow: 0 0 0 4px var(--focus-outer);
+	}
+}
+
+.runtime-picker-kicker {
+	flex: 0 0 auto;
+	color: var(--foreground-muted);
+	font-family: var(--font-mono);
+	font-size: 14px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+}
+
+.runtime-picker-summary {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.runtime-picker-summary > span:not(.runtime-picker-divider) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.runtime-picker-divider {
+	color: var(--foreground-disabled);
+	font-weight: 400;
+}
+
+.runtime-picker-chevron {
+	display: inline-flex;
+	flex: 0 0 auto;
+	align-self: center;
+	align-items: center;
+	justify-content: center;
+	height: 1em;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1;
+	transform-origin: center;
+	transition: transform 140ms var(--ease-standard);
+}
+
+.runtime-picker.open .runtime-picker-chevron {
+	transform: rotate(180deg);
+}
+
+.runtime-picker-panel {
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 8px);
+	z-index: var(--z-overlay);
+	display: grid;
+	gap: 9px;
+	width: min(360px, calc(100vw - 24px));
+	padding: 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	background: var(--shell-raised);
+	color: var(--foreground);
+	box-shadow: 0 6px 14px var(--shadow-color);
+}
+
+.runtime-picker-panel-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	color: var(--foreground-strong);
+	font-family: var(--font-mono);
+	font-size: 14px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+}
+
+.runtime-picker-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--foreground-muted);
+	font-size: 16px;
+	line-height: 1;
+	cursor: pointer;
+
+	&:hover,
+	&:focus-visible {
+		background: var(--selection-surface);
+		color: var(--foreground-strong);
+	}
+
+	&:focus-visible {
+		outline: 2px solid var(--focus-inner);
+		outline-offset: 1px;
+	}
+}
+
+.runtime-picker-controls {
+	display: grid;
+	gap: 6px;
+	min-width: 0;
+}
+
+.runtime-picker-controls .model-select-item,
+.runtime-picker-controls .thinking-select {
+	justify-content: space-between;
+	width: 100%;
+}
+
+.runtime-picker-controls .model-select-item .custom-dropdown-trigger,
+.runtime-picker-controls .thinking-select .custom-dropdown-trigger {
+	max-width: 245px;
+}
+
+.composer {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-areas:
+		"top top"
+		"input input"
+		"footer footer";
+	align-items: end;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-large);
+	background: var(--shell-raised);
+	box-shadow: 0 8px 30px var(--shadow-color);
+	position: relative;
+	min-width: 0;
+	container: composer / inline-size;
+	--composer-textarea-min-height: 64px;
+	--composer-textarea-max-height: 200px;
+	--composer-input-padding-block: calc(var(--space-1) + 3px);
+	--composer-input-padding-inline: var(--space-2);
+	--composer-actions-gap: var(--space-2);
+	--composer-tools-gap: var(--space-2);
+	--composer-actions-margin-inline: var(--space-2);
+	transition:
+		border-color 140ms var(--ease-standard),
+		box-shadow 140ms var(--ease-standard);
+
+	&.is-plan-mode {
+		border-color: rgba(139, 92, 246, 0.5);
+		box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.15), 0 4px 20px rgba(139, 92, 246, 0.08);
+
+		&:focus-within {
+			border-color: #8b5cf6;
+			box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25), 0 8px 24px rgba(139, 92, 246, 0.12);
+		}
+	}
+}
+
+:root[data-density="compact"] .composer {
+	--composer-textarea-min-height: 56px;
+	--composer-textarea-max-height: 176px;
+	--composer-input-padding-block: var(--space-1);
+	--composer-input-padding-inline: var(--space-2);
+	--composer-actions-gap: var(--space-1);
+	--composer-tools-gap: var(--space-2);
+	--composer-actions-margin-inline: var(--space-2);
+}
+.composer-attachment-bar {
+	display: flex;
+	flex: 1 1 0%;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-1);
+	min-width: 0;
+	max-width: 100%;
+	max-height: 58px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 2px 0;
+	box-sizing: border-box;
+}
+
+.composer-attachment-bar:has(.attachment-chip-list) {
+	border-bottom: 0;
+}
+
+.attachment-add-button {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	flex: 0 0 auto;
+	height: var(--control-height);
+	min-height: var(--control-height);
+	padding: 0 7px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	background: var(--shell);
+	color: var(--foreground-muted);
+	font-size: 14px;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+
+.attachment-add-button:hover:not(:disabled) {
+	border-color: var(--accent-boundary);
+	color: var(--foreground);
+}
+
+.attachment-add-button:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+.attachment-chip-list {
+	display: flex;
+	flex: 1 1 180px;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	max-width: 100%;
+	max-height: 50px;
+	overflow-y: auto;
+}
+
+
+.attachment-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: min(240px, 100%);
+	height: 26px;
+	padding: 0 5px 0 7px;
+	border: 1px solid var(--accent-boundary);
+	border-radius: var(--radius-small);
+	background: var(--selection-surface);
+	color: var(--foreground);
+	font-size: 14px;
+}
+
+
+.attachment-chip-kind {
+	color: var(--foreground-strong);
+	font-size: 14px;
+	font-weight: 800;
+	letter-spacing: 0.04em;
+}
+
+.attachment-chip-name {
+	min-width: 0;
+	max-width: 160px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.attachment-chip-size {
+	color: var(--foreground-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.attachment-chip-remove {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--foreground-muted);
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.attachment-chip-remove:hover,
+.attachment-chip-remove:focus-visible {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.attachment-status {
+	flex: 0 1 180px;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.composer:focus-within {
+	border-color: var(--focus-inner);
+	outline: 2px solid var(--focus-inner);
+	box-shadow: 0 0 0 4px var(--focus-outer);
+}
+
+.composer-input-container {
+	grid-area: input;
+	position: relative;
+	display: flex;
+	align-self: stretch;
+	min-width: 0;
+	min-height: var(--composer-textarea-min-height);
+	width: 100%;
+}
+
+.composer-backdrop {
+	position: absolute;
+	inset: 0;
+	padding: var(--composer-input-padding-block) var(--composer-input-padding-inline);
+	color: var(--foreground);
+	font-family: var(--font-sans);
+	font-size: 14px;
+	line-height: 1.48;
+	white-space: pre-wrap;
+	word-break: break-word;
+	overflow: hidden;
+	pointer-events: none;
+	user-select: none;
+}
+.composer textarea {
+	min-width: 0;
+	min-height: var(--composer-textarea-min-height);
+	max-height: var(--composer-textarea-max-height);
+	width: 100%;
+	flex: 1 1 0%;
+	overflow-x: hidden;
+	overflow-y: hidden;
+	resize: none;
+	border: 0;
+	outline: 0;
+	padding: var(--composer-input-padding-block) var(--composer-input-padding-inline);
+	color: var(--foreground);
+	background: transparent;
+	font-family: var(--font-sans);
+	font-size: 12.5px;
+	line-height: 1.48;
+	position: relative;
+	z-index: 1;
+
+	&.has-backdrop {
+		color: transparent;
+		caret-color: var(--foreground-strong);
+	}
+}
+
+.composer textarea::placeholder {
+	color: var(--foreground-muted);
+}
+
+.composer-actions {
+	grid-area: footer;
+	display: flex;
+	flex-wrap: nowrap;
+	flex: 0 0 auto;
+	align-items: flex-end;
+	align-self: end;
+	gap: var(--composer-actions-gap);
+	margin: 0 var(--composer-actions-margin-inline) 2px;
+	min-width: 0;
+	min-height: var(--control-height);
+}
+
+.composer-tools {
+	display: inline-flex;
+	align-items: center;
+	flex: 0 1 auto;
+	gap: var(--composer-tools-gap);
+	min-width: 0;
+}
+
+.composer-tools .context-meter-anchor,
+.composer-tools .context-donut-btn {
+	height: var(--control-height);
+}
+.composer-action-rail {
+	display: inline-flex;
+	align-items: center;
+	flex: 0 0 auto;
+	gap: var(--composer-tools-gap);
+	min-height: var(--control-height);
+}
+
+.composer-action-menu {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+}
+
+.action-menu-trigger {
+	list-style: none;
+	height: var(--control-height);
+	min-height: var(--control-height);
+	padding-inline: 10px;
+	font-size: 14px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.action-menu-trigger::-webkit-details-marker {
+	display: none;
+}
+.action-menu-trigger::marker {
+	content: "";
+}
+
+.composer-action-menu[open] .action-menu-trigger {
+	border-color: var(--accent-boundary);
+	background: var(--selection-surface);
+}
+
+.action-menu-panel {
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 8px);
+	z-index: var(--z-overlay);
+	display: grid;
+	min-width: 174px;
+	padding: 5px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	background: var(--shell-raised);
+	box-shadow: 0 6px 14px var(--shadow-color);
+}
+.composer-action-menu:not([open]) .action-menu-panel {
+	display: none;
+}
+
+.action-menu-panel .queue-follow-up-button {
+	width: 100%;
+	justify-content: flex-start;
+	padding-inline: 9px;
+	font-size: 14px;
+	white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.action-menu-trigger,
+	.action-menu-panel .queue-follow-up-button {
+		transition: none;
+	}
+}
+
+@media (forced-colors: active) {
+	.action-menu-trigger,
+	.action-menu-panel,
+	.action-menu-panel .queue-follow-up-button {
+		border-color: CanvasText;
+	}
+}
+
+.action-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-1);
+	min-width: 76px;
+	height: var(--control-height);
+	padding: 0 var(--space-3);
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	cursor: pointer;
+	user-select: none;
+	box-sizing: border-box;
+	transition:
+		filter 140ms var(--ease-standard),
+		transform 100ms ease-out,
+		opacity 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard);
+	&:focus-visible {
+		outline: 2px solid var(--focus-inner);
+		box-shadow: 0 0 0 4px var(--focus-outer);
+	}
+
+	&.send-turn-btn {
+		background: var(--accent);
+		color: var(--accent-foreground);
+		font-size: 15px;
+		font-weight: 750;
+		line-height: 1;
+
+		.send-glyph {
+			display: inline-block;
+			font-size: 14px;
+			line-height: 1;
+			transform: translateY(1px);
+		}
+
+		&:hover:not(:disabled) {
+			filter: brightness(1.15);
+			transform: scale(1.04);
+		}
+
+		&:disabled {
+			border-color: var(--line-soft);
+			color: var(--foreground-disabled);
+			background: var(--shell);
+			opacity: 1;
+			cursor: default;
+		}
+	}
+
+	&:active:not(:disabled) {
+		transform: scale(0.95);
+	}
+}
+
+.thinking-select {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+	color: var(--foreground);
+	font-size: 12px;
+
+	.thinking-label {
+		color: var(--foreground-muted);
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		flex-shrink: 0;
+	}
+
+	.custom-dropdown-trigger {
+		height: 24px;
+		min-height: 24px;
+		border: 1px solid transparent;
+		outline: 0;
+		background: transparent;
+		color: var(--foreground-strong);
+		font-family: var(--font-sans);
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+		padding: 0;
+		margin: 0;
+	}
+}
+
+// Composer controls respond to the usable composer width, not the viewport.
+@container composer (max-width: 899px) {
+	.composer-actions {
+		gap: var(--space-1) var(--composer-actions-gap);
+		margin-inline: var(--space-2);
+	}
+
+	.composer-tools {
+		flex: 0 1 auto;
+		gap: var(--space-2);
+	}
+
+	.runtime-picker {
+		flex: 0 1 auto;
+		max-width: 100%;
+		min-width: 0;
+	}
+
+	.runtime-picker-trigger {
+		max-width: 100%;
+	}
+
+	.runtime-picker-kicker,
+	.runtime-picker-provider,
+	.runtime-picker-thinking,
+	.runtime-picker-divider,
+	.context-donut-btn .donut-percent-text {
+		display: none;
+	}
+
+	.composer-tools .context-meter-anchor {
+		flex: 0 0 auto;
+	}
+
+	.composer-action-rail {
+		gap: var(--space-1);
+	}
+
+	.action-button,
+	.action-menu-trigger {
+		padding-inline: var(--space-2);
+	}
+}
+
+// Keep the attachment shelf distinct from the controls so the primary action
+// never gets pushed off-canvas in inspector-constrained panes.
+@container composer (max-width: 680px) {
+	.composer-actions {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas:
+			"shelf shelf"
+			"tools rail";
+		align-items: center;
+		column-gap: var(--composer-actions-gap);
+		row-gap: var(--space-1);
+	}
+
+	.composer-attachment-bar {
+		grid-area: shelf;
+		width: 100%;
+		flex: none;
+	}
+
+	.composer-tools {
+		grid-area: tools;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.composer-action-rail {
+		grid-area: rail;
+		justify-self: end;
+		align-self: end;
+	}
+
+	.runtime-picker-summary {
+		display: none;
+	}
+
+	.runtime-picker-kicker {
+		display: inline-flex;
+	}
+
+	.runtime-picker-trigger {
+		min-width: 0;
+	}
+
+	.runtime-picker-panel {
+		right: auto;
+		left: 0;
+	}
+}
+

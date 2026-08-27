@@ -43,9 +43,9 @@ export const ServiceActionParamSchema = type({
 	id: "string",
 });
 
-export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
+export const GRADIVUS_MCP_TOOLS: readonly Tool[] = [
 	{
-		name: "branchlight_workspace_list",
+		name: "gradivus_workspace_list",
 		description: "List all workspaces and their current status",
 		inputSchema: {
 			type: "object",
@@ -53,7 +53,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_workspace_get",
+		name: "gradivus_workspace_get",
 		description: "Get full document state for the active workspace",
 		inputSchema: {
 			type: "object",
@@ -61,7 +61,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_workspace_command",
+		name: "gradivus_workspace_command",
 		description: "Execute a structured workspace command",
 		inputSchema: {
 			type: "object",
@@ -72,7 +72,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_terminal_open",
+		name: "gradivus_terminal_open",
 		description: "Open a new terminal pane in the workspace",
 		inputSchema: {
 			type: "object",
@@ -86,7 +86,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_terminal_write",
+		name: "gradivus_terminal_write",
 		description: "Write raw input data to a terminal pane",
 		inputSchema: {
 			type: "object",
@@ -98,7 +98,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_terminal_read",
+		name: "gradivus_terminal_read",
 		description: "Read terminal output history from offset",
 		inputSchema: {
 			type: "object",
@@ -110,7 +110,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_browser_navigate",
+		name: "gradivus_browser_navigate",
 		description: "Navigate a browser pane to a URL",
 		inputSchema: {
 			type: "object",
@@ -122,7 +122,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_browser_query",
+		name: "gradivus_browser_query",
 		description: "Query elements in a browser pane",
 		inputSchema: {
 			type: "object",
@@ -134,7 +134,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_service_list",
+		name: "gradivus_service_list",
 		description: "List declared services in the workspace",
 		inputSchema: {
 			type: "object",
@@ -142,7 +142,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_service_start",
+		name: "gradivus_service_start",
 		description: "Start a declared workspace service",
 		inputSchema: {
 			type: "object",
@@ -153,7 +153,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_service_stop",
+		name: "gradivus_service_stop",
 		description: "Stop a running workspace service",
 		inputSchema: {
 			type: "object",
@@ -164,7 +164,7 @@ export const BRANCHLIGHT_MCP_TOOLS: readonly Tool[] = [
 		},
 	},
 	{
-		name: "branchlight_notification_list",
+		name: "gradivus_notification_list",
 		description: "List attention notifications",
 		inputSchema: {
 			type: "object",
@@ -193,7 +193,7 @@ export class WorkspaceMcpServer {
 			this.#capabilities = options.capabilities;
 		}
 
-		const name = "serverName" in options && options.serverName ? options.serverName : "branchlight-workspace";
+		const name = "serverName" in options && options.serverName ? options.serverName : "gradivus-workspace";
 		const version = "serverVersion" in options && options.serverVersion ? options.serverVersion : "1.0.0";
 
 		this.#server = new Server({ name, version }, { capabilities: { tools: {} } });
@@ -206,12 +206,12 @@ export class WorkspaceMcpServer {
 	}
 
 	get tools(): readonly Tool[] {
-		return BRANCHLIGHT_MCP_TOOLS;
+		return GRADIVUS_MCP_TOOLS;
 	}
 
 	#setupHandlers(): void {
 		this.#server.setRequestHandler(ListToolsRequestSchema, async () => {
-			return { tools: [...BRANCHLIGHT_MCP_TOOLS] };
+			return { tools: [...GRADIVUS_MCP_TOOLS] };
 		});
 
 		this.#server.setRequestHandler(CallToolRequestSchema, async request => {
@@ -232,11 +232,11 @@ export class WorkspaceMcpServer {
 		try {
 			if (this.#capabilities) {
 				const operationMap: Record<string, string> = {
-					branchlight_terminal_open: "terminal.open",
-					branchlight_terminal_write: "terminal.input",
-					branchlight_browser_navigate: "browser.navigate",
-					branchlight_service_start: "service.start",
-					branchlight_service_stop: "service.stop",
+					gradivus_terminal_open: "terminal.open",
+					gradivus_terminal_write: "terminal.input",
+					gradivus_browser_navigate: "browser.navigate",
+					gradivus_service_start: "service.start",
+					gradivus_service_stop: "service.stop",
 				};
 				const op = operationMap[name];
 				if (op) {
@@ -253,7 +253,7 @@ export class WorkspaceMcpServer {
 			}
 
 			switch (name) {
-				case "branchlight_workspace_list": {
+				case "gradivus_workspace_list": {
 					const doc = await this.#client.getDocument();
 					return {
 						content: [
@@ -264,7 +264,7 @@ export class WorkspaceMcpServer {
 						],
 					};
 				}
-				case "branchlight_workspace_get": {
+				case "gradivus_workspace_get": {
 					const doc = await this.#client.getDocument();
 					return {
 						content: [
@@ -275,7 +275,7 @@ export class WorkspaceMcpServer {
 						],
 					};
 				}
-				case "branchlight_workspace_command": {
+				case "gradivus_workspace_command": {
 					const cmd = args.command as WorkspaceCommandV1;
 					const result = await this.#client.executeCommand(cmd);
 					return {
@@ -288,7 +288,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_terminal_open": {
+				case "gradivus_terminal_open": {
 					const cmd: WorkspaceCommandV1 = {
 						version: 1,
 						commandId: `cmd-term-open-${Date.now()}`,
@@ -315,7 +315,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_terminal_write": {
+				case "gradivus_terminal_write": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const data = typeof args.data === "string" ? args.data : "";
 					const cmd: WorkspaceCommandV1 = {
@@ -338,7 +338,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_terminal_read": {
+				case "gradivus_terminal_read": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const doc = await this.#client.getDocument();
 					const terminal = doc.terminals.find(t => t.id === id);
@@ -357,7 +357,7 @@ export class WorkspaceMcpServer {
 						],
 					};
 				}
-				case "branchlight_browser_navigate": {
+				case "gradivus_browser_navigate": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const url = typeof args.url === "string" ? args.url : "";
 					const cmd: WorkspaceCommandV1 = {
@@ -380,7 +380,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_browser_query": {
+				case "gradivus_browser_query": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const selector = typeof args.selector === "string" ? args.selector : "";
 					const doc = await this.#client.getDocument();
@@ -400,7 +400,7 @@ export class WorkspaceMcpServer {
 						],
 					};
 				}
-				case "branchlight_service_list": {
+				case "gradivus_service_list": {
 					const doc = await this.#client.getDocument();
 					return {
 						content: [
@@ -411,7 +411,7 @@ export class WorkspaceMcpServer {
 						],
 					};
 				}
-				case "branchlight_service_start": {
+				case "gradivus_service_start": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const cmd: WorkspaceCommandV1 = {
 						version: 1,
@@ -433,7 +433,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_service_stop": {
+				case "gradivus_service_stop": {
 					const id = typeof args.id === "string" ? args.id : "";
 					const cmd: WorkspaceCommandV1 = {
 						version: 1,
@@ -455,7 +455,7 @@ export class WorkspaceMcpServer {
 						isError: result.status === "rejected",
 					};
 				}
-				case "branchlight_notification_list": {
+				case "gradivus_notification_list": {
 					const doc = await this.#client.getDocument();
 					return {
 						content: [

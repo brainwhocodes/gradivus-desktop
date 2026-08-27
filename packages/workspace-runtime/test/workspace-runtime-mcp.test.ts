@@ -66,30 +66,30 @@ describe("WorkspaceMcpServer", () => {
 		} catch {}
 	});
 
-	it("registers mandated branchlight_<domain>_<verb> tools", () => {
+	it("registers mandated gradivus_<domain>_<verb> tools", () => {
 		expect(mcpServer.tools.length).toBeGreaterThanOrEqual(10);
 		for (const tool of mcpServer.tools) {
-			expect(tool.name).toMatch(/^branchlight_[a-z]+_[a-z]+$/);
+			expect(tool.name).toMatch(/^gradivus_[a-z]+_[a-z]+$/);
 		}
-		expect(mcpServer.tools.some(t => t.name === "branchlight_workspace_list")).toBe(true);
-		expect(mcpServer.tools.some(t => t.name === "branchlight_terminal_open")).toBe(true);
-		expect(mcpServer.tools.some(t => t.name === "branchlight_browser_navigate")).toBe(true);
+		expect(mcpServer.tools.some(t => t.name === "gradivus_workspace_list")).toBe(true);
+		expect(mcpServer.tools.some(t => t.name === "gradivus_terminal_open")).toBe(true);
+		expect(mcpServer.tools.some(t => t.name === "gradivus_browser_navigate")).toBe(true);
 	});
 
 	it("executes tool calls and returns structured content", async () => {
-		// 1. branchlight_workspace_list
-		const listRes = await mcpServer.executeTool("branchlight_workspace_list", {});
+		// 1. gradivus_workspace_list
+		const listRes = await mcpServer.executeTool("gradivus_workspace_list", {});
 		expect(listRes.isError).toBeFalsy();
 		expect(listRes.content[0].text).toContain("MCP Workspace");
 
-		// 2. branchlight_terminal_open
-		const openRes = await mcpServer.executeTool("branchlight_terminal_open", {
+		// 2. gradivus_terminal_open
+		const openRes = await mcpServer.executeTool("gradivus_terminal_open", {
 			tabName: "Terminal MCP",
 		});
 		expect(openRes.isError).toBeFalsy();
 
-		// 3. branchlight_notification_list
-		const notifRes = await mcpServer.executeTool("branchlight_notification_list", {});
+		// 3. gradivus_notification_list
+		const notifRes = await mcpServer.executeTool("gradivus_notification_list", {});
 		expect(notifRes.isError).toBeFalsy();
 		expect(notifRes.content[0].text).toBe("[]");
 	});
@@ -107,11 +107,11 @@ describe("WorkspaceMcpServer", () => {
 		});
 
 		// Allowed call
-		const readRes = await scopedMcp.executeTool("branchlight_workspace_list", {});
+		const readRes = await scopedMcp.executeTool("gradivus_workspace_list", {});
 		expect(readRes.isError).toBeFalsy();
 
-		// Unauthorized operation (branchlight_terminal_open mapped to terminal.open)
-		const writeRes = await scopedMcp.executeTool("branchlight_terminal_open", {
+		// Unauthorized operation (gradivus_terminal_open mapped to terminal.open)
+		const writeRes = await scopedMcp.executeTool("gradivus_terminal_open", {
 			tabName: "Forbidden Terminal",
 		});
 		expect(writeRes.isError).toBe(true);

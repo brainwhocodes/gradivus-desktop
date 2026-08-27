@@ -108,7 +108,7 @@ describe("RpcClient", () => {
 		const client = new RpcClient(connection);
 		await client.start();
 
-		await expect(client.prompt("keep the editor responsive")).resolves.toBeUndefined();
+		await expect(client.prompt("keep the editor responsive")).resolves.toMatch(/^gradivus-\d+$/);
 		expect(connection.sent).toMatchObject([
 			{
 				kind: "command",
@@ -116,6 +116,48 @@ describe("RpcClient", () => {
 					command: "prompt",
 					payload: { message: "keep the editor responsive" },
 				},
+			},
+		]);
+		await client.close();
+	});
+	it("forwards image arrays for prompts while preserving command payloads", async () => {
+		const connection = new FakeConnection();
+		connection.push(readyFrame());
+		const client = new RpcClient(connection);
+		await client.start();
+
+		const images = [{ type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" as const }];
+		await expect(client.prompt("describe the screenshot", images)).resolves.toMatch(/^gradivus-\d+$/);
+		expect(connection.sent.at(-1)).toMatchObject({
+			kind: "command",
+			command: {
+				command: "prompt",
+				payload: { message: "describe the screenshot", images },
+			},
+		});
+		await client.close();
+	});
+
+	it("delivers prompt_result even when it arrives before the prompt acknowledgement", async () => {
+		const connection = new FakeConnection();
+		connection.push(readyFrame());
+		const client = new RpcClient(connection);
+		await client.start();
+		const events: unknown[] = [];
+		client.onEvent(event => events.push(event));
+		const prompt = client.prompt("recover provider");
+		connection.push({
+			kind: "push",
+			type: "prompt_result",
+			payload: { id: "gradivus-1", agentInvoked: false, error: { message: "account locked", code: "AUTH" } },
+		});
+		await expect(prompt).resolves.toBe("gradivus-1");
+		expect(events).toEqual([
+			{
+				type: "prompt_result",
+				id: "gradivus-1",
+				agentInvoked: false,
+				error: { message: "account locked", code: "AUTH" },
 			},
 		]);
 		await client.close();

@@ -1,18 +1,26 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { WorkspaceDocumentV1, WorkspacePrincipalV1 } from "@oh-my-pi/pi-wire";
-import type { SelectionAuthScope } from "@oh-my-pi/pi-workspace-runtime/selection";
+import type { SelectionAuthScope, SelectionTargetAgent } from "@oh-my-pi/pi-workspace-runtime/selection";
 import { type BrowserWindow, dialog, shell } from "electron";
+import { getAgentSwatch } from "../shared/agent-swatch";
+import { AUTH_DISCOVERY_PROVIDER } from "../shared/auth-events";
 import type {
+	AgentHubAgent,
+	AgentHubMessagePage,
+	AgentHubMetrics,
+	AgentHubSnapshot,
 	AgentSettingOption,
 	AgentSettingValue,
 	AgentSettingView,
 	AuthAccountView,
 	AuthEvent,
 	BootstrapSnapshot,
-	BranchlightEvent,
 	ExtensionView,
 	FileDiffView,
+	GradivusEvent,
 	InterruptMode,
 	ModelOption,
 	OAuthAccountSummaryView,
@@ -20,6 +28,8 @@ import type {
 	OAuthProviderAccountsView,
 	OpenRouterModelRouting,
 	ProcessState,
+	PromptAttachmentView,
+	PromptImageContent,
 	QueueMode,
 	RuntimeReportView,
 	SessionRecordV1,
@@ -31,6 +41,7 @@ import type {
 	TimelinePage,
 } from "../shared/contracts";
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "../shared/rpc-wire";
+import { loadPersistedGradivusSettings } from "./app-settings";
 import {
 	assertBoundedText,
 	assertSessionKind,
@@ -38,23 +49,59 @@ import {
 	resolveWorkspaceTarget,
 	safeExternalUrl,
 } from "./guards";
+import { PromptAttachmentStore, type ResolvedPromptAttachments } from "./prompt-attachments";
 import type { RpcClient } from "./rpc-client";
 import { RpcProcess } from "./rpc-process";
 import { RuntimeSupervisor } from "./runtime-supervisor";
 import { SessionRegistry } from "./session-registry";
 import { TranscriptStore } from "./transcript-store";
 
+type SelectionPromptMetadata = {
+	paneId?: string;
+	selector?: string;
+	tagName?: string;
+	instruction?: string;
+	url?: string;
+	agentType?: string;
+	captureMode?: "dom" | "screenshot";
+	screenshot?: {
+		base64?: string;
+		dataUrl?: string;
+		mimeType?: string;
+	};
+};
+
+function selectionPromptImage(metadata?: Record<string, unknown>): PromptImageContent | undefined {
+	const screenshot = metadata?.screenshot;
+	if (!isRecord(screenshot)) return undefined;
+	const base64 = typeof screenshot.base64 === "string" ? screenshot.base64 : undefined;
+	const dataUrl = typeof screenshot.dataUrl === "string" ? screenshot.dataUrl : undefined;
+	const data = base64 ?? (dataUrl?.split(",", 2)[1] || undefined);
+	if (!data) return undefined;
+	const mimeType =
+		screenshot.mimeType === "image/png" ||
+		screenshot.mimeType === "image/jpeg" ||
+		screenshot.mimeType === "image/gif" ||
+		screenshot.mimeType === "image/webp"
+			? screenshot.mimeType
+			: "image/jpeg";
+	return { type: "image", data, mimeType };
+}
+
 type RuntimeSession = {
 	record: SessionRecordV1;
 	process: RpcProcess;
 	timeline: TranscriptStore;
+	attachments: PromptAttachmentStore;
 	state: ProcessState;
 	subagents: SubagentView[];
+	agentHub?: AgentHubSnapshot;
 	commands: SlashCommand[];
 	models?: ModelOption[];
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	fastMode?: boolean;
+	planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	interruptMode?: InterruptMode;
@@ -65,7 +112,7 @@ type RuntimeSession = {
 	tokensPerSecond?: number | null;
 	queuedMessageCount?: number;
 	todoPhases?: SessionSnapshot["todoPhases"];
-	outstandingExtensions: Map<string, RpcExtensionUIRequest["method"]>;
+	outstandingExtensions: Map<string, RpcExtensionUIRequest>;
 	fileDiffCache: Map<string, { expiresAt: number; request: Promise<FileDiffView> }>;
 };
 
@@ -78,6 +125,7 @@ interface StateData {
 	model?: { provider: string; id: string };
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled: boolean;
+	planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
 	steeringMode: QueueMode;
 	followUpMode: QueueMode;
 	interruptMode: InterruptMode;
@@ -122,9 +170,10 @@ function isWindowUsable(window?: BrowserWindow): boolean {
 export class DesktopHost {
 	#registry: SessionRegistry;
 	#window: BrowserWindow | undefined;
+	#userDataPath: string;
 	#runtimes = new Map<string, RuntimeSession>();
 	#supervisor: RuntimeSupervisor;
-	#eventQueues = new Map<string, BranchlightEvent[]>();
+	#eventQueues = new Map<string, GradivusEvent[]>();
 	#eventTimers = new Map<string, TimerHandle>();
 	#warning: string | undefined;
 	#authProcess: RpcProcess | undefined;
@@ -143,6 +192,7 @@ export class DesktopHost {
 
 	constructor(userDataPath: string) {
 		this.#registry = new SessionRegistry(userDataPath);
+		this.#userDataPath = userDataPath;
 		this.#supervisor = new RuntimeSupervisor({
 			maxResident: 3,
 			idleTimeoutMs: 300_000,
@@ -236,8 +286,15 @@ export class DesktopHost {
 
 	async logoutProvider(providerInput: unknown): Promise<AuthAccountView[]> {
 		const provider = assertAuthProvider(providerInput);
-		const account = (await this.#authAccounts()).find(candidate => candidate.provider === provider);
-		if (!account) throw new Error(`Unsupported OAuth provider: ${provider}`);
+		const accounts = await this.#authAccounts();
+		const account = accounts.find(candidate => candidate.provider === provider);
+		if (!account) {
+			throw new Error(
+				accounts.length === 0
+					? "Provider status could not be loaded; sign-out availability is unknown"
+					: `Unsupported OAuth provider: ${provider}`,
+			);
+		}
 		const response = await this.#withAuthClient(client => client.request({ type: "logout", providerId: provider }));
 		if (!response.success) throw new Error(response.error ?? "Sign-out failed");
 		this.#emitAuth({ type: "complete", provider, message: `Signed out of ${account.name}.` });
@@ -273,12 +330,35 @@ export class DesktopHost {
 		return setting;
 	}
 
-	async chooseAndCreate(kindInput: unknown): Promise<SessionSnapshot | null> {
+	/** Validated saved workspace preference for the create-session dialog; undefined when unusable. */
+	async #savedWorkspaceDefaultPath(): Promise<string | undefined> {
+		try {
+			const saved = (await loadPersistedGradivusSettings(this.#userDataPath)).workspace.defaultPath.trim();
+			if (!saved) return undefined;
+			const stat = await fs.stat(saved).catch(() => undefined);
+			return stat?.isDirectory() ? saved : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	async chooseAndCreate(kindInput: unknown, cwdInput?: unknown): Promise<SessionSnapshot | null> {
 		const kind = assertSessionKind(kindInput);
-		if (!this.#window) throw new Error("Main window is not ready");
-		const result = await dialog.showOpenDialog(this.#window, { properties: ["openDirectory", "createDirectory"] });
-		if (result.canceled || result.filePaths.length === 0) return null;
-		const cwd = result.filePaths[0];
+		let cwd: string;
+		if (cwdInput === undefined) {
+			if (!this.#window) throw new Error("Main window is not ready");
+			const options: Electron.OpenDialogOptions = { properties: ["openDirectory", "createDirectory"] };
+			const defaultPath = await this.#savedWorkspaceDefaultPath();
+			if (defaultPath) options.defaultPath = defaultPath;
+			const result = await dialog.showOpenDialog(this.#window, options);
+			if (result.canceled || result.filePaths.length === 0) return null;
+			cwd = result.filePaths[0];
+		} else {
+			const candidate = path.resolve(assertBoundedText(cwdInput, "workspace cwd"));
+			const stat = await fs.stat(candidate).catch(() => undefined);
+			if (!stat?.isDirectory()) throw new Error("Workspace folder is not a directory");
+			cwd = candidate;
+		}
+		const now = new Date().toISOString();
 		const record: SessionRecordV1 = {
 			id: randomUUID(),
 			kind,
@@ -286,8 +366,8 @@ export class DesktopHost {
 			ompSessionId: "",
 			sessionFile: "",
 			title: null,
-			createdAt: new Date().toISOString(),
-			lastOpenedAt: new Date().toISOString(),
+			createdAt: now,
+			lastOpenedAt: now,
 		};
 		const runtime = this.#createRuntime(record);
 		try {
@@ -297,6 +377,7 @@ export class DesktopHost {
 			});
 		} catch (error) {
 			await this.#supervisor.unregister(record.id);
+			await runtime.attachments.close();
 			this.#runtimes.delete(record.id);
 			throw error;
 		}
@@ -304,9 +385,13 @@ export class DesktopHost {
 	async openSession(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
 		return this.#supervisor.run(record.id, async () => {
+			const lastOpenedAt = new Date().toISOString();
+			await this.#registry.update(record.id, { lastOpenedAt });
+			const runtime = this.#requiredRuntime(record.id);
+			runtime.record = { ...runtime.record, lastOpenedAt };
 			this.#supervisor.touch(record.id);
 			await this.#registry.setActive(record.kind, record.id);
-			return this.#snapshot(this.#requiredRuntime(record.id));
+			return this.#snapshot(runtime);
 		});
 	}
 	async resume(id: unknown): Promise<SessionSnapshot> {
@@ -429,12 +514,146 @@ export class DesktopHost {
 		runtime.record = { ...runtime.record, title };
 		return this.#snapshot(runtime);
 	}
-
-	async prompt(id: unknown, textInput: unknown): Promise<void> {
-		const text = assertBoundedText(textInput, "prompt");
-		await this.#runWithRuntime(id, async (_runtime, client) => client.prompt(text));
+	async deleteSession(idInput: unknown): Promise<BootstrapSnapshot> {
+		if (typeof idInput !== "string") throw new TypeError("invalid session id");
+		const record = this.#record(idInput);
+		await this.#supervisor.stop(record.id);
+		await this.#supervisor.unregister(record.id);
+		const runtime = this.#runtimes.get(record.id);
+		if (runtime) await runtime.attachments.close();
+		this.#runtimes.delete(record.id);
+		await this.#registry.remove(record.id);
+		return { registry: this.#registry.value, warning: this.#warning };
 	}
-	resolveSelectionScope(paneId: string, targetAgentId?: string, documentEpoch?: number): SelectionAuthScope {
+
+	async stagePromptAttachments(idInput: unknown, uploadsInput: unknown): Promise<PromptAttachmentView[]> {
+		const record = this.#record(idInput);
+		const runtime = this.#requiredRuntime(record.id);
+		return runtime.attachments.stageUploads(uploadsInput);
+	}
+
+	async stagePromptText(idInput: unknown, textInput: unknown): Promise<PromptAttachmentView> {
+		const record = this.#record(idInput);
+		const runtime = this.#requiredRuntime(record.id);
+		return runtime.attachments.stagePromptText(textInput);
+	}
+
+	async releasePromptAttachments(idInput: unknown, attachmentIdsInput: unknown): Promise<void> {
+		const record = this.#record(idInput);
+		const runtime = this.#requiredRuntime(record.id);
+		await runtime.attachments.release(attachmentIdsInput);
+	}
+
+	async prompt(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<string> {
+		const text = assertBoundedText(textInput, "prompt");
+		return this.#runWithRuntime(id, async (runtime, client) => {
+			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			return client.prompt(resolved.text, resolved.images.length > 0 ? resolved.images : undefined);
+		});
+	}
+
+	async deliverElementPrompt(
+		promptText: string,
+		targetSessionId: string,
+		metadata?: SelectionPromptMetadata,
+	): Promise<void> {
+		const image = selectionPromptImage(metadata);
+		await this.#runWithRuntime(targetSessionId, async (_runtime, client) => {
+			await client.prompt(promptText, image ? [image] : undefined);
+		});
+	}
+
+	async executeInlinePrompt(
+		promptText: string,
+		targetSessionId: string,
+		metadata?: SelectionPromptMetadata,
+	): Promise<string> {
+		const runtime = this.#runtimes.get(targetSessionId);
+		const client = runtime?.process.client;
+		if (!client) throw new Error("OMP is not ready for inline selection");
+
+		let requestId: string | undefined;
+		let unsubscribe: (() => void) | undefined;
+		const output = new Promise<string>((resolve, reject) => {
+			const chunks: string[] = [];
+			let settled = false;
+			const finish = (value: string): void => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+			};
+			const fail = (error: unknown): void => {
+				if (settled) return;
+				settled = true;
+				reject(error instanceof Error ? error : new Error(String(error)));
+			};
+			const textFromContent = (content: unknown): string => {
+				if (typeof content === "string") return content;
+				if (!Array.isArray(content)) return "";
+				return content
+					.map(block => {
+						if (typeof block === "string") return block;
+						if (!isRecord(block)) return "";
+						return typeof block.text === "string"
+							? block.text
+							: typeof block.content === "string"
+								? block.content
+								: "";
+					})
+					.join("");
+			};
+			unsubscribe = client.onEvent(event => {
+				if (!isRecord(event)) return;
+				const type = event.type;
+				if (type === "message_delta" || type === "text_delta" || type === "delta") {
+					const delta =
+						typeof event.delta === "string" ? event.delta : typeof event.text === "string" ? event.text : "";
+					if (delta) chunks.push(delta);
+					return;
+				}
+				if (
+					(type === "message_start" || type === "message_update" || type === "message_end") &&
+					isRecord(event.message)
+				) {
+					const message = event.message;
+					if (message.role === "assistant") {
+						const text = textFromContent(message.content);
+						if (text && (type === "message_end" || chunks.length === 0)) {
+							chunks.length = 0;
+							chunks.push(text);
+						}
+					}
+					return;
+				}
+				if (type !== "prompt_result") return;
+				if (requestId && event.id !== requestId) return;
+				if (isRecord(event.error) && typeof event.error.message === "string") {
+					fail(new Error(event.error.message));
+					return;
+				}
+				if (event.agentInvoked !== true) {
+					fail(new Error("Inline prompt completed without an agent response"));
+					return;
+				}
+				finish(chunks.join(""));
+			});
+		});
+
+		try {
+			const image = selectionPromptImage(metadata);
+			requestId = await client.prompt(promptText, image ? [image] : undefined);
+			const response = await output;
+			if (!response.trim()) throw new Error("OMP returned no inline output");
+			return response;
+		} finally {
+			unsubscribe?.();
+		}
+	}
+	resolveSelectionTarget(
+		paneId: string,
+		targetAgentId: string | undefined,
+		documentEpoch: number,
+	): { scope: SelectionAuthScope; target: SelectionTargetAgent } {
 		if (!paneId || paneId.trim().length === 0) {
 			throw new Error("Pane ID is required for selection scope");
 		}
@@ -492,39 +711,68 @@ export class DesktopHost {
 			throw new Error(`Open browser entity '${pane.entityId}' for pane '${paneId}' not found in authority document`);
 		}
 
-		if (typeof documentEpoch !== "number" || !Number.isSafeInteger(documentEpoch) || documentEpoch <= 0) {
+		if (!Number.isSafeInteger(documentEpoch) || documentEpoch <= 0) {
 			throw new Error("Valid positive documentEpoch is required for selection scope");
 		}
 
-		// 6. Agent and session resolution
-		let agentId = "";
-		let sessionId = "session-omp-direct";
-
-		if (targetAgentId && targetAgentId.trim().length > 0) {
-			const agent = doc.agents.find(a => a.id === targetAgentId.trim());
-			if (!agent && doc.agents.length > 0) {
-				throw new Error(`Target agent '${targetAgentId}' not found in authenticated workspace authority`);
-			}
-			if (agent) {
-				agentId = agent.id;
-				if (agent.sessionId) {
-					sessionId = agent.sessionId;
-				}
-			} else {
-				agentId = targetAgentId.trim();
-			}
-		} else if (doc.agents.length > 0) {
-			const firstAgent = doc.agents[0];
-			agentId = firstAgent.id;
-			if (firstAgent.sessionId) {
-				sessionId = firstAgent.sessionId;
-			}
+		const rejectTarget = (): never => {
+			throw new Error("No deliverable workspace agent is available for selection");
+		};
+		const agentId = targetAgentId?.trim();
+		const agent = agentId ? doc.agents.find(candidate => candidate.id === agentId) : undefined;
+		if (!agent) {
+			throw new Error("No deliverable workspace agent is available for selection");
 		}
 
-		if (!agentId) {
-			agentId = "agent-omp-direct";
+		const agentStatus = String(agent.status).toLowerCase();
+		if (
+			agentStatus === "stopped" ||
+			agentStatus === "failed" ||
+			agentStatus === "exited" ||
+			agentStatus === "error"
+		) {
+			rejectTarget();
 		}
-		return {
+		const targetSessionId = agent.sessionId;
+		if (!targetSessionId) {
+			throw new Error("No deliverable workspace agent is available for selection");
+		}
+
+		const session = doc.sessions.find(candidate => candidate.id === targetSessionId);
+		if (
+			!session ||
+			session.actorId !== agent.id ||
+			session.status !== "active" ||
+			session.locationId !== tab.locationId
+		) {
+			rejectTarget();
+		}
+
+		const ownedPaneIds = new Set<string>();
+		if (agent.paneId) ownedPaneIds.add(agent.paneId);
+		if (agent.terminalId) {
+			const terminal = doc.terminals.find(candidate => candidate.id === agent.terminalId);
+			const terminalPaneId =
+				terminal?.paneId ??
+				(terminal ? doc.panes.find(candidate => candidate.entityId === terminal.id)?.id : undefined);
+			if (!terminalPaneId) {
+				throw new Error("No deliverable workspace agent is available for selection");
+			}
+			ownedPaneIds.add(terminalPaneId);
+		}
+		for (const ownedPaneId of ownedPaneIds) {
+			const ownedPane = doc.panes.find(candidate => candidate.id === ownedPaneId);
+			const ownedTab = ownedPane ? doc.tabs.find(candidate => candidate.id === ownedPane.tabId) : undefined;
+			if (!ownedTab || ownedTab.workspaceId !== workspace.id) rejectTarget();
+		}
+
+		const profile = doc.agentProfiles.find(candidate => candidate.id === agent.profileId);
+		const target: SelectionTargetAgent = {
+			id: agent.id,
+			name: profile?.name || agent.id,
+			swatch: getAgentSwatch(agent.id),
+		};
+		const scope: SelectionAuthScope = {
 			principalId: principal.id,
 			workspaceId: workspace.id,
 			tabId: tab.id,
@@ -532,22 +780,34 @@ export class DesktopHost {
 			documentEpoch,
 			locationGeneration: location.lifecycle.generation,
 			locationId: location.id,
-			agentId,
-			sessionId,
+			agentId: agent.id,
+			sessionId: targetSessionId,
 		};
+		return { scope, target };
 	}
-	async steer(id: unknown, textInput: unknown): Promise<void> {
-		const message = assertBoundedText(textInput, "steer");
-		await this.#runWithRuntime(id, async (_runtime, client) => {
-			const response = await client.request({ type: "steer", message });
+
+	async steer(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<void> {
+		const text = assertBoundedText(textInput, "steer");
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			const response = await client.request({
+				type: "steer",
+				message: resolved.text,
+				...(resolved.images.length > 0 ? { images: resolved.images } : {}),
+			});
 			if (!response.success) throw new Error(response.error);
 		});
 	}
 
-	async queueFollowUp(id: unknown, textInput: unknown): Promise<void> {
-		const message = assertBoundedText(textInput, "follow-up");
-		await this.#runWithRuntime(id, async (_runtime, client) => {
-			const response = await client.request({ type: "follow_up", message });
+	async queueFollowUp(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<void> {
+		const text = assertBoundedText(textInput, "follow-up");
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			const response = await client.request({
+				type: "follow_up",
+				message: resolved.text,
+				...(resolved.images.length > 0 ? { images: resolved.images } : {}),
+			});
 			if (!response.success) throw new Error(response.error);
 		});
 	}
@@ -595,6 +855,44 @@ export class DesktopHost {
 			if (!response.success) throw new Error(response.error);
 			const data = isRecord(response.data) ? response.data : undefined;
 			runtime.fastMode = typeof data?.enabled === "boolean" ? data.enabled : enabled;
+		});
+	}
+	async togglePlanMode(
+		id: unknown,
+		enabledInput?: unknown,
+	): Promise<{ enabled: boolean; planFilePath?: string } | undefined> {
+		return this.#runWithRuntime(id, async (runtime, client) => {
+			const targetEnabled = typeof enabledInput === "boolean" ? enabledInput : !runtime.planMode?.enabled;
+			const response = await client.request({
+				type: "set_plan_mode",
+				enabled: targetEnabled,
+			});
+			if (!response.success) throw new Error(response.error ?? "Failed to toggle plan mode");
+			const data = isRecord(response.data) ? response.data : undefined;
+			const planModeData = isRecord(data?.planMode) ? data?.planMode : undefined;
+			runtime.planMode = planModeData
+				? {
+						enabled: planModeData.enabled === true,
+						planFilePath: typeof planModeData.planFilePath === "string" ? planModeData.planFilePath : undefined,
+						workflow: typeof planModeData.workflow === "string" ? planModeData.workflow : undefined,
+					}
+				: undefined;
+			this.#emitUrgent({
+				sessionId: runtime.record.id,
+				type: "config",
+				config: {
+					model: runtime.model,
+					thinkingLevel: runtime.thinkingLevel,
+					fastMode: runtime.fastMode,
+					planMode: runtime.planMode,
+					steeringMode: runtime.steeringMode,
+					followUpMode: runtime.followUpMode,
+					interruptMode: runtime.interruptMode,
+					autoCompactionEnabled: runtime.autoCompactionEnabled,
+					autoRetryEnabled: runtime.autoRetryEnabled,
+				},
+			});
+			return runtime.planMode;
 		});
 	}
 
@@ -652,7 +950,7 @@ export class DesktopHost {
 		await this.#runWithRuntime(idInput, (runtime, client) => {
 			const expected = runtime.outstandingExtensions.get(response.id as string);
 			if (!expected) throw new Error("stale extension response");
-			if (response.method !== undefined && response.method !== expected)
+			if (response.method !== undefined && response.method !== expected.method)
 				throw new Error("extension response method mismatch");
 			runtime.outstandingExtensions.delete(response.id as string);
 			client.sendExtensionResponse({
@@ -678,6 +976,55 @@ export class DesktopHost {
 			});
 			if (!response.success) throw new Error(response.error ?? "subagent transcript unavailable");
 			return response.data;
+		});
+	}
+
+	async getAgentHub(idInput: unknown): Promise<AgentHubSnapshot> {
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			const response = await client.request({ type: "get_agent_hub" });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub unavailable");
+			const snapshot = normalizeAgentHubSnapshot(response.data);
+			runtime.agentHub = snapshot;
+			return snapshot;
+		});
+	}
+
+	async getAgentHubMessages(
+		idInput: unknown,
+		agentIdInput: unknown,
+		fromByteInput: unknown,
+	): Promise<AgentHubMessagePage> {
+		const agentId = assertAgentHubId(agentIdInput);
+		const fromByte = assertAgentHubByteOffset(fromByteInput);
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "get_agent_hub_messages", agentId, fromByte });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub transcript unavailable");
+			return normalizeAgentHubMessagePage(response.data);
+		});
+	}
+
+	async agentHubMessage(idInput: unknown, agentIdInput: unknown, messageInput: unknown): Promise<void> {
+		const agentId = assertAgentHubId(agentIdInput);
+		const message = assertAgentHubMessage(messageInput);
+		await this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "agent_hub_message", agentId, message });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub message failed");
+		});
+	}
+
+	async agentHubKill(idInput: unknown, agentIdInput: unknown): Promise<void> {
+		const agentId = assertAgentHubId(agentIdInput);
+		await this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "agent_hub_kill", agentId });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub kill failed");
+		});
+	}
+
+	async agentHubRevive(idInput: unknown, agentIdInput: unknown): Promise<void> {
+		const agentId = assertAgentHubId(agentIdInput);
+		await this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "agent_hub_revive", agentId });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub revive failed");
 		});
 	}
 	async loadFileDiff(idInput: unknown, targetInput: unknown): Promise<FileDiffView> {
@@ -728,11 +1075,13 @@ export class DesktopHost {
 		this.#authProcess = undefined;
 		this.#authClient = undefined;
 		await Promise.all([this.#supervisor.close(), authProcess?.stop().catch(() => {})]);
+		await Promise.all([...this.#runtimes.values()].map(runtime => runtime.attachments.close()));
 	}
 
 	#createRuntime(record: SessionRecordV1): RuntimeSession {
 		const runtime = {} as RuntimeSession;
 		runtime.record = record;
+		runtime.attachments = new PromptAttachmentStore();
 		runtime.timeline = new TranscriptStore();
 		runtime.state = "stopped";
 		runtime.subagents = [];
@@ -747,15 +1096,13 @@ export class DesktopHost {
 				runtime.state = state;
 				if (this.#runtimes.get(runtime.record.id) !== runtime) return;
 				this.#supervisor.updateState(runtime.record.id, state);
-				if (error) {
-					this.#emitUrgent({
-						sessionId: runtime.record.id,
-						type: "session",
-						state,
-						runtime: this.#supervisor.report(runtime.record.id),
-						message: error,
-					});
-				}
+				this.#emitUrgent({
+					sessionId: runtime.record.id,
+					type: "session",
+					state,
+					runtime: this.#supervisor.report(runtime.record.id),
+					message: error,
+				});
 			},
 		});
 		this.#runtimes.set(record.id, runtime);
@@ -797,6 +1144,14 @@ export class DesktopHost {
 		runtime.model = data.model ? `${data.model.provider}/${data.model.id}` : undefined;
 		runtime.thinkingLevel = data.thinkingLevel;
 		runtime.fastMode = data.fastModeEnabled;
+		const planModeRecord = isRecord(data.planMode) ? data.planMode : undefined;
+		runtime.planMode = planModeRecord
+			? {
+					enabled: planModeRecord.enabled === true,
+					planFilePath: typeof planModeRecord.planFilePath === "string" ? planModeRecord.planFilePath : undefined,
+					workflow: typeof planModeRecord.workflow === "string" ? planModeRecord.workflow : undefined,
+				}
+			: undefined;
 		runtime.steeringMode = data.steeringMode ?? "all";
 		runtime.followUpMode = data.followUpMode ?? "all";
 		runtime.interruptMode = data.interruptMode ?? "immediate";
@@ -817,6 +1172,14 @@ export class DesktopHost {
 			const data = subagents.data as { subagents: unknown[] };
 			runtime.subagents = data.subagents.map(toSubagentView);
 		}
+		const agentHub = await client.request({ type: "get_agent_hub" });
+		if (agentHub.success) {
+			try {
+				runtime.agentHub = normalizeAgentHubSnapshot(agentHub.data);
+			} catch {
+				runtime.agentHub = undefined;
+			}
+		}
 		const commands = await client.request({ type: "set_subagent_subscription", level: "progress" });
 		if (!commands.success) throw new Error(commands.error ?? "Subagent subscription failed");
 		await this.#registry.update(runtime.record.id, runtime.record);
@@ -836,12 +1199,24 @@ export class DesktopHost {
 		});
 	}
 
+	/**
+	 * Resolve a loaded desktop session to its registered workspace without
+	 * starting, resuming, or otherwise touching its OMP runtime.
+	 */
+	resolveSessionWorkspace(idInput: unknown): { sessionId: string; cwd: string; workspace: string } {
+		const record = this.#record(idInput);
+		return {
+			sessionId: record.id,
+			cwd: path.resolve(record.cwd),
+			workspace: record.title?.trim() || path.basename(record.cwd) || "Workspace",
+		};
+	}
+
 	#requiredRuntime(id: string): RuntimeSession {
 		const runtime = this.#runtimes.get(id);
 		if (!runtime) throw new Error(`Runtime ${id} is not registered`);
 		return runtime;
 	}
-
 	#record(idInput: unknown): SessionRecordV1 {
 		if (typeof idInput !== "string") throw new TypeError("invalid session id");
 		const record = this.#registry.value.sessions.find(candidate => candidate.id === idInput);
@@ -852,6 +1227,7 @@ export class DesktopHost {
 	#snapshot(runtime: RuntimeSession): SessionSnapshot {
 		const timelineTotal = runtime.timeline.size;
 		const timelineStart = Math.max(0, timelineTotal - 200);
+		const pendingRequest = runtime.outstandingExtensions.values().next().value;
 		return {
 			record: runtime.record,
 			state: runtime.state,
@@ -859,10 +1235,12 @@ export class DesktopHost {
 			timelineStart,
 			timelineTotal,
 			subagents: runtime.subagents,
+			agentHub: runtime.agentHub,
 			commands: [...runtime.commands],
 			model: runtime.model,
 			thinkingLevel: runtime.thinkingLevel,
 			fastMode: runtime.fastMode,
+			planMode: runtime.planMode,
 			steeringMode: runtime.steeringMode,
 			followUpMode: runtime.followUpMode,
 			interruptMode: runtime.interruptMode,
@@ -873,6 +1251,7 @@ export class DesktopHost {
 			tokensPerSecond: runtime.tokensPerSecond,
 			queuedMessageCount: runtime.queuedMessageCount,
 			todoPhases: runtime.todoPhases,
+			...(pendingRequest ? { pendingExtension: extensionView(pendingRequest) } : {}),
 			runtime: this.#supervisor.report(runtime.record.id),
 		};
 	}
@@ -883,27 +1262,42 @@ export class DesktopHost {
 		return normalizeOAuthAccounts(response.data);
 	}
 	async #authAccounts(): Promise<AuthAccountView[]> {
-		const fallback: AuthAccountView = {
-			provider: "openai-codex",
-			name: "ChatGPT Plus/Pro (Codex Subscription)",
-			available: true,
-			signedIn: false,
-		};
 		try {
 			const response = await this.#withAuthClient(client => client.request({ type: "get_login_providers" }));
-			if (!response.success) return [fallback];
+			if (!response.success) {
+				this.#emitAuth({
+					type: "error",
+					provider: AUTH_DISCOVERY_PROVIDER,
+					message: `Provider status could not be loaded: ${
+						response.error ?? "the local OMP runtime did not report sign-in providers"
+					}`,
+				});
+				return [];
+			}
 			const data = isRecord(response.data) ? response.data : undefined;
 			return normalizeAuthAccounts(data?.providers);
-		} catch {
-			return [fallback];
+		} catch (error) {
+			this.#emitAuth({
+				type: "error",
+				provider: AUTH_DISCOVERY_PROVIDER,
+				message: `Provider status could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			return [];
 		}
 	}
 
 	async #runAuthLogin(provider: string): Promise<AuthAccountView[]> {
 		let providerName = provider;
 		try {
-			const account = (await this.#authAccounts()).find(candidate => candidate.provider === provider);
-			if (!account) throw new Error(`Unsupported OAuth provider: ${provider}`);
+			const accounts = await this.#authAccounts();
+			const account = accounts.find(candidate => candidate.provider === provider);
+			if (!account) {
+				throw new Error(
+					accounts.length === 0
+						? "Provider status could not be loaded; sign-in availability is unknown"
+						: `Unsupported OAuth provider: ${provider}`,
+				);
+			}
 			if (!account.available) throw new Error(`${account.name} sign-in is unavailable on this system`);
 			providerName = account.name;
 			this.#activeAuthProvider = { id: provider, name: providerName };
@@ -1002,7 +1396,7 @@ export class DesktopHost {
 	#emitAuth(event: AuthEvent): void {
 		if (isWindowUsable(this.#window)) {
 			try {
-				this.#window?.webContents.send("branchlight:auth", event);
+				this.#window?.webContents.send("gradivus:auth", event);
 			} catch {}
 		}
 	}
@@ -1020,9 +1414,36 @@ export class DesktopHost {
 	#onEvent(runtime: RuntimeSession, event: unknown): void {
 		this.#supervisor.touch(runtime.record.id);
 		const frame = event as Record<string, unknown>;
+		if (frame.type === "prompt_result") {
+			const rawError = isRecord(frame.error) ? frame.error : undefined;
+			this.#emitUrgent({
+				sessionId: runtime.record.id,
+				type: "prompt_result",
+				requestId: typeof frame.id === "string" ? frame.id : undefined,
+				agentInvoked: frame.agentInvoked === true,
+				error:
+					rawError && typeof rawError.message === "string"
+						? {
+								message: rawError.message,
+								...(typeof rawError.code === "string" ? { code: rawError.code } : {}),
+							}
+						: undefined,
+			});
+			return;
+		}
 		if (frame.type === "subagent_lifecycle" || frame.type === "subagent_progress") {
 			this.#updateSubagents(runtime, frame);
 			this.#queueEvent({ sessionId: runtime.record.id, type: "subagents", subagents: runtime.subagents });
+			return;
+		}
+		if (frame.type === "agent_hub_update") {
+			try {
+				const snapshot = normalizeAgentHubSnapshot(frame);
+				runtime.agentHub = snapshot;
+				this.#emitUrgent({ sessionId: runtime.record.id, type: "agent_hub_update", agentHub: snapshot });
+			} catch {
+				// Ignore malformed push payloads; the RPC stream must remain usable.
+			}
 			return;
 		}
 		if (frame.type === "available_commands_update") {
@@ -1038,6 +1459,16 @@ export class DesktopHost {
 			const model = toModelOption(frame.model);
 			if (model) runtime.model = `${model.provider}/${model.id}`;
 			if (isThinkingLevel(frame.thinkingLevel)) runtime.thinkingLevel = frame.thinkingLevel;
+			if ("planMode" in frame) {
+				const planRecord = isRecord(frame.planMode) ? frame.planMode : undefined;
+				runtime.planMode = planRecord
+					? {
+							enabled: planRecord.enabled === true,
+							planFilePath: typeof planRecord.planFilePath === "string" ? planRecord.planFilePath : undefined,
+							workflow: typeof planRecord.workflow === "string" ? planRecord.workflow : undefined,
+						}
+					: undefined;
+			}
 			this.#emitUrgent({
 				sessionId: runtime.record.id,
 				type: "config",
@@ -1045,6 +1476,7 @@ export class DesktopHost {
 					model: runtime.model,
 					thinkingLevel: runtime.thinkingLevel,
 					fastMode: runtime.fastMode,
+					planMode: runtime.planMode,
 					steeringMode: runtime.steeringMode,
 					followUpMode: runtime.followUpMode,
 					interruptMode: runtime.interruptMode,
@@ -1076,9 +1508,7 @@ export class DesktopHost {
 		if (items.some(item => item.status === "complete" && item.isError !== true && item.files?.length)) {
 			runtime.fileDiffCache.clear();
 		}
-		for (const item of items) this.#queueEvent({ sessionId: runtime.record.id, type: "timeline", item });
-		if (frame.type === "notice" || frame.type === "command_output" || frame.type === "agent_end")
-			this.#flush(runtime.record.id);
+		for (const item of items) this.#emitUrgent({ sessionId: runtime.record.id, type: "timeline", item });
 	}
 
 	#updateSubagents(runtime: RuntimeSession, frame: Record<string, unknown>): void {
@@ -1135,31 +1565,12 @@ export class DesktopHost {
 			});
 			return;
 		}
-		if (expectsExtensionResponse(request.method)) runtime.outstandingExtensions.set(request.id, request.method);
-		const extension: ExtensionView = {
-			id: request.id,
-			method: request.method,
-			targetId: request.targetId,
-			title: request.title,
-			message: request.message,
-			options: request.options,
-			placeholder: request.placeholder,
-			sensitive: request.sensitive,
-			prefill: request.prefill,
-			text: request.text,
-			url: request.url,
-			instructions: request.instructions,
-			notifyType: request.notifyType,
-			statusKey: request.statusKey,
-			statusText: request.statusText,
-			widgetKey: request.widgetKey,
-			widgetLines: request.widgetLines,
-			widgetPlacement: request.widgetPlacement,
-		};
+		if (expectsExtensionResponse(request.method)) runtime.outstandingExtensions.set(request.id, request);
+		const extension = extensionView(request);
 		this.#emitUrgent({ sessionId: runtime.record.id, type: "extension", extension });
 	}
 
-	#queueEvent(event: BranchlightEvent): void {
+	#queueEvent(event: GradivusEvent): void {
 		const queue = this.#eventQueues.get(event.sessionId) ?? [];
 		queue.push(event);
 		this.#eventQueues.set(event.sessionId, queue);
@@ -1170,7 +1581,7 @@ export class DesktopHost {
 			);
 	}
 
-	#emitUrgent(event: BranchlightEvent): void {
+	#emitUrgent(event: GradivusEvent): void {
 		this.#queueEvent(event);
 		this.#flush(event.sessionId);
 	}
@@ -1185,7 +1596,7 @@ export class DesktopHost {
 		this.#eventQueues.delete(sessionId);
 		if (isWindowUsable(this.#window)) {
 			try {
-				for (const event of queue) this.#window?.webContents.send("branchlight:event", event);
+				for (const event of queue) this.#window?.webContents.send("gradivus:event", event);
 			} catch {}
 		}
 	}
@@ -1194,6 +1605,28 @@ function expectsExtensionResponse(method: RpcExtensionUIRequest["method"]): bool
 	return (
 		method === "select" || method === "confirm" || method === "input" || method === "editor" || method === "open_url"
 	);
+}
+function extensionView(request: RpcExtensionUIRequest): ExtensionView {
+	return {
+		id: request.id,
+		method: request.method,
+		targetId: request.targetId,
+		title: request.title,
+		message: request.message,
+		options: request.options,
+		placeholder: request.placeholder,
+		sensitive: request.sensitive,
+		prefill: request.prefill,
+		text: request.text,
+		url: request.url,
+		instructions: request.instructions,
+		notifyType: request.notifyType,
+		statusKey: request.statusKey,
+		statusText: request.statusText,
+		widgetKey: request.widgetKey,
+		widgetLines: request.widgetLines,
+		widgetPlacement: request.widgetPlacement,
+	};
 }
 function assertTimelineOffset(value: unknown, label: string): number {
 	if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 1_000_000) {
@@ -1308,6 +1741,157 @@ function toModelOption(value: unknown): ModelOption | undefined {
 				: undefined,
 	};
 }
+function assertAgentHubId(value: unknown): string {
+	if (typeof value !== "string") throw new TypeError("agent id must be text");
+	const id = value.trim();
+	if (id.length === 0 || id.length > 256) throw new RangeError("invalid agent id");
+	return id;
+}
+
+function assertAgentHubByteOffset(value: unknown): number {
+	if (value === undefined) return 0;
+	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new RangeError("invalid Agent Hub byte offset");
+	return value as number;
+}
+
+function assertAgentHubMessage(value: unknown): string {
+	const message = assertBoundedText(value, "agent hub message").trim();
+	if (message.length === 0 || message.length > 64 * 1024) throw new RangeError("invalid Agent Hub message");
+	return message;
+}
+function normalizeAgentHubSnapshot(value: unknown): AgentHubSnapshot {
+	if (!isRecord(value) || !Array.isArray(value.agents)) throw new Error("Agent Hub snapshot was invalid");
+	const agents = value.agents
+		.slice(0, 10_000)
+		.map(normalizeAgentHubAgent)
+		.filter((agent): agent is AgentHubAgent => agent !== undefined);
+	return { agents };
+}
+
+function normalizeAgentHubAgent(value: unknown): AgentHubAgent | undefined {
+	if (!isRecord(value)) return undefined;
+	if (
+		typeof value.id !== "string" ||
+		value.id.length === 0 ||
+		value.id.length > 256 ||
+		typeof value.displayName !== "string" ||
+		value.displayName.length === 0 ||
+		value.displayName.length > 512 ||
+		(value.kind !== "sub" && value.kind !== "advisor") ||
+		(value.status !== "running" &&
+			value.status !== "idle" &&
+			value.status !== "parked" &&
+			value.status !== "aborted") ||
+		typeof value.createdAt !== "number" ||
+		!Number.isFinite(value.createdAt) ||
+		typeof value.lastActivity !== "number" ||
+		!Number.isFinite(value.lastActivity)
+	)
+		return undefined;
+	const optionalText = (key: string, max: number): string | undefined => {
+		const candidate = value[key];
+		return typeof candidate === "string" && candidate.length > 0 && candidate.length <= max ? candidate : undefined;
+	};
+	return {
+		id: value.id,
+		displayName: value.displayName,
+		kind: value.kind,
+		parentId: optionalText("parentId", 256),
+		status: value.status,
+		activity: optionalText("activity", 4_096),
+		createdAt: value.createdAt,
+		lastActivity: value.lastActivity,
+		transcriptAvailable: value.transcriptAvailable === true,
+		readOnly: value.readOnly === true,
+		agent: optionalText("agent", 256),
+		modelRole: optionalText("modelRole", 256),
+		resolvedModel: optionalText("resolvedModel", 512),
+		metrics: normalizeAgentHubMetrics(value.metrics),
+		progress: normalizeAgentHubProgress(value.progress),
+	};
+}
+function normalizeAgentHubProgress(value: unknown): SubagentView["progress"] | undefined {
+	if (!isRecord(value)) return undefined;
+	const textValue = (key: string, max = 4_096): string | undefined => {
+		const candidate = value[key];
+		return typeof candidate === "string" && candidate.length <= max ? candidate : undefined;
+	};
+	const numberValue = (key: string): number | undefined => {
+		const candidate = value[key];
+		return typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
+	};
+	const recentOutput = Array.isArray(value.recentOutput)
+		? value.recentOutput
+				.slice(0, 12)
+				.filter((item): item is string => typeof item === "string" && item.length <= 4_096)
+		: undefined;
+	return {
+		currentTool: textValue("currentTool"),
+		lastIntent: textValue("lastIntent"),
+		tokens: numberValue("tokens"),
+		contextTokens: numberValue("contextTokens"),
+		contextWindow: numberValue("contextWindow"),
+		cost: numberValue("cost"),
+		durationMs: numberValue("durationMs"),
+		recentOutput,
+		resolvedModel: textValue("resolvedModel", 512),
+		requests: numberValue("requests"),
+	};
+}
+
+function normalizeAgentHubMetrics(value: unknown): AgentHubMetrics | undefined {
+	if (!isRecord(value)) return undefined;
+	const numeric = (key: string): number | undefined => {
+		const candidate = value[key];
+		return typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 ? candidate : undefined;
+	};
+	const tokens = numeric("tokens");
+	const requests = numeric("requests");
+	const tools = numeric("tools");
+	const cost = numeric("cost");
+	const durationMs = numeric("durationMs");
+	if (
+		tokens === undefined ||
+		requests === undefined ||
+		tools === undefined ||
+		cost === undefined ||
+		durationMs === undefined
+	)
+		return undefined;
+	return {
+		tokens,
+		requests,
+		tools,
+		cost,
+		durationMs,
+		contextTokens: numeric("contextTokens"),
+		contextWindow: numeric("contextWindow"),
+	};
+}
+
+function normalizeAgentHubMessagePage(value: unknown): AgentHubMessagePage {
+	if (
+		!isRecord(value) ||
+		!Number.isSafeInteger(value.fromByte) ||
+		(value.fromByte as number) < 0 ||
+		!Number.isSafeInteger(value.nextByte) ||
+		(value.nextByte as number) < 0 ||
+		typeof value.reset !== "boolean" ||
+		!Array.isArray(value.entries) ||
+		!Array.isArray(value.messages)
+	)
+		throw new Error("Agent Hub message response was invalid");
+	const fromByte = value.fromByte as number;
+	const nextByte = value.nextByte as number;
+	return {
+		fromByte,
+		nextByte,
+		reset: value.reset,
+		entries: value.entries.slice(0, 2_000),
+		messages: value.messages.slice(0, 2_000),
+	};
+}
+
 function normalizeOpenRouterModelRouting(value: unknown): OpenRouterModelRouting {
 	if (
 		!isRecord(value) ||
@@ -1582,6 +2166,8 @@ function isAgentSettingTab(value: unknown): value is AgentSettingView["tab"] {
 		value === "model" ||
 		value === "interaction" ||
 		value === "context" ||
+		value === "files" ||
+		value === "shell" ||
 		value === "tools" ||
 		value === "tasks"
 	);
@@ -1602,11 +2188,13 @@ function assertAgentSettingValue(value: unknown): AgentSettingValue {
 
 function assertAuthProvider(value: unknown): string {
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value))
-		throw new TypeError("Unsupported OAuth provider");
+		throw new TypeError("invalid auth provider");
 	return value;
 }
 
 function assertCredentialId(value: unknown): number {
-	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("invalid OAuth credential id");
+	if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+		throw new TypeError("invalid credential id");
+	}
 	return value as number;
 }

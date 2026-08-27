@@ -28,9 +28,53 @@ export type {
 	SetStylePatchOp,
 };
 
-export type ElementEditPhase = "idle" | "picking" | "selected" | "sending" | "working" | "ready" | "error" | "preview";
+export type ElementEditPhase =
+	| "idle"
+	| "picking"
+	| "selected"
+	| "sending"
+	| "analyzing"
+	| "working"
+	| "ready"
+	| "error"
+	| "preview";
 
 export type SelectionCaptureMode = "dom" | "screenshot";
+
+export type ElementTaskAction = "inline" | "chat" | "queue";
+
+export interface SelectionTargetAgent {
+	id: string;
+	name: string;
+	swatch: string;
+}
+
+export type QueuedElementTaskStatus = "pending" | "running" | "completed" | "error";
+
+export interface QueuedElementTask {
+	id: string;
+	taskIndex: number;
+	paneId: string;
+	targetAgentId: string;
+	targetAgentName: string;
+	agentSwatch: string;
+	instruction: string;
+	tagName: string;
+	selector: string;
+	agentType?: string;
+	captureMode?: SelectionCaptureMode;
+	url?: string;
+	summary?: string;
+	domHtml?: string;
+	domSnapshot?: ElementDomSnapshot;
+	screenshot?: string;
+	screenshotWidth?: number;
+	screenshotHeight?: number;
+	createdAt: number;
+	status: QueuedElementTaskStatus;
+	response?: string;
+	error?: string;
+}
 
 export interface ElementBoundingBox {
 	x: number;
@@ -144,6 +188,11 @@ export interface ElementEditState {
 		message: string;
 	};
 	workingMessage?: string;
+	action?: ElementTaskAction;
+	response?: string;
+	instruction?: string;
+	queuedTasks?: QueuedElementTask[];
+	queueRunning?: boolean;
 	result?: ElementEditResultV1;
 	updatedAt: number;
 }
@@ -189,6 +238,7 @@ export interface StartSelectionOptions {
 	selectionId?: string;
 	captureMode?: SelectionCaptureMode;
 	url?: string;
+	target?: SelectionTargetAgent;
 }
 
 export interface UpdateSelectionOptions {
@@ -208,6 +258,8 @@ export interface CommitSelectionPayload {
 	target?: string;
 	selector?: string;
 	instruction?: string;
+	action?: ElementTaskAction;
+	agentId?: string;
 	domSnapshot?: ElementDomSnapshot;
 	screenshot?: ElementScreenshot;
 }

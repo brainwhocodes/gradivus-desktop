@@ -8,7 +8,7 @@ import {
 	validateDeclarativePreviewPatch,
 } from "../src";
 
-function createMockPage(targetId: string, initialUrl = "https://omp.sh", initialTitle = "Branchlight"): Page {
+function createMockPage(targetId: string, initialUrl = "https://omp.sh", initialTitle = "Gradivus"): Page {
 	let currentUrl = initialUrl;
 	const currentTitle = initialTitle;
 	const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -45,7 +45,7 @@ function createMockPage(targetId: string, initialUrl = "https://omp.sh", initial
 						nodeName: "DIV",
 						localName: "div",
 						attributes: ["id", "hero", "class", "hero-banner", "role", "banner", "aria-label", "Hero Section"],
-						nodeValue: "Welcome to Branchlight",
+						nodeValue: "Welcome to Gradivus",
 						children: [],
 					},
 				};
@@ -118,8 +118,8 @@ function createMockPage(targetId: string, initialUrl = "https://omp.sh", initial
 			if (typeof fn === "function") {
 				const fnStr = fn.toString();
 				if (
-					(fnStr.includes("__branchlight_selection_overlay_host__") ||
-						fnStr.includes("__branchlight_active_target__")) &&
+					(fnStr.includes("__gradivus_selection_overlay_host__") ||
+						fnStr.includes("__gradivus_active_target__")) &&
 					fnStr.includes("return")
 				) {
 					return mockActiveTarget;
@@ -137,7 +137,7 @@ function createMockPage(targetId: string, initialUrl = "https://omp.sh", initial
 							attributes: { id: "hero", class: "hero-banner" },
 							classes: ["hero-banner"],
 							id: "hero",
-							text: "Welcome to Branchlight",
+							text: "Welcome to Gradivus",
 							depth: 0,
 							childCount: 0,
 							isVisible: true,

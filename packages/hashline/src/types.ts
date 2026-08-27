@@ -155,8 +155,6 @@ export interface CompactDiffPreview {
 export interface CompactDiffOptions {
 	/** Added lines kept on each side of a long added-run elision (default 2). */
 	maxAddedRunContext?: number;
-	/** Back-compat alias for {@link maxAddedRunContext}. */
-	maxUnchangedRun?: number;
 }
 
 /** Resolved 1-indexed inclusive line span of a block target. */

@@ -393,6 +393,24 @@ function addTerminal(
 ): string {
 	const id = idFor(command, payload, "id", "terminal");
 	assertUniqueId(document, id);
+	const detached = payload.detached === true;
+	if (detached) {
+		if ("paneId" in payload || "tabId" in payload)
+			throw rejection("invalid_command", "detached terminal cannot have a pane");
+		const terminal: WorkspaceTerminalV1 = {
+			id,
+			locationId,
+			profileId: optionalString(payload, "profileId"),
+			generation,
+			label: optionalString(payload, "label") ?? "Terminal",
+			cwd: optionalString(payload, "cwd"),
+			columns: optionalNumber(payload, "columns"),
+			rows: optionalNumber(payload, "rows"),
+			status: "starting",
+		};
+		document.terminals.push(terminal);
+		return id;
+	}
 	const tabId = idFor(command, payload, "tabId", "tab");
 	const requestedLayout = optionalString(payload, "layout");
 	if (
@@ -819,7 +837,6 @@ export function reduceWorkspace(
 					generation: location.lifecycle.generation,
 				});
 				document.activeWorkspaceId = command.workspaceId;
-				effects = [effectFor(command, p, "remote")];
 				break;
 			}
 			case "workspace.start": {
@@ -1008,11 +1025,9 @@ export function reduceWorkspace(
 								nextAttemptAt: command.issuedAt,
 								reasonCode: "tab_closed",
 							});
-							effects.push(effectFor(command, { id: browser.id }, "browser"));
 						}
 					} else if (pane.kind === "preview") {
 						document.previews = document.previews.filter(item => item.id !== pane.entityId);
-						effects.push(effectFor(command, { id: pane.entityId }, "browser"));
 					}
 					document.panes = document.panes.filter(item => item.id !== pane.id);
 				}
@@ -1035,6 +1050,7 @@ export function reduceWorkspace(
 					"columns",
 					"rows",
 					"layout",
+					"detached",
 				]);
 				const locationId =
 					optionalString(p, "locationId") ??
@@ -1044,8 +1060,8 @@ export function reduceWorkspace(
 				checkLocationActive(location);
 				optionalString(p, "shell");
 				optionalStringArray(p, "args");
-				addTerminal(document, command, p, locationId, location.lifecycle.generation);
-				effects = [effectFor(command, p, "terminal")];
+				const terminalId = addTerminal(document, command, p, locationId, location.lifecycle.generation);
+				effects = [effectFor(command, { ...p, id: terminalId }, "terminal")];
 				break;
 			}
 			case "terminal.status": {
@@ -1137,7 +1153,6 @@ export function reduceWorkspace(
 				}
 				const agent: WorkspaceAgentV1 = { id, profileId, sessionId, status: "starting" };
 				document.agents.push(agent);
-				effects = [effectFor(command, p, "agent")];
 				break;
 			}
 			case "agent.attach": {
@@ -1211,7 +1226,6 @@ export function reduceWorkspace(
 				if (!existingAgent) {
 					document.agents.push({ id, profileId, sessionId, terminalId, paneId, status: "running" });
 				}
-				effects = [effectFor(command, p, "agent")];
 				break;
 			}
 			case "agent.detach": {
@@ -1232,7 +1246,6 @@ export function reduceWorkspace(
 						session.lastSeenAt = command.issuedAt;
 					}
 				}
-				effects = [effectFor(command, p, "agent")];
 				break;
 			}
 			case "agent.message": {
@@ -1249,7 +1262,6 @@ export function reduceWorkspace(
 				const agentId = requiredString(p, "id");
 				requiredString(p, "message");
 				appendElementEdit(document, command, p, agentId);
-				effects = [effectFor(command, p, "agent")];
 				break;
 			}
 			case "agent.stop": {
@@ -1257,7 +1269,6 @@ export function reduceWorkspace(
 				const agent = document.agents.find(item => item.id === requiredString(p, "id"));
 				if (!agent) throw rejection("not_found", "agent does not exist");
 				agent.status = "stopped";
-				effects = [effectFor(command, p, "agent")];
 				break;
 			}
 			case "browser.open": {
@@ -1279,7 +1290,6 @@ export function reduceWorkspace(
 				const location = assertGeneration(document, locationId, optionalNumber(p, "generation"));
 				checkLocationActive(location);
 				addBrowser(document, command, p, locationId, location.lifecycle.generation);
-				effects = [effectFor(command, p, "browser")];
 				break;
 			}
 			case "browser.navigate": {
@@ -1289,7 +1299,6 @@ export function reduceWorkspace(
 				if (browser.status === "closed" || browser.status === "failed")
 					throw rejection("lifecycle_blocked", "browser is not navigable");
 				browser.url = requiredString(p, "url");
-				effects = [effectFor(command, p, "browser")];
 				break;
 			}
 			case "browser.close": {
@@ -1298,7 +1307,6 @@ export function reduceWorkspace(
 				if (!document.browsers.some(item => item.id === id)) throw rejection("not_found", "browser does not exist");
 				document.browsers = document.browsers.filter(item => item.id !== id);
 				closeEntityPane(document, id, "browser", command, p);
-				effects = [effectFor(command, p, "browser")];
 				break;
 			}
 			case "selection.set": {
@@ -1328,7 +1336,6 @@ export function reduceWorkspace(
 					url: requiredString(p, "url"),
 					status: "opening",
 				});
-				effects = [effectFor(command, p, "browser")];
 				break;
 			}
 			case "preview.close": {
@@ -1336,7 +1343,6 @@ export function reduceWorkspace(
 				const id = requiredString(p, "id");
 				if (!document.previews.some(item => item.id === id)) throw rejection("not_found", "preview does not exist");
 				document.previews = document.previews.filter(item => item.id !== id);
-				effects = [effectFor(command, p, "browser")];
 				break;
 			}
 			case "service.declare": {

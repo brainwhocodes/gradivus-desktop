@@ -6,13 +6,16 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { WorkspaceCommandV1, WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 import { ensureWorkspaceRuntime, type WorkspaceRuntimeDescriptor } from "@oh-my-pi/pi-workspace-runtime/bootstrap";
 import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
-import { app, BrowserWindow, ipcMain, net, protocol, session } from "electron";
+import { app, BrowserWindow, ipcMain, nativeTheme, net, protocol, session } from "electron";
+import type { OpenChatTerminalInput } from "../shared/contracts";
+import { DESKTOP_THEME_PALETTES, type ResolvedTheme, resolveTheme } from "../shared/theme-palette";
 import { AppSettingsStore } from "./app-settings";
 import { defaultWorkspacePath, ompExecutablePath, runtimeRootDir } from "./backend-path";
 import { DesktopHost } from "./desktop-host";
-import { safeExternalUrl } from "./guards";
+import { adoptOwnedRuntimeCandidate } from "./runtime-candidate";
+import { driveRuntimeReconnect } from "./runtime-reconnect";
 import { shutdownDesktopServices } from "./shutdown";
-import { WorkspaceHost } from "./workspace-host";
+import { type CreateBrowserOptions, type CreateTerminalOptions, WorkspaceHost } from "./workspace-host";
 
 process.stdout?.on?.("error", (err: unknown) => {
 	if ((err as { code?: string })?.code === "EIO") return;
@@ -22,19 +25,53 @@ process.stderr?.on?.("error", (err: unknown) => {
 });
 process.on("uncaughtException", (err: unknown) => {
 	if ((err as { code?: string })?.code === "EIO") return;
+	console.error("UNCAUGHT EXCEPTION IN MAIN PROCESS:", err);
 	logger.error("Uncaught exception in main process", { error: err instanceof Error ? err.message : String(err) });
 });
+process.on("unhandledRejection", (reason: unknown) => {
+	console.error("UNHANDLED REJECTION IN MAIN PROCESS:", reason);
+	logger.error("Unhandled rejection in main process", { error: String(reason) });
+});
+
 const DEV_SERVER =
 	typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "string" ? new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL) : undefined;
 const CONTENT_SECURITY_POLICY =
-	"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+	"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 let mainWindow: BrowserWindow | undefined;
 let host: DesktopHost | undefined;
 let appSettingsStore: AppSettingsStore | undefined;
 let quitting = false;
 let workspace: WorkspaceHost | undefined;
 let runtimeDescriptor: WorkspaceRuntimeDescriptor | undefined;
+let requestRuntimeReconnect: (() => Promise<void>) | undefined;
 let runtimeClient: WorkspaceClient | undefined;
+
+interface InitializedServices {
+	host: DesktopHost;
+	workspace: WorkspaceHost;
+	settingsStore: AppSettingsStore;
+	runtimeClient?: WorkspaceClient;
+}
+
+let resolveServicesReady: ((services: InitializedServices) => void) | undefined;
+let rejectServicesReady: ((error: unknown) => void) | undefined;
+
+const servicesReadyPromise = new Promise<InitializedServices>((resolve, reject) => {
+	resolveServicesReady = resolve;
+	rejectServicesReady = reject;
+});
+
+async function ensureServices(): Promise<InitializedServices> {
+	if (host && workspace && appSettingsStore) {
+		return { host, workspace, settingsStore: appSettingsStore, runtimeClient };
+	}
+	await servicesReadyPromise;
+	if (!host || !workspace || !appSettingsStore) {
+		throw new Error("Desktop services are unavailable");
+	}
+	return { host, workspace, settingsStore: appSettingsStore, runtimeClient };
+}
 
 const DEFAULT_WORKSPACE_ID = "workspace-default";
 const DEFAULT_LOCATION_ID = "location-default";
@@ -110,14 +147,17 @@ async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
 	}
 }
 
-app.name = "Mars Kommander";
-app.setName("Mars Kommander");
-app.setAppUserModelId("labs.mars-kommander.desktop");
-app.commandLine.appendSwitch("remote-debugging-port", "9222");
+app.name = "Gradivus";
+app.setName("Gradivus");
+app.setAppUserModelId("labs.gradivus.desktop");
 protocol.registerSchemesAsPrivileged([
-	{ scheme: "branchlight", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } },
+	{ scheme: "gradivus", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } },
 ]);
-const gotLock = app.requestSingleInstanceLock();
+
+// Register all IPC handlers synchronously so no renderer IPC call ever races with async initialization
+registerIpc();
+
+const gotLock = app.isPackaged ? app.requestSingleInstanceLock() : true;
 if (!gotLock) {
 	app.quit();
 } else {
@@ -126,6 +166,7 @@ if (!gotLock) {
 		if (mainWindow.isMinimized()) mainWindow.restore();
 		mainWindow.focus();
 	});
+
 	void app
 		.whenReady()
 		.then(async () => {
@@ -145,20 +186,28 @@ if (!gotLock) {
 			}
 			registerProtocol();
 			configureSecurity();
-			appSettingsStore = new AppSettingsStore(app.getPath("userData"), defaultWorkspacePath());
+
+			const rawUserData = app.getPath("userData");
+			const userDataPath = await fs.realpath(rawUserData).catch(() => rawUserData);
+			appSettingsStore = new AppSettingsStore(userDataPath, defaultWorkspacePath());
 			await appSettingsStore.load();
-			host = new DesktopHost(app.getPath("userData"));
+			const theme = resolveTheme(appSettingsStore.settings.theme, nativeTheme.shouldUseDarkColors);
+
+			host = new DesktopHost(userDataPath);
 			await host.load();
-			const runtimeRoot = runtimeRootDir();
+
+			const runtimeRoot = runtimeRootDir(userDataPath);
 			try {
 				runtimeDescriptor = await ensureWorkspaceRuntime({
 					runtimeDir: runtimeRoot,
 					executablePath: ompExecutablePath(),
 				});
 			} catch (error) {
-				logger.error("Branchlight runtime startup failed", {
+				console.error("RUNTIME STARTUP ERROR:", error);
+				logger.error("Gradivus runtime startup failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
+				rejectServicesReady?.(error);
 				app.quit();
 				return;
 			}
@@ -167,75 +216,96 @@ if (!gotLock) {
 			try {
 				await ensureDefaultWorkspace(runtimeClient);
 			} catch (error) {
+				console.error("WORKSPACE AUTHORITY ERROR:", error);
 				logger.error("Could not initialize workspace authority", { error: String(error) });
+				rejectServicesReady?.(error);
 				app.quit();
 				return;
 			}
-
-			mainWindow = createWindow();
+			mainWindow = createWindow(theme);
 			mainWindow.on("closed", () => {
 				host?.setWindow(undefined);
 				mainWindow = undefined;
 			});
 			host.setWindow(mainWindow);
-			workspace = new WorkspaceHost(mainWindow, appSettingsStore);
+			workspace = new WorkspaceHost(mainWindow, appSettingsStore, host);
+			workspace.setDesktopHost(host);
 
 			let runtimeGeneration = 0;
 			let reconnecting = false;
-
 			async function reconnectRuntime(): Promise<void> {
 				if (reconnecting || quitting) return;
 				reconnecting = true;
-				if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-					try {
-						mainWindow.webContents.send("branchlight:workspace", {
-							type: "connection-state",
-							state: "reconnecting",
-						});
-					} catch {}
-				}
-
-				let attempts = 0;
-				const maxAttempts = 10;
-				while (!quitting && attempts < maxAttempts) {
-					attempts++;
-					const delay = Math.min(500 * 1.5 ** (attempts - 1), 5000);
-					await new Promise(r => setTimeout(r, delay));
-					if (quitting) break;
-					try {
-						const nextDescriptor = await ensureWorkspaceRuntime({
-							runtimeDir: runtimeRoot,
-							executablePath: ompExecutablePath(),
-						});
-						const nextClient = nextDescriptor.client;
-						await nextClient.getDocument();
-						runtimeDescriptor = nextDescriptor;
-						runtimeClient = nextClient;
-						await bindRuntimeClient(nextClient);
-						if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-							try {
-								mainWindow.webContents.send("branchlight:workspace", {
-									type: "connection-state",
-									state: "connected",
+				try {
+					await driveRuntimeReconnect({
+						emit: event => {
+							if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+								try {
+									mainWindow.webContents.send("gradivus:workspace", {
+										type: "connection-state",
+										...event,
+									});
+								} catch {}
+							}
+						},
+						attempt: async () => {
+							const nextDescriptor = await ensureWorkspaceRuntime({
+								runtimeDir: runtimeRoot,
+								executablePath: ompExecutablePath(),
+							});
+							const previousDescriptor = runtimeDescriptor;
+							const adoptedDescriptor = await adoptOwnedRuntimeCandidate(
+								nextDescriptor,
+								async candidate => {
+									await candidate.client.getDocument();
+									if (quitting) throw new Error("Runtime reconnect canceled during verification");
+								},
+								async candidate => {
+									if (quitting) throw new Error("Runtime reconnect canceled before binding");
+									await bindRuntimeClient(candidate.client);
+									if (quitting) throw new Error("Runtime reconnect canceled after binding");
+								},
+							);
+							if (quitting) {
+								await adoptedDescriptor.close().catch(error => {
+									logger.warn("Runtime reconnect candidate close failed during shutdown", {
+										error: String(error),
+									});
 								});
-							} catch {}
-						}
-						reconnecting = false;
-						return;
-					} catch (error) {
-						logger.warn("Runtime reconnect attempt failed", { attempt: attempts, error: String(error) });
-					}
-				}
-				reconnecting = false;
-			}
+								throw new Error("Runtime reconnect canceled during shutdown");
+							}
 
-			function bindRuntimeClient(client: WorkspaceClient): Promise<void> {
-				const generation = ++runtimeGeneration;
+							runtimeDescriptor = adoptedDescriptor;
+							runtimeClient = adoptedDescriptor.client;
+							if (previousDescriptor && previousDescriptor !== adoptedDescriptor) {
+								try {
+									await previousDescriptor.close();
+								} catch (error) {
+									logger.warn("Previous runtime descriptor close failed", { error: String(error) });
+								}
+							}
+						},
+						onAttemptError: (error, attemptNumber) => {
+							logger.warn("Runtime reconnect attempt failed", {
+								attempt: attemptNumber,
+								error: String(error),
+							});
+						},
+						shouldContinue: () => !quitting,
+					});
+				} finally {
+					reconnecting = false;
+				}
+			}
+			requestRuntimeReconnect = () => reconnectRuntime();
+
+			async function bindRuntimeClient(client: WorkspaceClient): Promise<void> {
+				const generation = runtimeGeneration + 1;
 				if (client.principal && client.document) {
 					host?.setWorkspaceAuthority(client.principal, client.document);
 				}
 				if (workspace) {
-					void workspace.replaceClient(client);
+					await workspace.replaceClient(client);
 				}
 
 				client.onDocument(d => {
@@ -246,7 +316,7 @@ if (!gotLock) {
 						workspace?.syncWithDocument(d);
 					}
 					try {
-						mainWindow.webContents.send("branchlight:workspace-document", d);
+						mainWindow.webContents.send("gradivus:workspace-document", d);
 					} catch {}
 				});
 
@@ -256,17 +326,24 @@ if (!gotLock) {
 						void reconnectRuntime();
 					}
 				});
-
-				return Promise.resolve();
+				runtimeGeneration = generation;
 			}
 
 			await bindRuntimeClient(runtimeClient);
-			registerIpc(host, workspace, appSettingsStore);
+
+			// Unblock all pending and future IPC calls
+			resolveServicesReady?.({
+				host,
+				workspace,
+				settingsStore: appSettingsStore,
+				runtimeClient,
+			});
+
 			if (host.bootstrap().warning) {
 				mainWindow.webContents.once("did-finish-load", () => {
 					if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
 						try {
-							mainWindow.webContents.send("branchlight:event", {
+							mainWindow.webContents.send("gradivus:event", {
 								sessionId: "",
 								type: "warning",
 								message: host?.bootstrap().warning,
@@ -278,10 +355,12 @@ if (!gotLock) {
 			await loadRenderer(mainWindow);
 		})
 		.catch(error => {
-			console.error("STARTUP ERROR:", error);
-			logger.error("Branchlight startup failed", { error: error instanceof Error ? error.message : String(error) });
+			console.error("GRADIVUS STARTUP FAILED:", error);
+			logger.error("Gradivus startup failed", { error: error instanceof Error ? error.message : String(error) });
+			rejectServicesReady?.(error);
 			app.quit();
 		});
+
 	app.on("before-quit", event => {
 		if (quitting || (!host && !workspace)) return;
 		event.preventDefault();
@@ -293,21 +372,41 @@ if (!gotLock) {
 			quit: () => app.quit(),
 		});
 	});
+
 	app.on("window-all-closed", () => {
 		app.quit();
 	});
+
+	app.on("activate", () => {
+		if (!appSettingsStore) return;
+		if (BrowserWindow.getAllWindows().length === 0) {
+			const theme = resolveTheme(appSettingsStore.settings.theme, nativeTheme.shouldUseDarkColors);
+			mainWindow = createWindow(theme);
+			mainWindow.on("closed", () => {
+				host?.setWindow(undefined);
+				mainWindow = undefined;
+			});
+			host?.setWindow(mainWindow);
+			workspace = new WorkspaceHost(mainWindow, appSettingsStore, host);
+			if (host) workspace.setDesktopHost(host);
+			if (runtimeClient) {
+				void workspace.replaceClient(runtimeClient);
+			}
+			void loadRenderer(mainWindow);
+		}
+	});
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(theme: ResolvedTheme): BrowserWindow {
 	const iconCandidate = path.join(__dirname, "..", "..", "resources", "icon.png");
 	const window = new BrowserWindow({
 		width: 1440,
 		height: 900,
 		minWidth: 960,
 		minHeight: 640,
-		title: "Mars Kommander",
+		title: "Gradivus",
 		frame: false,
-		backgroundColor: "#242321",
+		backgroundColor: DESKTOP_THEME_PALETTES[theme].windowBackground,
 		...(existsSync(iconCandidate) ? { icon: iconCandidate } : {}),
 		webPreferences: {
 			preload: path.join(__dirname, "preload.js"),
@@ -321,7 +420,7 @@ function createWindow(): BrowserWindow {
 	window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 	window.webContents.on("will-navigate", (event, url) => {
 		if (DEV_SERVER && url.startsWith(DEV_SERVER.origin)) return;
-		if (url.startsWith("branchlight://")) return;
+		if (url.startsWith("gradivus://")) return;
 		event.preventDefault();
 	});
 	window.webContents.on("will-attach-webview", event => event.preventDefault());
@@ -334,8 +433,8 @@ function configureSecurity(): void {
 }
 
 function registerProtocol(): void {
-	protocol.handle("branchlight", async request => {
-		if (DEV_SERVER) return net.fetch(new URL("index.html", DEV_SERVER).toString());
+	protocol.handle("gradivus", async request => {
+		if (DEV_SERVER) return net.fetch(new URL("src/renderer/index.html", DEV_SERVER).toString());
 		const root = path.resolve(__dirname, "..", "renderer", "main_window");
 		const url = new URL(request.url);
 		let relative: string;
@@ -364,270 +463,427 @@ function registerProtocol(): void {
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {
 	if (DEV_SERVER) await window.loadURL(new URL("src/renderer/index.html", DEV_SERVER).toString());
-	else await window.loadURL("branchlight://app/index.html");
+	else await window.loadURL("gradivus://app/index.html");
 }
 
-function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost, settingsStore?: AppSettingsStore): void {
-	ipcMain.handle("branchlight:bootstrap", event => {
+function registerIpc(): void {
+	ipcMain.handle("gradivus:bootstrap", async event => {
 		assertTrustedSender(event);
-		return desktopHost.bootstrap();
+		const { host: h } = await ensureServices();
+		return h.bootstrap();
 	});
-	ipcMain.handle("branchlight:auth-status", event => {
+	ipcMain.handle("gradivus:auth-status", async event => {
 		assertTrustedSender(event);
-		return desktopHost.getAuthStatus();
+		const { host: h } = await ensureServices();
+		return h.getAuthStatus();
 	});
-	ipcMain.handle("branchlight:oauth-accounts", event => {
+	ipcMain.handle("gradivus:oauth-accounts", async event => {
 		assertTrustedSender(event);
-		return desktopHost.getOAuthAccounts();
+		const { host: h } = await ensureServices();
+		return h.getOAuthAccounts();
 	});
-	ipcMain.handle("branchlight:set-oauth-account-lock", (event, providerId: unknown, credentialId: unknown) => {
+	ipcMain.handle("gradivus:set-oauth-account-lock", async (event, providerId: unknown, credentialId: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setOAuthAccountLock(providerId, credentialId);
+		const { host: h } = await ensureServices();
+		return h.setOAuthAccountLock(providerId, credentialId);
 	});
-	ipcMain.handle("branchlight:set-oauth-account-failover", (event, enabled: unknown) => {
+	ipcMain.handle("gradivus:set-oauth-account-failover", async (event, enabled: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setOAuthAccountFailover(enabled);
+		const { host: h } = await ensureServices();
+		return h.setOAuthAccountFailover(enabled);
 	});
-	ipcMain.handle("branchlight:remove-oauth-account", (event, providerId: unknown, credentialId: unknown) => {
+	ipcMain.handle("gradivus:remove-oauth-account", async (event, providerId: unknown, credentialId: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.removeOAuthAccount(providerId, credentialId);
+		const { host: h } = await ensureServices();
+		return h.removeOAuthAccount(providerId, credentialId);
 	});
-	ipcMain.handle("branchlight:auth-login", (event, provider: unknown) => {
+	ipcMain.handle("gradivus:auth-login", async (event, provider: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.loginProvider(provider);
+		const { host: h } = await ensureServices();
+		return h.loginProvider(provider);
 	});
-	ipcMain.handle("branchlight:auth-logout", (event, provider: unknown) => {
+	ipcMain.handle("gradivus:auth-logout", async (event, provider: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.logoutProvider(provider);
+		const { host: h } = await ensureServices();
+		return h.logoutProvider(provider);
 	});
-	ipcMain.handle("branchlight:auth-prompt", (event, value: unknown) => {
+	ipcMain.handle("gradivus:auth-prompt", async (event, value: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.respondAuthPrompt(value);
+		const { host: h } = await ensureServices();
+		return h.respondAuthPrompt(value);
 	});
-	ipcMain.handle("branchlight:settings-get", event => {
+	ipcMain.handle("gradivus:settings-get", async event => {
 		assertTrustedSender(event);
-		return settingsStore?.settings;
+		const { settingsStore: s } = await ensureServices();
+		return s.settings;
 	});
-	ipcMain.handle("branchlight:settings-update", async (event, updates: unknown) => {
+	ipcMain.handle("gradivus:runtime-reconnect", async event => {
 		assertTrustedSender(event);
-		const updated = await settingsStore?.update(typeof updates === "object" && updates !== null ? updates : {});
-		workspaceHost.updateTheme();
+		if (!requestRuntimeReconnect) throw new Error("Workspace runtime is not initialized yet");
+		await requestRuntimeReconnect();
+	});
+	ipcMain.handle("gradivus:settings-update", async (event, updates: unknown) => {
+		assertTrustedSender(event);
+		const { settingsStore: s, workspace: ws } = await ensureServices();
+		const updated = await s.update(typeof updates === "object" && updates !== null ? updates : {});
+		ws.updateTheme();
 		return updated;
 	});
-	ipcMain.handle("branchlight:settings-reset", async event => {
+	ipcMain.handle("gradivus:settings-reset", async event => {
 		assertTrustedSender(event);
-		const reset = await settingsStore?.reset();
-		workspaceHost.updateTheme();
+		const { settingsStore: s, workspace: ws } = await ensureServices();
+		const reset = await s.reset();
+		ws.updateTheme();
 		return reset;
 	});
-	ipcMain.handle("branchlight:agent-settings", (event, id: unknown) => {
+	ipcMain.handle("gradivus:agent-settings", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.getAgentSettings(id);
+		const { host: h } = await ensureServices();
+		return h.getAgentSettings(id);
 	});
-	ipcMain.handle("branchlight:set-agent-setting", (event, id: unknown, path: unknown, value: unknown) => {
+	ipcMain.handle("gradivus:set-agent-setting", async (event, id: unknown, pathValue: unknown, value: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setAgentSetting(id, path, value);
+		const { host: h } = await ensureServices();
+		return h.setAgentSetting(id, pathValue, value);
 	});
-	ipcMain.handle("branchlight:choose-and-create", (event, kind: unknown) => {
+	ipcMain.handle("gradivus:choose-and-create", async (event, kind: unknown, cwd: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.chooseAndCreate(kind);
+		const { host: h } = await ensureServices();
+		return h.chooseAndCreate(kind, cwd);
 	});
-	ipcMain.handle("branchlight:open", (event, id: unknown) => {
+	ipcMain.handle("gradivus:open", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.openSession(id);
+		const { host: h } = await ensureServices();
+		return h.openSession(id);
 	});
-	ipcMain.handle("branchlight:resume", (event, id: unknown) => {
+	ipcMain.handle("gradivus:resume", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.resume(id);
+		const { host: h } = await ensureServices();
+		return h.resume(id);
 	});
-	ipcMain.handle("branchlight:timeline-page", (event, id: unknown, before: unknown, limit: unknown) => {
+	ipcMain.handle("gradivus:timeline-page", async (event, id: unknown, before: unknown, limit: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.loadTimelinePage(id, before, limit);
+		const { host: h } = await ensureServices();
+		return h.loadTimelinePage(id, before, limit);
 	});
-	ipcMain.handle("branchlight:timeline-item", (event, id: unknown, itemId: unknown) => {
+	ipcMain.handle("gradivus:timeline-item", async (event, id: unknown, itemId: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.loadTimelineItem(id, itemId);
+		const { host: h } = await ensureServices();
+		return h.loadTimelineItem(id, itemId);
 	});
-	ipcMain.handle("branchlight:available-commands", (event, id: unknown) => {
+	ipcMain.handle("gradivus:available-commands", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.getAvailableCommands(id);
+		const { host: h } = await ensureServices();
+		return h.getAvailableCommands(id);
 	});
-	ipcMain.handle("branchlight:available-models", (event, id: unknown) => {
+	ipcMain.handle("gradivus:available-models", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.getAvailableModels(id);
+		const { host: h } = await ensureServices();
+		return h.getAvailableModels(id);
 	});
-	ipcMain.handle("branchlight:openrouter-model-routing", (event, id: unknown, modelId: unknown) => {
+	ipcMain.handle("gradivus:openrouter-model-routing", async (event, id: unknown, modelId: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.getOpenRouterModelRouting(id, modelId);
+		const { host: h } = await ensureServices();
+		return h.getOpenRouterModelRouting(id, modelId);
 	});
 	ipcMain.handle(
-		"branchlight:set-openrouter-provider-enabled",
-		(event, id: unknown, modelId: unknown, providerId: unknown, enabled: unknown) => {
+		"gradivus:set-openrouter-provider-enabled",
+		async (event, id: unknown, modelId: unknown, providerId: unknown, enabled: unknown) => {
 			assertTrustedSender(event);
-			return desktopHost.setOpenRouterProviderEnabled(id, modelId, providerId, enabled);
+			const { host: h } = await ensureServices();
+			return h.setOpenRouterProviderEnabled(id, modelId, providerId, enabled);
 		},
 	);
-	ipcMain.handle("branchlight:stop", (event, id: unknown) => {
+	ipcMain.handle("gradivus:stop", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.stop(id);
+		const { host: h } = await ensureServices();
+		return h.stop(id);
 	});
-	ipcMain.handle("branchlight:rename", (event, id: unknown, title: unknown) => {
+	ipcMain.handle("gradivus:rename", async (event, id: unknown, title: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.rename(id, title);
+		const { host: h } = await ensureServices();
+		return h.rename(id, title);
 	});
-	ipcMain.handle("branchlight:prompt", (event, id: unknown, text: unknown) => {
+	ipcMain.handle("gradivus:delete", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.prompt(id, text);
+		const { host: h } = await ensureServices();
+		return h.deleteSession(id);
 	});
-	ipcMain.handle("branchlight:steer", (event, id: unknown, text: unknown) => {
+	ipcMain.handle("gradivus:stage-prompt-attachments", async (event, id: unknown, uploads: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.steer(id, text);
+		const { host: h } = await ensureServices();
+		return h.stagePromptAttachments(id, uploads);
 	});
-	ipcMain.handle("branchlight:queue", (event, id: unknown, text: unknown) => {
+	ipcMain.handle("gradivus:stage-prompt-text", async (event, id: unknown, text: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.queueFollowUp(id, text);
+		const { host: h } = await ensureServices();
+		return h.stagePromptText(id, text);
 	});
-	ipcMain.handle("branchlight:abort", (event, id: unknown) => {
+	ipcMain.handle("gradivus:release-prompt-attachments", async (event, id: unknown, attachmentIds: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.abort(id);
+		const { host: h } = await ensureServices();
+		return h.releasePromptAttachments(id, attachmentIds);
 	});
-	ipcMain.handle("branchlight:set-model", (event, id: unknown, provider: unknown, model: unknown) => {
+	ipcMain.handle("gradivus:prompt", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setModel(id, provider, model);
+		const { host: h } = await ensureServices();
+		return h.prompt(id, text, attachmentIds);
 	});
-	ipcMain.handle("branchlight:set-thinking", (event, id: unknown, level: unknown) => {
+	ipcMain.handle("gradivus:steer", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setThinking(id, level);
+		const { host: h } = await ensureServices();
+		return h.steer(id, text, attachmentIds);
 	});
-	ipcMain.handle("branchlight:set-fast", (event, id: unknown, enabled: unknown) => {
+	ipcMain.handle("gradivus:queue", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setFastMode(id, enabled);
+		const { host: h } = await ensureServices();
+		return h.queueFollowUp(id, text, attachmentIds);
 	});
-	ipcMain.handle("branchlight:set-queue-mode", (event, id: unknown, kind: unknown, mode: unknown) => {
+	ipcMain.handle("gradivus:abort", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setQueueMode(id, kind, mode);
+		const { host: h } = await ensureServices();
+		return h.abort(id);
 	});
-	ipcMain.handle("branchlight:set-interrupt-mode", (event, id: unknown, mode: unknown) => {
+	ipcMain.handle("gradivus:set-model", async (event, id: unknown, provider: unknown, model: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setInterruptMode(id, mode);
+		const { host: h } = await ensureServices();
+		return h.setModel(id, provider, model);
 	});
-	ipcMain.handle("branchlight:set-auto-compaction", (event, id: unknown, enabled: unknown) => {
+	ipcMain.handle("gradivus:set-thinking", async (event, id: unknown, level: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setAutoCompaction(id, enabled);
+		const { host: h } = await ensureServices();
+		return h.setThinking(id, level);
 	});
-	ipcMain.handle("branchlight:set-auto-retry", (event, id: unknown, enabled: unknown) => {
+	ipcMain.handle("gradivus:set-fast", async (event, id: unknown, enabled: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.setAutoRetry(id, enabled);
+		const { host: h } = await ensureServices();
+		return h.setFastMode(id, enabled);
 	});
-	ipcMain.handle("branchlight:extension-response", (event, id: unknown, response: unknown) => {
+	ipcMain.handle("gradivus:toggle-plan-mode", async (event, id: unknown, enabled: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.extensionResponse(id, response);
+		const { host: h } = await ensureServices();
+		return h.togglePlanMode(id, enabled);
 	});
-	ipcMain.handle("branchlight:subagent-messages", (event, id: unknown, subagentId: unknown, fromByte: unknown) => {
+	ipcMain.handle("gradivus:set-queue-mode", async (event, id: unknown, kind: unknown, mode: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.getSubagentMessages(id, subagentId, fromByte);
+		const { host: h } = await ensureServices();
+		return h.setQueueMode(id, kind, mode);
 	});
-	ipcMain.handle("branchlight:file-diff", (event, id: unknown, target: unknown) => {
+	ipcMain.handle("gradivus:set-interrupt-mode", async (event, id: unknown, mode: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.loadFileDiff(id, target);
+		const { host: h } = await ensureServices();
+		return h.setInterruptMode(id, mode);
 	});
-	ipcMain.handle("branchlight:open-workspace-file", (event, id: unknown, target: unknown) => {
+	ipcMain.handle("gradivus:set-auto-compaction", async (event, id: unknown, enabled: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.openWorkspaceFile(id, target);
+		const { host: h } = await ensureServices();
+		return h.setAutoCompaction(id, enabled);
 	});
-	ipcMain.handle("branchlight:open-external", (event, url: unknown) => {
+	ipcMain.handle("gradivus:set-auto-retry", async (event, id: unknown, enabled: unknown) => {
 		assertTrustedSender(event);
-		return desktopHost.openExternal(url);
+		const { host: h } = await ensureServices();
+		return h.setAutoRetry(id, enabled);
 	});
-	ipcMain.handle("branchlight:workspace-document-get", async event => {
+	ipcMain.handle("gradivus:extension-response", async (event, id: unknown, response: unknown) => {
 		assertTrustedSender(event);
-		return runtimeClient?.document ?? (await runtimeClient?.getDocument()) ?? null;
+		const { host: h } = await ensureServices();
+		return h.extensionResponse(id, response);
 	});
-	ipcMain.handle("branchlight:browser-create", (event, options: unknown) => {
+	ipcMain.handle("gradivus:subagent-messages", async (event, id: unknown, subagentId: unknown, fromByte: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.createBrowser(options as import("./workspace-host").CreateBrowserOptions);
+		const { host: h } = await ensureServices();
+		return h.getSubagentMessages(id, subagentId, fromByte);
 	});
-	ipcMain.handle("branchlight:browser-navigate", (event, id: unknown, url: unknown) => {
+	ipcMain.handle("gradivus:agent-hub", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.navigateBrowser(id, url);
+		const { host: h } = await ensureServices();
+		return h.getAgentHub(id);
 	});
-	ipcMain.handle("branchlight:browser-control", (event, id: unknown, action: unknown) => {
+	ipcMain.handle("gradivus:agent-hub-messages", async (event, id: unknown, agentId: unknown, fromByte: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.controlBrowser(id, action);
+		const { host: h } = await ensureServices();
+		return h.getAgentHubMessages(id, agentId, fromByte);
 	});
-	ipcMain.handle("branchlight:browser-bounds", (event, id: unknown, bounds: unknown) => {
+	ipcMain.handle("gradivus:agent-hub-message", async (event, id: unknown, agentId: unknown, message: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.setBrowserBounds(id, bounds);
+		const { host: h } = await ensureServices();
+		return h.agentHubMessage(id, agentId, message);
 	});
-	ipcMain.handle("branchlight:browser-visible", (event, ids: unknown) => {
+	ipcMain.handle("gradivus:agent-hub-kill", async (event, id: unknown, agentId: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.setVisibleBrowsers(ids);
+		const { host: h } = await ensureServices();
+		return h.agentHubKill(id, agentId);
 	});
-	ipcMain.handle("branchlight:browser-close", (event, id: unknown) => {
+	ipcMain.handle("gradivus:agent-hub-revive", async (event, id: unknown, agentId: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.closeBrowser(id);
+		const { host: h } = await ensureServices();
+		return h.agentHubRevive(id, agentId);
 	});
-	ipcMain.handle("branchlight:terminal-create", (event, options: unknown) => {
+	ipcMain.handle("gradivus:file-diff", async (event, id: unknown, target: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.createTerminal(options as import("./workspace-host").CreateTerminalOptions);
+		const { host: h } = await ensureServices();
+		return h.loadFileDiff(id, target);
 	});
-	ipcMain.handle("branchlight:terminal-write", (event, id: unknown, data: unknown) => {
+	ipcMain.handle("gradivus:open-workspace-file", async (event, id: unknown, target: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.writeTerminal(id, data);
+		const { host: h } = await ensureServices();
+		return h.openWorkspaceFile(id, target);
 	});
-	ipcMain.handle("branchlight:terminal-resize", (event, id: unknown, cols: unknown, rows: unknown) => {
+	ipcMain.handle("gradivus:open-external", async (event, url: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.resizeTerminal(id, cols, rows);
+		const { host: h } = await ensureServices();
+		return h.openExternal(url);
 	});
-	ipcMain.handle("branchlight:terminal-close", (event, id: unknown) => {
+	ipcMain.handle("gradivus:workspace-document-get", async event => {
 		assertTrustedSender(event);
-		return workspaceHost.closeTerminal(id);
+		const { runtimeClient: client } = await ensureServices();
+		return client?.document ?? (await client?.getDocument()) ?? null;
 	});
-	ipcMain.handle("branchlight:tab-update", (event, tabId: unknown, updates: unknown) => {
+	ipcMain.handle("gradivus:browser-create", async (event, options: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.updateTab(tabId, updates);
+		const { workspace: ws } = await ensureServices();
+		return ws.createBrowser(options as CreateBrowserOptions);
 	});
-	ipcMain.handle("branchlight:tab-close", (event, tabId: unknown) => {
+	ipcMain.handle("gradivus:browser-navigate", async (event, id: unknown, url: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.closeTab(tabId);
+		const { workspace: ws } = await ensureServices();
+		return ws.navigateBrowser(id, url);
 	});
-	ipcMain.handle("branchlight:pane-close", (event, paneId: unknown) => {
+	ipcMain.handle("gradivus:browser-control", async (event, id: unknown, action: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.closePane(paneId);
+		const { workspace: ws } = await ensureServices();
+		return ws.controlBrowser(id, action);
 	});
-	ipcMain.on("branchlight:pane-context-menu", (event, id: unknown, canSplit: unknown) => {
+	ipcMain.handle("gradivus:browser-bounds", async (event, id: unknown, bounds: unknown) => {
 		assertTrustedSender(event);
-		workspaceHost.showPaneContextMenu(id, canSplit);
+		const { workspace: ws } = await ensureServices();
+		return ws.setBrowserBounds(id, bounds);
 	});
-	ipcMain.handle("branchlight:selection-start", (event, id: unknown, agentId: unknown, captureMode: unknown) => {
+	ipcMain.handle("gradivus:browser-visible", async (event, ids: unknown) => {
 		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.setVisibleBrowsers(ids);
+	});
+	ipcMain.handle("gradivus:browser-close", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.closeBrowser(id);
+	});
+	ipcMain.handle("gradivus:chat-terminal-open", async (event, input: unknown) => {
+		assertTrustedSender(event);
+		const { host: h, workspace: ws } = await ensureServices();
+		if (typeof input !== "object" || input === null) throw new TypeError("invalid chat terminal input");
+		const value = input as Partial<OpenChatTerminalInput>;
+		if (
+			typeof value.id !== "string" ||
+			!/^[a-z0-9-]{8,100}$/i.test(value.id) ||
+			typeof value.sessionId !== "string" ||
+			value.sessionId.length < 8 ||
+			value.sessionId.length > 100 ||
+			!Number.isSafeInteger(value.cols) ||
+			(value.cols as number) < 2 ||
+			(value.cols as number) > 500 ||
+			!Number.isSafeInteger(value.rows) ||
+			(value.rows as number) < 2 ||
+			(value.rows as number) > 500 ||
+			!Number.isSafeInteger(value.fromOffset) ||
+			(value.fromOffset as number) < 0
+		)
+			throw new TypeError("invalid chat terminal input");
+		const resolved = h.resolveSessionWorkspace(value.sessionId);
+		return ws.openChatTerminal(value as OpenChatTerminalInput, resolved);
+	});
+	ipcMain.handle("gradivus:terminal-create", async (event, options: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.createTerminal(options as CreateTerminalOptions);
+	});
+	ipcMain.handle("gradivus:terminal-write", async (event, id: unknown, data: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.writeTerminal(id, data);
+	});
+	ipcMain.handle("gradivus:terminal-resize", async (event, id: unknown, cols: unknown, rows: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.resizeTerminal(id, cols, rows);
+	});
+	ipcMain.handle("gradivus:terminal-close", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.closeTerminal(id);
+	});
+	ipcMain.handle("gradivus:tab-update", async (event, tabId: unknown, updates: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.updateTab(tabId, updates);
+	});
+	ipcMain.handle("gradivus:tab-close", async (event, tabId: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.closeTab(tabId);
+	});
+	ipcMain.handle("gradivus:pane-close", async (event, paneId: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.closePane(paneId);
+	});
+	ipcMain.on("gradivus:pane-context-menu", (event, id: unknown, canSplit: unknown) => {
+		assertTrustedSender(event);
+		void ensureServices()
+			.then(({ workspace: ws }) => {
+				ws.showPaneContextMenu(id, canSplit);
+			})
+			.catch(error => {
+				logger.error("Failed to show pane context menu", { error: String(error) });
+			});
+	});
+	ipcMain.handle("gradivus:selection-start", async (event, id: unknown, agentId: unknown, captureMode: unknown) => {
+		assertTrustedSender(event);
+		const { host: h, workspace: ws } = await ensureServices();
 		const pane = typeof id === "string" ? id.trim() : "";
 		const targetAgent = typeof agentId === "string" && agentId.trim().length > 0 ? agentId.trim() : undefined;
 		const mode = captureMode === "screenshot" ? "screenshot" : "dom";
-		const epoch = workspaceHost.getBrowserDocumentEpoch(pane);
-		const scope = desktopHost.resolveSelectionScope(pane, targetAgent, epoch);
-		return workspaceHost.startSelection(scope, { captureMode: mode });
+		const epoch = ws.getBrowserDocumentEpoch(pane);
+		const { scope, target } = h.resolveSelectionTarget(pane, targetAgent, epoch);
+		return ws.startSelection(scope, { captureMode: mode, target });
 	});
-	ipcMain.handle("branchlight:selection-cancel", (event, id: unknown, reason: unknown) => {
+	ipcMain.handle("gradivus:selection-cancel", async (event, id: unknown, reason: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.cancelSelection(id, reason);
+		const { workspace: ws } = await ensureServices();
+		return ws.cancelSelection(id, reason);
 	});
-	ipcMain.handle("branchlight:selection-commit", (event, id: unknown, instruction: unknown) => {
+	ipcMain.handle("gradivus:selection-commit", async (event, id: unknown, instruction: unknown, action: unknown) => {
 		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
 		const pane = typeof id === "string" ? id.trim() : "";
-		return workspaceHost.commitSelection(pane, typeof instruction === "string" ? instruction : undefined);
+		const act = action === "inline" || action === "queue" || action === "chat" ? action : undefined;
+		return ws.commitSelection(pane, typeof instruction === "string" ? instruction : undefined, act);
 	});
-	ipcMain.handle("branchlight:selection-state", (event, id: unknown) => {
+	ipcMain.handle("gradivus:selection-run-queued", async (event, id: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.getSelectionState(id);
+		const { workspace: ws } = await ensureServices();
+		const pane = typeof id === "string" ? id.trim() : "";
+		return ws.runQueuedTasks(pane);
 	});
-	ipcMain.handle("branchlight:window-minimize", event => {
+	ipcMain.handle("gradivus:selection-clear-queued", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		const pane = typeof id === "string" ? id.trim() : "";
+		return ws.clearQueuedTasks(pane);
+	});
+	ipcMain.handle("gradivus:selection-state", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.getSelectionState(id);
+	});
+	ipcMain.handle("gradivus:window-minimize", event => {
 		assertTrustedSender(event);
 		const window = BrowserWindow.fromWebContents(event.sender);
 		if (!window) throw new Error("Window is unavailable");
 		window.minimize();
 	});
-	ipcMain.handle("branchlight:window-toggle-maximize", event => {
+	ipcMain.handle("gradivus:window-toggle-maximize", event => {
 		assertTrustedSender(event);
 		const window = BrowserWindow.fromWebContents(event.sender);
 		if (!window) throw new Error("Window is unavailable");
@@ -635,22 +891,18 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost, set
 		else window.maximize();
 		return window.isMaximized();
 	});
-	ipcMain.handle("branchlight:window-close", event => {
+	ipcMain.handle("gradivus:window-close", event => {
 		assertTrustedSender(event);
 		const window = BrowserWindow.fromWebContents(event.sender);
 		if (!window) throw new Error("Window is unavailable");
 		window.close();
-	});
-	ipcMain.handle("branchlight:validate-external", (event, url: unknown) => {
-		assertTrustedSender(event);
-		return safeExternalUrl(url).toString();
 	});
 }
 
 function assertTrustedSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): void {
 	const senderUrl = event.senderFrame?.url;
 	if (!senderUrl) throw new Error("Untrusted IPC sender");
-	if (senderUrl.startsWith("branchlight://app/")) return;
+	if (senderUrl.startsWith("gradivus://app/")) return;
 	if (DEV_SERVER && new URL(senderUrl).origin === new URL(DEV_SERVER).origin) return;
 	throw new Error("Untrusted IPC sender");
 }

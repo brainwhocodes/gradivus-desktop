@@ -10,18 +10,18 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const backendName = process.platform === "win32" ? "omp.exe" : "omp";
 const config: ForgeConfig = {
 	packagerConfig: {
-		name: "Mars Kommander",
+		name: "Gradivus",
 		asar: {
 			unpackDir: path.join(".vite", "native"),
 		},
 		prune: false,
-		executableName: "Mars Kommander",
-		appBundleId: "labs.mars-kommander.desktop",
+		executableName: "Gradivus",
+		appBundleId: "labs.gradivus.desktop",
 		win32metadata: {
-			CompanyName: "Mars Kommander",
-			FileDescription: "Mars Kommander desktop workspace powered by Oh My Pi",
-			ProductName: "Mars Kommander",
-			OriginalFilename: "Mars Kommander.exe",
+			CompanyName: "Gradivus",
+			FileDescription: "Gradivus desktop workspace powered by Oh My Pi",
+			ProductName: "Gradivus",
+			OriginalFilename: "Gradivus.exe",
 		},
 		icon: path.join(root, "resources", "icon"),
 		extraResource: [
@@ -34,10 +34,10 @@ const config: ForgeConfig = {
 	rebuildConfig: {},
 	makers: [
 		new MakerSquirrel({
-			name: "MarsKommander",
-			authors: "Mars Kommander",
-			description: "Mars Kommander desktop workspace powered by Oh My Pi",
-			setupExe: "MarsKommanderSetup.exe",
+			name: "Gradivus",
+			authors: "Gradivus",
+			description: "Gradivus desktop workspace powered by Oh My Pi",
+			setupExe: "GradivusSetup.exe",
 			setupIcon: path.join(root, "resources", "icon.ico"),
 			noMsi: true,
 		}),

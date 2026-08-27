@@ -1,0 +1,51 @@
+// Primitive tokens: theme-independent raw values.
+// Never consumed directly by component styles — use the semantic layer.
+:root {
+	// Neutrals
+	--gray-ink: #000000;
+	--gray-000: #ffffff;
+	--gray-050: #fafafa;
+	--gray-075: #f5f5f5;
+	--gray-100: #f2f2f2;
+	--gray-200: #d4d4d4;
+	--gray-250: #d1d1d1;
+	--gray-300: #b6b6b6;
+	--gray-400: #858585;
+	--gray-450: #747474;
+	--gray-600: #4b4b4b;
+	--gray-650: #454545;
+	--gray-700: #333333;
+	--gray-800: #292929;
+	--gray-850: #1c1c1c;
+	--gray-875: #181818;
+	--gray-900: #141414;
+	--gray-925: #101010;
+	--gray-950: #0d0d0d;
+
+	// Crimson
+	--crimson-050: #f4e7e7;
+	--crimson-300: #d16a6a;
+	--crimson-500: #991b1b;
+	--crimson-600: #7f1d1d;
+	--crimson-700: #641414;
+	--crimson-900: #240909;
+	--crimson-950: #4a0f0f;
+
+	// Green
+	--green-050: #edf8f0;
+	--green-300: #86d49a;
+	--green-800: #14532d;
+	--green-950: #07140c;
+
+	// Amber
+	--amber-050: #fff5e0;
+	--amber-300: #ffd38a;
+	--amber-800: #5f3700;
+	--amber-950: #171004;
+
+	// Alpha blacks
+	--black-a18: rgba(0, 0, 0, 0.18);
+	--black-a46: rgba(0, 0, 0, 0.46);
+	--black-a72: rgba(0, 0, 0, 0.72);
+	--black-a78: rgba(0, 0, 0, 0.78);
+}

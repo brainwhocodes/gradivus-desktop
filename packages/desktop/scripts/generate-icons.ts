@@ -5,7 +5,7 @@ import { $ } from "bun";
 import sharp from "sharp";
 
 const desktopResources = path.resolve(import.meta.dir, "../resources");
-const sourceCandidate = path.join(os.homedir(), "Downloads/mars-ascii-logo-hd.png");
+const sourceCandidate = path.join(os.homedir(), "Downloads/gradivus-ascii-logo-hd.png");
 const iconPngPath = path.join(desktopResources, "icon.png");
 const iconIcoPath = path.join(desktopResources, "icon.ico");
 const icnsDest = path.join(desktopResources, "icon.icns");
@@ -51,7 +51,7 @@ await fs.writeFile(iconPngPath, masterPngBuffer);
 
 // 2. Generate macOS .iconset and compile .icns
 if (process.platform === "darwin") {
-	const iconsetDir = path.join(os.tmpdir(), "mars-squircle.iconset");
+	const iconsetDir = path.join(os.tmpdir(), "gradivus-squircle.iconset");
 	await fs.mkdir(iconsetDir, { recursive: true });
 
 	const iconSpecs = [
@@ -121,4 +121,4 @@ for (let i = 0; i < count; i++) {
 const finalIco = Buffer.concat([icoHeader, ...entries, ...pngBuffers]);
 await fs.writeFile(iconIcoPath, finalIco);
 
-process.stdout.write("Generated Mars Kommander squircle icon.png, icon.ico, and icon.icns\n");
+process.stdout.write("Generated Gradivus squircle icon.png, icon.ico, and icon.icns\n");

@@ -32,7 +32,14 @@ export class SessionRegistry {
 			const text = await fs.readFile(this.#filePath, "utf8");
 			const parsed: unknown = JSON.parse(text);
 			if (!isRegistry(parsed)) throw new Error("registry shape is invalid");
-			this.#registry = parsed;
+			const { registry, discardedDuplicates, changed } = normalizeRegistry(parsed);
+			this.#registry = registry;
+			if (discardedDuplicates > 0) {
+				this.#warning = `Session registry recovery discarded ${discardedDuplicates} duplicate session record${discardedDuplicates === 1 ? "" : "s"}.`;
+			}
+			if (changed) {
+				await this.#save();
+			}
 			return this.value;
 		} catch (error) {
 			if (isMissing(error)) return this.value;
@@ -49,6 +56,9 @@ export class SessionRegistry {
 	}
 
 	async create(record: SessionRecordV1): Promise<void> {
+		if (this.#registry.sessions.some(existing => existing.id === record.id)) {
+			throw new Error(`Session ID already exists: ${record.id}`);
+		}
 		this.#registry.sessions = [...this.#registry.sessions, record];
 		this.#registry.activeByKind[record.kind] = record.id;
 		await this.#save();
@@ -62,7 +72,28 @@ export class SessionRegistry {
 	}
 
 	async setActive(kind: SessionKind, id: string | null): Promise<void> {
+		if (id !== null) {
+			const record = this.#registry.sessions.find(candidate => candidate.id === id);
+			if (record === undefined || record.kind !== kind) {
+				throw new Error(`Cannot activate ${kind} session ${id}: session does not exist or has the wrong kind`);
+			}
+		}
 		this.#registry.activeByKind[kind] = id;
+		await this.#save();
+	}
+	async remove(id: string): Promise<void> {
+		const record = this.#registry.sessions.find(candidate => candidate.id === id);
+		if (record === undefined) throw new Error(`Session not found: ${id}`);
+		this.#registry.sessions = this.#registry.sessions.filter(candidate => candidate.id !== id);
+		if (this.#registry.activeByKind[record.kind] === id) {
+			const remaining = this.#registry.sessions
+				.filter(candidate => candidate.kind === record.kind)
+				.sort(
+					(a, b) =>
+						new Date(b.lastOpenedAt || b.createdAt).getTime() - new Date(a.lastOpenedAt || a.createdAt).getTime(),
+				);
+			this.#registry.activeByKind[record.kind] = remaining[0]?.id ?? null;
+		}
 		await this.#save();
 	}
 
@@ -116,4 +147,35 @@ function isSessionRecord(value: unknown): value is SessionRecordV1 {
 		typeof candidate.createdAt === "string" &&
 		typeof candidate.lastOpenedAt === "string"
 	);
+}
+
+function normalizeRegistry(registry: SessionRegistryV1): {
+	registry: SessionRegistryV1;
+	discardedDuplicates: number;
+	changed: boolean;
+} {
+	const seen = new Set<string>();
+	const sessions = registry.sessions.filter(session => {
+		if (seen.has(session.id)) return false;
+		seen.add(session.id);
+		return true;
+	});
+	const discardedDuplicates = registry.sessions.length - sessions.length;
+	const activeByKind = { ...registry.activeByKind };
+	for (const kind of ["work", "code"] as const) {
+		const activeId = activeByKind[kind];
+		if (activeId !== null) {
+			const record = sessions.find(session => session.id === activeId);
+			if (record === undefined || record.kind !== kind) activeByKind[kind] = null;
+		}
+	}
+	const changed =
+		discardedDuplicates > 0 ||
+		activeByKind.work !== registry.activeByKind.work ||
+		activeByKind.code !== registry.activeByKind.code;
+	return {
+		registry: { ...registry, sessions, activeByKind },
+		discardedDuplicates,
+		changed,
+	};
 }

@@ -7,6 +7,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DesktopHost } from "../src/main/desktop-host";
 import { WorkspaceHost } from "../src/main/workspace-host";
 
+type Deferred<T> = {
+	promise: Promise<T>;
+	resolve: (value: T) => void;
+	reject: (error: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	let reject!: (error: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+const electronMocks = vi.hoisted(() => ({
+	executeJavaScript: vi.fn().mockResolvedValue(null),
+	capturePage: vi.fn(async () => ({
+		toJPEG: () => Buffer.from("fake-jpeg-bytes"),
+		getSize: () => ({ width: 800, height: 600 }),
+	})),
+}));
+
 vi.mock("electron", () => {
 	class MockWebContents {
 		debugger = {
@@ -48,10 +72,8 @@ vi.mock("electron", () => {
 		loadURL = vi.fn(async () => {});
 		on = vi.fn();
 		setWindowOpenHandler = vi.fn();
-		capturePage = vi.fn(async () => ({
-			toJPEG: () => Buffer.from("fake-jpeg-bytes"),
-			getSize: () => ({ width: 800, height: 600 }),
-		}));
+		executeJavaScript = electronMocks.executeJavaScript;
+		capturePage = electronMocks.capturePage;
 	}
 
 	class MockWebContentsView {
@@ -61,7 +83,7 @@ vi.mock("electron", () => {
 	}
 
 	return {
-		app: { getPath: () => "/tmp/branchlight-test-user-data" },
+		app: { getPath: () => "/tmp/gradivus-test-user-data" },
 		BrowserWindow: class {
 			isDestroyed = () => false;
 			webContents = {
@@ -88,7 +110,12 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 	let workspaceHost: WorkspaceHost;
 
 	beforeEach(async () => {
-		const rawDir = await mkdtemp(path.join(os.tmpdir(), "branchlight-auth-test-"));
+		electronMocks.executeJavaScript.mockReset().mockResolvedValue(null);
+		electronMocks.capturePage.mockReset().mockResolvedValue({
+			toJPEG: () => Buffer.from("fake-jpeg-bytes"),
+			getSize: () => ({ width: 800, height: 600 }),
+		});
+		const rawDir = await mkdtemp(path.join(os.tmpdir(), "gradivus-auth-test-"));
 		testDir = await realpath(rawDir);
 		server = new WorkspaceServer({ runtimeRoot: testDir });
 		await server.start();
@@ -188,82 +215,151 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 		} catch {}
 	});
 
-	it("executes complete authenticated start -> inspect -> commit -> cancel flow", async () => {
-		// 1. Create browser pane in workspace
-		const browserState = await workspaceHost.createBrowser({
-			id: "pane-browser-1",
-			url: "https://omp.sh",
-			workspaceId: "ws_alpha",
-			tabId: "tab_alpha",
-		});
-		expect(browserState.id).toBe("pane-browser-1");
-
-		// 2. Reject selection without explicit target agent or on unauthenticated agent
-		expect(() => desktopHost.resolveSelectionScope("pane-browser-1", "unknown_agent", 1)).toThrow(
-			"not found in authenticated workspace authority",
-		);
-
-		// 3. Reject missing/invalid documentEpoch or non-existent pane
-		expect(() => workspaceHost.getBrowserDocumentEpoch("non-existent-pane")).toThrow("not found");
-		const doc = client.document!;
-		const defaultAgent = doc.agents[0];
-		expect(defaultAgent).toBeDefined();
-
-		expect(() => desktopHost.resolveSelectionScope("pane-browser-1", defaultAgent.id, undefined)).toThrow(
-			"Valid positive documentEpoch is required",
-		);
-
-		// 4. Resolve authenticated SelectionAuthScope from verified authority
-		const epoch = workspaceHost.getBrowserDocumentEpoch("pane-browser-1");
-		expect(epoch).toBe(1);
-
-		const scope = desktopHost.resolveSelectionScope("pane-browser-1", defaultAgent.id, epoch);
-		expect(scope.documentEpoch).toBe(1);
-		expect(scope.workspaceId).toBe("ws_alpha");
-		expect(scope.paneId).toBe("pane-browser-1");
-		expect(scope.locationId).toBe("loc_alpha");
-		expect(scope.locationGeneration).toBe(1);
-		expect(scope.agentId).toBe(defaultAgent.id);
-
-		// 5. Start selection on the browser pane with authenticated scope
-		const pickingState = await workspaceHost.startSelection(scope);
-		expect(pickingState.phase).toBe("picking");
-		expect(pickingState.workspaceId).toBe("ws_alpha");
-		expect(pickingState.paneId).toBe("pane-browser-1");
-
-		// 6. Commit selection delivers to agent and ends selection cleanly
-		const committedState = await workspaceHost.commitSelection("pane-browser-1");
-		expect(committedState.phase).toBe("idle");
-		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("idle");
-	});
-
-	it("surfaces delivery_failed error when agent message is rejected", async () => {
+	it("resolves authenticated scope and leaves the BrowserView card lifecycle host-owned", async () => {
 		const doc = client.document!;
 		const defaultAgent = doc.agents[0]!;
 		const epoch = workspaceHost.getBrowserDocumentEpoch("pane-browser-1");
-		const scope = desktopHost.resolveSelectionScope("pane-browser-1", defaultAgent.id, epoch);
+		const { scope } = desktopHost.resolveSelectionTarget("pane-browser-1", defaultAgent.id, epoch);
 
-		await workspaceHost.startSelection(scope);
+		expect(() => desktopHost.resolveSelectionTarget("pane-browser-1", "unknown_agent", epoch)).toThrow(
+			"No deliverable workspace agent is available for selection",
+		);
+		expect(() => desktopHost.resolveSelectionTarget("pane-browser-1", defaultAgent.id, 0)).toThrow(
+			"Valid positive documentEpoch is required",
+		);
 
-		// Spy on executeCommandWithRetry to simulate agent.message command rejection
-		const originalExecute = client.executeCommandWithRetry.bind(client);
-		vi.spyOn(client, "executeCommandWithRetry").mockImplementation(async (buildCmd, opts) => {
-			const cmd = buildCmd(client.document!);
-			if (cmd.type === "agent.message") {
-				return {
-					status: "rejected",
-					error: { code: "invalid_command", message: "Agent is busy" },
-				} as never;
+		const pageAction = deferred<null>();
+		electronMocks.executeJavaScript.mockImplementationOnce(() => pageAction.promise);
+		const pickingState = await workspaceHost.startSelection(scope);
+
+		expect(pickingState.phase).toBe("picking");
+		expect(pickingState.paneId).toBe("pane-browser-1");
+		expect(pickingState.selectionId).toBeTypeOf("string");
+		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("picking");
+
+		pageAction.resolve(null);
+		await Promise.resolve();
+	});
+
+	it("keeps inline delivery active until the BrowserView card is explicitly canceled", async () => {
+		const doc = client.document!;
+		const defaultAgent = doc.agents[0]!;
+		const { scope } = desktopHost.resolveSelectionTarget(
+			"pane-browser-1",
+			defaultAgent.id,
+			workspaceHost.getBrowserDocumentEpoch("pane-browser-1"),
+		);
+		const pageAction = deferred<{
+			selector: string;
+			tagName: string;
+			instruction: string;
+			action: "inline";
+			agentType: "designer";
+			captureMode: "dom";
+			bounds: { x: number; y: number; width: number; height: number };
+		}>();
+		const delivery = deferred<string>();
+		electronMocks.executeJavaScript.mockImplementation((script: string) => {
+			const trimmed = script.trim();
+			if (trimmed === "window.__gradivus_inspector_wait_for_action__?.()") return Promise.resolve(null);
+			if (
+				trimmed.startsWith("window.__gradivus_inspector_finish__?.(") ||
+				trimmed.startsWith("window.__gradivus_inspector_cleanup__?.(")
+			) {
+				return Promise.resolve(true);
 			}
-			return originalExecute(buildCmd, opts);
+			return pageAction.promise;
 		});
+		workspaceHost.setDesktopHost(desktopHost);
+		const inlineSpy = vi.spyOn(desktopHost, "executeInlinePrompt").mockReturnValue(delivery.promise);
+		await workspaceHost.startSelection(scope);
+		pageAction.resolve({
+			selector: "#submit-order",
+			tagName: "button",
+			instruction: "Explain this control",
+			action: "inline",
+			agentType: "designer",
+			captureMode: "dom",
+			bounds: { x: 10, y: 20, width: 100, height: 40 },
+		});
+		await Promise.resolve();
+		await Promise.resolve();
 
-		const errorState = await workspaceHost.commitSelection("pane-browser-1");
-		expect(errorState.phase).toBe("error");
-		expect(errorState.error?.code).toBe("delivery_failed");
-		expect(errorState.error?.message).toContain("Agent is busy");
+		expect(inlineSpy).toHaveBeenCalledWith(
+			expect.any(String),
+			scope.sessionId,
+			expect.objectContaining({
+				selector: "#submit-order",
+				instruction: "Explain this control",
+				agentType: "designer",
+				captureMode: "dom",
+			}),
+		);
+		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("analyzing");
 
-		// Clean up
-		await workspaceHost.cancelSelection("pane-browser-1");
+		const cancel = workspaceHost.cancelSelection("pane-browser-1", "test cancellation");
+		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("idle");
+		delivery.resolve("Inline response");
+		await cancel;
+	});
+	it("keeps chat delivery active until explicit cancellation and passes selection metadata", async () => {
+		const defaultAgent = client.document!.agents[0]!;
+		const { scope } = desktopHost.resolveSelectionTarget(
+			"pane-browser-1",
+			defaultAgent.id,
+			workspaceHost.getBrowserDocumentEpoch("pane-browser-1"),
+		);
+		client.document!.agents = [];
+		const pageAction = deferred<{
+			selector: string;
+			tagName: string;
+			instruction: string;
+			action: "chat";
+			agentType: "reviewer";
+			captureMode: "dom";
+			bounds: { x: number; y: number; width: number; height: number };
+		}>();
+		const delivery = deferred<void>();
+		electronMocks.executeJavaScript.mockImplementation((script: string) => {
+			const trimmed = script.trim();
+			if (trimmed === "window.__gradivus_inspector_wait_for_action__?.()") return Promise.resolve(null);
+			if (
+				trimmed.startsWith("window.__gradivus_inspector_finish__?.(") ||
+				trimmed.startsWith("window.__gradivus_inspector_cleanup__?.(")
+			) {
+				return Promise.resolve(true);
+			}
+			return pageAction.promise;
+		});
+		workspaceHost.setDesktopHost(desktopHost);
+		const chatSpy = vi.spyOn(desktopHost, "deliverElementPrompt").mockReturnValue(delivery.promise);
+		await workspaceHost.startSelection(scope);
+		pageAction.resolve({
+			selector: "main > h1",
+			tagName: "h1",
+			instruction: "Rewrite this heading",
+			action: "chat",
+			agentType: "reviewer",
+			captureMode: "dom",
+			bounds: { x: 12, y: 24, width: 180, height: 48 },
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(chatSpy).toHaveBeenCalledWith(
+			expect.any(String),
+			scope.sessionId,
+			expect.objectContaining({
+				selector: "main > h1",
+				instruction: "Rewrite this heading",
+				agentType: "reviewer",
+				captureMode: "dom",
+			}),
+		);
+		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("working");
+		const cancel = workspaceHost.cancelSelection("pane-browser-1", "test cancellation");
+		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("idle");
+		delivery.resolve();
+		await cancel;
 	});
 });

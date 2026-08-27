@@ -109,12 +109,9 @@ export function projectWorkspaceTabs(
 		});
 	}
 
-	let activeTabId = "";
-	if (currentActiveTabId && projectedTabs.some(t => t.id === currentActiveTabId)) {
-		activeTabId = currentActiveTabId;
-	} else if (projectedTabs.length > 0) {
-		const firstTerminalTab = projectedTabs.find(t => t.kind === "terminal");
-		activeTabId = firstTerminalTab ? firstTerminalTab.id : projectedTabs[0].id;
+	let activeTabId = currentActiveTabId ?? "";
+	if (!activeTabId && projectedTabs.length > 0) {
+		activeTabId = projectedTabs[0].id;
 	}
 
 	return {

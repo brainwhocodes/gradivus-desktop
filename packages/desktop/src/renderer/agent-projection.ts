@@ -1,6 +1,6 @@
 import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
+import { getAgentSwatch } from "../shared/agent-swatch";
 import type { AgentProcessStatus, WorkspaceAgent } from "./workspace-types";
-import { getAgentSwatch } from "./workspace-types";
 
 export function formatProfileName(profileId: string): string {
 	if (profileId === "profile-omp") return "Oh My Pi";
@@ -23,7 +23,13 @@ export function reconcileWorkspaceAgents(
 
 	const activeDocAgents = (doc.agents ?? []).filter(agent => {
 		const s = String(agent.status).toLowerCase();
-		return s !== "stopped" && s !== "failed" && s !== "exited" && Boolean(agent.terminalId || agent.paneId);
+		return (
+			s !== "stopped" &&
+			s !== "failed" &&
+			s !== "exited" &&
+			s !== "error" &&
+			Boolean(agent.sessionId || agent.terminalId || agent.paneId)
+		);
 	});
 
 	const existingMap = new Map(currentAgents.map(a => [a.id, a]));

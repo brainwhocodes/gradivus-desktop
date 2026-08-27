@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { MAX_INLINE_PROMPT_BYTES } from "../shared/contracts";
 
-export const MAX_EDITOR_BYTES = 512 * 1024;
+export const MAX_EDITOR_BYTES = MAX_INLINE_PROMPT_BYTES;
 export const MAX_NAME_CODE_POINTS = 160;
 const DOCUMENT_EXTENSIONS: Record<string, true> = {
 	".txt": true,

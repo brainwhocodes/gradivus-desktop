@@ -293,8 +293,3 @@ async function openSharedHeadlessHandle(
 		throw new ToolError(`Shared browser attach failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
-
-/** Test-only accessor for the module-global browser records. */
-export function getBrowsersMapForTest(): ReadonlyMap<string, BrowserHandle> {
-	return browsers;
-}

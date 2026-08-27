@@ -122,7 +122,7 @@ describe("Sequential application shutdown and terminal teardown", () => {
 		let workspaceHost: WorkspaceHost;
 
 		beforeEach(async () => {
-			const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "branchlight-shutdown-test-"));
+			const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "gradivus-shutdown-test-"));
 			testDir = await fs.realpath(rawDir);
 			server = new WorkspaceServer({ runtimeRoot: testDir });
 			await server.start();

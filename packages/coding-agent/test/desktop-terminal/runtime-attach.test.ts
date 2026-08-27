@@ -4,19 +4,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { WorkspaceServer } from "@oh-my-pi/pi-workspace-runtime/server";
-import { createBranchlightLifecycleExtension } from "../../src/desktop-terminal/runtime-attach";
+import { createGradivusLifecycleExtension } from "../../src/desktop-terminal/runtime-attach";
 import type { ExtensionAPI, ExtensionContext } from "../../src/extensibility/extensions/types";
 
 type LifecycleHandler = (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
 
-describe("Branchlight terminal automatic agent attachment", () => {
+describe("Gradivus terminal automatic agent attachment", () => {
 	let testDir: string;
 	let server: WorkspaceServer;
 	let client: WorkspaceClient;
 	const originalEnv = { ...process.env };
 
 	beforeEach(async () => {
-		const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "branchlight-attach-test-"));
+		const rawDir = await fs.mkdtemp(path.join(os.tmpdir(), "gradivus-attach-test-"));
 		testDir = await fs.realpath(rawDir);
 		server = new WorkspaceServer({ runtimeRoot: testDir });
 		await server.start();
@@ -91,17 +91,17 @@ describe("Branchlight terminal automatic agent attachment", () => {
 	});
 
 	it("attaches the logical session on startup, switches it, and detaches cleanly", async () => {
-		process.env.BRANCHLIGHT_TERMINAL = "1";
+		process.env.GRADIVUS_TERMINAL = "1";
 		process.env.PI_RUNTIME_DIR = testDir;
 		process.env.PI_RUNTIME_TOKEN = server.controlToken;
-		process.env.BRANCHLIGHT_TERMINAL_ID = "term-pane-1";
-		process.env.BRANCHLIGHT_PANE_ID = "pane-1";
-		process.env.BRANCHLIGHT_WORKSPACE_ID = "ws-test";
-		process.env.BRANCHLIGHT_PROFILE_ID = "profile-omp";
+		process.env.GRADIVUS_TERMINAL_ID = "term-pane-1";
+		process.env.GRADIVUS_PANE_ID = "pane-1";
+		process.env.GRADIVUS_WORKSPACE_ID = "ws-test";
+		process.env.GRADIVUS_PROFILE_ID = "profile-omp";
 
 		type LifecycleHandler = (event: unknown, context: unknown) => Promise<void>;
 		const handlers = new Map<string, LifecycleHandler>();
-		const extension = createBranchlightLifecycleExtension();
+		const extension = createGradivusLifecycleExtension();
 		expect(extension).toBeDefined();
 		extension!({
 			on(event: string, handler: LifecycleHandler) {
@@ -117,7 +117,7 @@ describe("Branchlight terminal automatic agent attachment", () => {
 		await handlers.get("session_start")!({ type: "session_start" }, context("session-real"));
 		const started = await client.getDocument();
 		const firstAgent = started.agents.find(a => a.terminalId === "term-pane-1");
-		expect(firstAgent?.id).toBe("branchlight-agent-profile-omp-session-real");
+		expect(firstAgent?.id).toBe("gradivus-agent-profile-omp-session-real");
 		expect(firstAgent?.status).toBe("running");
 		expect(firstAgent?.sessionId).toBe("session-real");
 		expect(firstAgent?.paneId).toBe("pane-1");
@@ -127,20 +127,20 @@ describe("Branchlight terminal automatic agent attachment", () => {
 		expect(switched.agents.find(a => a.id === firstAgent?.id)?.status).toBe("stopped");
 		const secondAgent = switched.agents.find(a => a.sessionId === "session-next");
 		expect(secondAgent?.status).toBe("running");
-		expect(secondAgent?.id).toBe("branchlight-agent-profile-omp-session-next");
+		expect(secondAgent?.id).toBe("gradivus-agent-profile-omp-session-next");
 
 		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, context("session-next"));
 		const stopped = await client.getDocument();
 		expect(stopped.agents.find(a => a.id === secondAgent?.id)?.status).toBe("stopped");
 	});
 	it("reattaches the same logical session cleanly after a new process/factory startup", async () => {
-		process.env.BRANCHLIGHT_TERMINAL = "1";
+		process.env.GRADIVUS_TERMINAL = "1";
 		process.env.PI_RUNTIME_DIR = testDir;
 		process.env.PI_RUNTIME_TOKEN = server.controlToken;
-		process.env.BRANCHLIGHT_TERMINAL_ID = "term-pane-1";
-		process.env.BRANCHLIGHT_PANE_ID = "pane-1";
-		process.env.BRANCHLIGHT_WORKSPACE_ID = "ws-test";
-		process.env.BRANCHLIGHT_PROFILE_ID = "profile-omp";
+		process.env.GRADIVUS_TERMINAL_ID = "term-pane-1";
+		process.env.GRADIVUS_PANE_ID = "pane-1";
+		process.env.GRADIVUS_WORKSPACE_ID = "ws-test";
+		process.env.GRADIVUS_PROFILE_ID = "profile-omp";
 
 		type LifecycleHandler = (event: unknown, context: unknown) => Promise<void>;
 		const context = (sessionId: string) => ({
@@ -150,7 +150,7 @@ describe("Branchlight terminal automatic agent attachment", () => {
 
 		// First process run: attach and shutdown
 		const handlersFirst = new Map<string, LifecycleHandler>();
-		const extensionFirst = createBranchlightLifecycleExtension();
+		const extensionFirst = createGradivusLifecycleExtension();
 		expect(extensionFirst).toBeDefined();
 		extensionFirst!({
 			on(event: string, handler: LifecycleHandler) {
@@ -170,7 +170,7 @@ describe("Branchlight terminal automatic agent attachment", () => {
 
 		// Second process run (new factory, fresh sequence counter): resume same session
 		const handlersSecond = new Map<string, LifecycleHandler>();
-		const extensionSecond = createBranchlightLifecycleExtension();
+		const extensionSecond = createGradivusLifecycleExtension();
 		expect(extensionSecond).toBeDefined();
 		extensionSecond!({
 			on(event: string, handler: LifecycleHandler) {
@@ -190,12 +190,12 @@ describe("Branchlight terminal automatic agent attachment", () => {
 		expect(doc.agents.find(a => a.sessionId === "session-resumed")?.status).toBe("stopped");
 	});
 
-	it("does not create a lifecycle extension outside a Branchlight terminal", () => {
-		delete process.env.BRANCHLIGHT_TERMINAL;
+	it("does not create a lifecycle extension outside a Gradivus terminal", () => {
+		delete process.env.GRADIVUS_TERMINAL;
 		delete process.env.PI_RUNTIME_TOKEN;
-		delete process.env.BRANCHLIGHT_TERMINAL_ID;
+		delete process.env.GRADIVUS_TERMINAL_ID;
 
-		expect(createBranchlightLifecycleExtension()).toBeUndefined();
+		expect(createGradivusLifecycleExtension()).toBeUndefined();
 	});
 
 	it("does not attach or register phantom agents when executing utility commands like --version", async () => {
@@ -203,12 +203,12 @@ describe("Branchlight terminal automatic agent attachment", () => {
 		const proc = Bun.spawn([process.execPath, cliPath, "--version"], {
 			env: {
 				...process.env,
-				BRANCHLIGHT_TERMINAL: "1",
+				GRADIVUS_TERMINAL: "1",
 				PI_RUNTIME_DIR: testDir,
 				PI_RUNTIME_TOKEN: server.controlToken,
-				BRANCHLIGHT_TERMINAL_ID: "term-pane-1",
-				BRANCHLIGHT_PANE_ID: "pane-1",
-				BRANCHLIGHT_WORKSPACE_ID: "ws-test",
+				GRADIVUS_TERMINAL_ID: "term-pane-1",
+				GRADIVUS_PANE_ID: "pane-1",
+				GRADIVUS_WORKSPACE_ID: "ws-test",
 			},
 			stdout: "pipe",
 			stderr: "pipe",
@@ -223,16 +223,16 @@ describe("Branchlight terminal automatic agent attachment", () => {
 	});
 
 	it("delivers element selection and screenshot to agent turn via api.sendUserMessage", async () => {
-		process.env.BRANCHLIGHT_TERMINAL = "1";
+		process.env.GRADIVUS_TERMINAL = "1";
 		process.env.PI_RUNTIME_DIR = testDir;
 		process.env.PI_RUNTIME_TOKEN = server.controlToken;
-		process.env.BRANCHLIGHT_TERMINAL_ID = "term-pane-1";
-		process.env.BRANCHLIGHT_PANE_ID = "pane-1";
-		process.env.BRANCHLIGHT_WORKSPACE_ID = "ws-test";
+		process.env.GRADIVUS_TERMINAL_ID = "term-pane-1";
+		process.env.GRADIVUS_PANE_ID = "pane-1";
+		process.env.GRADIVUS_WORKSPACE_ID = "ws-test";
 
 		const delivered = Promise.withResolvers<unknown[]>();
 		const handlers = new Map<string, LifecycleHandler>();
-		const extension = createBranchlightLifecycleExtension();
+		const extension = createGradivusLifecycleExtension();
 		expect(extension).toBeDefined();
 		extension!({
 			on(event: string, handler: LifecycleHandler) {

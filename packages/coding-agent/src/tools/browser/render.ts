@@ -18,7 +18,7 @@ import { replaceTabs, shortenPath } from "../render-utils";
 const BROWSER_DEFAULT_PREVIEW_LINES = 10;
 
 interface BrowserRenderArgs {
-	action?: "open" | "close" | "run";
+	action?: "open" | "close" | "run" | "list";
 	name?: string;
 	url?: string;
 	code?: string;
@@ -64,8 +64,8 @@ function describeBrowser(
 }
 
 function tabLabel(args: BrowserRenderArgs, details: BrowserToolDetails | undefined): string {
-	const name = details?.name ?? args.name ?? "main";
-	return `tab ${JSON.stringify(name)}`;
+	const name = details?.name ?? args.name;
+	return name === undefined ? "the current agent's default tab" : `tab ${JSON.stringify(name)}`;
 }
 
 function cellStatus(isPartial: boolean, isError: boolean): "pending" | "running" | "complete" | "error" {
@@ -160,20 +160,21 @@ function renderOpenOrCloseLine(
 	output: string,
 	theme: Theme,
 ): Component {
-	const action = (details?.action ?? args.action ?? "open") as "open" | "close" | "run";
+	const action = (details?.action ?? args.action ?? "open") as "open" | "close" | "run" | "list";
 	const status = cellStatus(isPartial, isError);
 	const icon =
 		status === "complete" ? "done" : status === "error" ? "error" : status === "running" ? "running" : "pending";
 
 	let title: string;
-	if (action === "close") {
+	if (action === "list") {
+		title = "List browser tabs";
+	} else if (action === "close") {
 		const all = args.all === true || (args.name === undefined && details?.name === undefined);
 		title = all ? "Close all tabs" : `Close ${tabLabel(args, details)}`;
 		if (args.kill) title += " (kill)";
 	} else {
 		title = `Open ${tabLabel(args, details)}`;
 	}
-
 	const meta: string[] = [];
 	const browserDesc = describeBrowser(args, details, showRequestedBrowser);
 	if (browserDesc) meta.push(browserDesc);

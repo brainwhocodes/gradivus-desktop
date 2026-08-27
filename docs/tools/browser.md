@@ -1,6 +1,6 @@
 # browser
 
-> Open, reuse, close, and script browser tabs against project-shared Chromium, CDP-attached apps, Branchlight browser panes, the user's Chrome through the OMP Browser Relay, or cmux surfaces.
+> Open, reuse, close, and script browser tabs against project-shared Chromium, CDP-attached apps, Gradivus browser panes, the user's Chrome through the OMP Browser Relay, or cmux surfaces.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/browser.ts`
@@ -59,7 +59,7 @@
 | `viewport` | `{ width: number; height: number; scale?: number }` | No | Requested viewport for headless tabs. Attached, spawned, and relay pages retain their existing viewport. `scale` is accepted as a compatibility input. |
 | `wait_until` | `"load" \| "domcontentloaded" \| "networkidle0" \| "networkidle2"` | No | Navigation wait condition. Defaults to `"load"` where omitted, including `open` navigation and later `tab.goto(...)`. |
 | `dialogs` | `"accept" \| "dismiss"` | No | Installs a page `dialog` handler that auto-accepts or auto-dismisses dialogs. Omitted means no handler. |
-| `app` | `{ path?: string; cdp_url?: string; relay?: boolean; args?: string[]; target?: string }` | No | Selects browser kind. Explicit `app.cdp_url` wins, then `app.path`. In a Branchlight terminal, inherited `PI_BROWSER_CDP_URL` is skipped; explicit relay and configured relay/CDP/cmux backends remain eligible, then automation fails closed instead of falling back to headless until the authenticated pane-scoped runtime broker is available. Otherwise `app.relay: true` precedes generic inherited `PI_BROWSER_CDP_URL`; then configured relay, `browser.cdpUrl`, cmux, and headless. `app.relay: false` suppresses configured relay, while `PI_BROWSER_RELAY` overrides relay enablement. `browser.relayUrl` defaults to `http://127.0.0.1:9224`. `args` apply only to spawned `app.path`; `target` selects an attached/spawned/relay page by URL/title substring. |
+| `app` | `{ path?: string; cdp_url?: string; relay?: boolean; args?: string[]; target?: string }` | No | Selects browser kind. Explicit `app.cdp_url` wins, then `app.path`. In a Gradivus terminal, inherited `PI_BROWSER_CDP_URL` is skipped; explicit relay and configured relay/CDP/cmux backends remain eligible, then automation fails closed instead of falling back to headless until the authenticated pane-scoped runtime broker is available. Otherwise `app.relay: true` precedes generic inherited `PI_BROWSER_CDP_URL`; then configured relay, `browser.cdpUrl`, cmux, and headless. `app.relay: false` suppresses configured relay, while `PI_BROWSER_RELAY` overrides relay enablement. `browser.relayUrl` defaults to `http://127.0.0.1:9224`. `args` apply only to spawned `app.path`; `target` selects an attached/spawned/relay page by URL/title substring. |
 
 ### `action: "close"`
 
@@ -95,13 +95,13 @@ The tool returns one result per call; no streaming partial output is emitted fro
 1. `BrowserTool.execute()` (`packages/coding-agent/src/tools/browser.ts`) abort-checks, clamps `timeout` via `clampTimeout("browser", ...)`, defaults `name` to `"main"`, and dispatches on `action`.
    - `app.cdp_url` → `{ kind: "connected" }` after trimming trailing slashes.
    - `app.path` → `{ kind: "spawned" }` after resolving against session cwd.
-   - with `BRANCHLIGHT_TERMINAL=1`, inherited `PI_BROWSER_CDP_URL` is skipped.
+   - with `GRADIVUS_TERMINAL=1`, inherited `PI_BROWSER_CDP_URL` is skipped.
    - `app.relay: true` → relay mode unless `PI_BROWSER_RELAY=0` disables it.
-   - otherwise, outside Branchlight terminal mode, inherited `PI_BROWSER_CDP_URL` → `{ kind: "connected" }`.
+   - otherwise, outside Gradivus terminal mode, inherited `PI_BROWSER_CDP_URL` → `{ kind: "connected" }`.
    - otherwise, unless `app.relay === false`, `browser.relay` selects relay mode; `PI_BROWSER_RELAY=0|1` is the final setting override and `browser.relayUrl` supplies the endpoint.
    - otherwise, a non-empty `browser.cdpUrl` setting → `{ kind: "connected" }`.
    - otherwise, `resolveCmuxKind()` → `{ kind: "cmux", socketPath, password?, surface? }` when `CMUX_SOCKET_PATH` is set and cmux is enabled (`browser.cmux`, overridable by `PI_BROWSER_CMUX`).
-   - with `BRANCHLIGHT_TERMINAL=1`, if no explicit or configured backend was selected, fail closed until the authenticated pane-scoped runtime broker is connected.
+   - with `GRADIVUS_TERMINAL=1`, if no explicit or configured backend was selected, fail closed until the authenticated pane-scoped runtime broker is connected.
    - otherwise → `{ kind: "headless", headless: session.settings.get("browser.headless") }`.
 4. `open` acquires a browser handle through `acquireBrowser()` (`packages/coding-agent/src/tools/browser/registry.ts`):
    - existing connected handle is reused by browser-kind key;
@@ -116,7 +116,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
    - reusing with a new `url` navigates by issuing `await tab.goto(...)` through the worker, defaulting to `waitUntil: "load"` when `wait_until` is omitted.
 6. New tabs build a `WorkerInitPayload` in `buildInitPayload()`:
    - headless mode sends `url`, `waitUntil`, `viewport`, `dialogs`, and timeout; the worker defaults missing `waitUntil` to `"load"`.
-   - attached, spawned, and relay modes resolve a page with `pickElectronTarget()`, get its target id, and send `targetId` plus `dialogs`. `app.target` is the only target matcher; Branchlight does not synthesize a matcher from the logical tab name. When no target matcher exists for connected/relay mode, selection prefers the visible usable page and screenshots do not activate it; an explicit matcher may select and activate a background page for target-correct pixels.
+   - attached, spawned, and relay modes resolve a page with `pickElectronTarget()`, get its target id, and send `targetId` plus `dialogs`. `app.target` is the only target matcher; Gradivus does not synthesize a matcher from the logical tab name. When no target matcher exists for connected/relay mode, selection prefers the visible usable page and screenshots do not activate it; an explicit matcher may select and activate a background page for target-correct pixels.
 7. `acquireTab()` spawns a dedicated Bun `Worker` from `tab-worker-entry.ts`; if that fails it falls back to inline execution in the main thread (`spawnInlineWorker()`), preserving behavior but losing protection against synchronous infinite loops.
 8. `WorkerCore.#init()` (`packages/coding-agent/src/tools/browser/tab-worker.ts`) connects back to the browser websocket endpoint. Headless mode opens a new page, applies stealth patches, applies viewport, installs dialog handling if requested, and optionally navigates. Attach mode resolves the requested target page and optionally installs dialog handling.
 9. On success the worker sends `ready` with `{ url, title, viewport, targetId }`; the supervisor stores a `TabSession`, increments browser-handle refcount with `holdBrowser()`, and keeps the tab in a process-global `Map<string, TabSession>`.
@@ -171,8 +171,8 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - **Browser kind**
   - **Headless**: attaches to one project-shared Chromium supervised by the daemon broker (`omp.browser.headless` / `omp.browser.headed` in `hub ps`), applies stealth patches, and creates a fresh page per tab. The daemon stops with the last omp client in the project. Non-CLI hosts launch a private local Chromium instead.
   - **Spawned app (`app.path`)**: reuses an existing CDP-enabled process for that executable when possible; otherwise kills same-path processes, spawns the executable with remote debugging enabled, then attaches. No stealth patches are injected.
-  - **Connected browser (`app.cdp_url`, inherited `PI_BROWSER_CDP_URL`, or `browser.cdpUrl`)**: attaches to an already-running CDP endpoint, except inherited endpoints are ignored in Branchlight terminal mode. No process ownership; close disconnects without terminating the browser.
-  - **Branchlight pane**: explicit app and configured relay/CDP/cmux backends remain available; with none selected, browser automation fails closed rather than falling back to a global Electron CDP endpoint, title, or URL matching.
+  - **Connected browser (`app.cdp_url`, inherited `PI_BROWSER_CDP_URL`, or `browser.cdpUrl`)**: attaches to an already-running CDP endpoint, except inherited endpoints are ignored in Gradivus terminal mode. No process ownership; close disconnects without terminating the browser.
+  - **Gradivus pane**: explicit app and configured relay/CDP/cmux backends remain available; with none selected, browser automation fails closed rather than falling back to a global Electron CDP endpoint, title, or URL matching.
   - **OMP Browser Relay (`app.relay`, or `browser.relay`)**: attaches to the user's own Chrome tabs through the loopback relay and its MV3 extension. Install once with `omp browser-relay install`. CLI hosts auto-start the fixed-port relay daemon for loopback URLs; a remote/custom relay must already be serving. The relay is a connected browser: no process ownership and no stealth patches. Without `app.target`, the visible usable tab is adopted without raising it; a matcher selects by URL/title substring.
   - **Cmux surface (`browser.cmux`)**: with no `app` and a cmux socket available (`CMUX_SOCKET_PATH`, enabled by the `browser.cmux` setting / `PI_BROWSER_CMUX` override), drives a cmux WKWebView surface over a unix-socket JSON-RPC client instead of the Playwright/CDP browser backend. No Bun worker and no stealth patches; `open` opens a split (owning that surface), `run` executes via `runCmuxCode()`, and `close` issues `surface.close` for surfaces it owns (leaving the workspace's last surface open).
 - **Target selection for attached/spawned/relay browsers**

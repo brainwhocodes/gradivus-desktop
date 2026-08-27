@@ -10,728 +10,687 @@ import {
 	ElementSelectionCoordinator,
 	SELECTION_LIMITS,
 	type SelectionAuthScope,
+	type SelectionTargetAgent,
 	type StartSelectionOptions,
 } from "@oh-my-pi/pi-workspace-runtime/selection";
-import type { TerminalOutputFrame } from "@oh-my-pi/pi-workspace-runtime/terminal-protocol";
+import type { TerminalOutputFrame, TerminalStatusFrame } from "@oh-my-pi/pi-workspace-runtime/terminal-protocol";
+import { getAgentSwatch } from "../shared/agent-swatch";
 import type {
 	BrowserBounds,
 	BrowserNavigationAction,
 	BrowserViewState,
+	ChatTerminalViewState,
 	CreateBrowserInput,
 	CreateTerminalInput,
 	ElementEditState,
+	ElementTaskAction,
+	OpenChatTerminalInput,
 	PaneContextMenuAction,
+	QueuedElementTask,
 	TerminalViewState,
 	UpdateTabInput,
 	WorkspaceDocumentV1,
 	WorkspaceEvent,
 } from "../shared/contracts";
+import {
+	DESKTOP_THEME_PALETTES,
+	type ResolvedTheme,
+	resolveTheme as resolveSharedTheme,
+} from "../shared/theme-palette";
 import type { AppSettingsStore } from "./app-settings";
 import { defaultWorkspacePath } from "./backend-path";
+import type { DesktopHost } from "./desktop-host";
+import { DEPARTURE_MONO_BASE64 } from "./inspector-font";
 import elementSelectionPromptTemplate from "./prompts/element-selection.md" with { type: "text" };
 
-export const BROWSER_BG_DARK = "#1c1b1a";
-export const BROWSER_BG_LIGHT = "#f6f2eb";
 const MAX_WORKSPACE_PANES = 4;
+class StaleSelectionOperation extends Error {
+	constructor() {
+		super("Selection operation is no longer current");
+		this.name = "StaleSelectionOperation";
+	}
+}
+
+const STALE_SELECTION_OPERATION = new StaleSelectionOperation();
+
+function isStaleSelectionOperation(error: unknown): boolean {
+	return error === STALE_SELECTION_OPERATION || error instanceof StaleSelectionOperation;
+}
 
 function uniqueCommandId(prefix: string): string {
 	return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-const INSPECTOR_SCRIPT = `
+interface InspectorBounds {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	top?: number;
+	right?: number;
+	bottom?: number;
+	left?: number;
+}
+
+interface InspectorTaskPayload {
+	tagName?: string;
+	selector?: string;
+	id?: string;
+	classes?: string[];
+	attributes?: Record<string, string>;
+	role?: string;
+	name?: string;
+	text?: string;
+	outerHTML?: string;
+	instruction?: string;
+	action?: ElementTaskAction;
+	agentType?: string;
+	captureMode?: string;
+	hierarchy?: string[];
+	bounds?: InspectorBounds;
+}
+
+interface InspectorActionPayload extends InspectorTaskPayload {
+	enqueue?: boolean;
+	queueValidationError?: string;
+	targetAgentId?: string;
+	canceled?: boolean;
+	closed?: boolean;
+}
+
+function inspectorThemeVariables(theme: ResolvedTheme): Record<string, string> {
+	const palette = DESKTOP_THEME_PALETTES[theme];
+	return {
+		"--inspector-window-background": palette.windowBackground,
+		"--inspector-shell": palette.shell,
+		"--inspector-shell-raised": palette.shellRaised,
+		"--inspector-shell-hover": palette.shellHover,
+		"--inspector-chat-canvas": palette.chatCanvas,
+		"--inspector-code-surface": palette.codeSurface,
+		"--inspector-foreground": palette.foreground,
+		"--inspector-foreground-strong": palette.foregroundStrong,
+		"--inspector-foreground-muted": palette.foregroundMuted,
+		"--inspector-foreground-disabled": palette.foregroundDisabled,
+		"--inspector-line": palette.line,
+		"--inspector-line-soft": palette.lineSoft,
+		"--inspector-accent": palette.accent,
+		"--inspector-accent-hover": palette.accentHover,
+		"--inspector-accent-surface": palette.accentSurface,
+		"--inspector-accent-boundary": palette.accentBoundary,
+		"--inspector-accent-foreground": palette.accentForeground,
+		"--inspector-danger": palette.danger,
+		"--inspector-danger-surface": palette.dangerSurface,
+		"--inspector-danger-boundary": palette.dangerBoundary,
+		"--inspector-danger-foreground": palette.dangerForeground,
+		"--inspector-success": palette.success,
+		"--inspector-success-surface": palette.successSurface,
+		"--inspector-success-boundary": palette.successBoundary,
+		"--inspector-success-foreground": palette.successForeground,
+		"--inspector-warning": palette.warning,
+		"--inspector-warning-surface": palette.warningSurface,
+		"--inspector-warning-boundary": palette.warningBoundary,
+		"--inspector-warning-foreground": palette.warningForeground,
+		"--inspector-selection-surface": palette.selectionSurface,
+		"--inspector-selection-foreground": palette.selectionForeground,
+		"--inspector-focus-inner": palette.focusInner,
+		"--inspector-focus-outer": palette.focusOuter,
+		"--inspector-shadow-color": palette.shadowColor,
+		"--inspector-backdrop": palette.backdrop,
+		"--inspector-font-mono": '"Departure Mono", ui-monospace, monospace',
+		"--inspector-font-sans": '"Departure Mono", ui-monospace, monospace',
+		"--inspector-ease": "cubic-bezier(0.16, 1, 0.3, 1)",
+		"--inspector-radius-small": "5px",
+		"--inspector-radius-medium": "8px",
+		"--inspector-radius-large": "12px",
+		"--inspector-control-height": "36px",
+	};
+}
+
+function buildInspectorScript(
+	initialTheme: ResolvedTheme,
+	token: string,
+	target: SelectionTargetAgent,
+	queuedTasks: QueuedElementTask[],
+): string {
+	const themeJson = JSON.stringify(initialTheme);
+	const targetJson = JSON.stringify(target);
+	const queueJson = JSON.stringify(
+		queuedTasks.map(task => ({
+			id: task.id,
+			taskIndex: task.taskIndex,
+			selector: task.selector,
+			tagName: task.tagName,
+			targetAgentId: task.targetAgentId,
+			targetAgentName: task.targetAgentName,
+			agentSwatch: task.agentSwatch,
+			status: task.status,
+		})),
+	);
+	const themeValuesJson = JSON.stringify({
+		dark: inspectorThemeVariables("dark"),
+		light: inspectorThemeVariables("light"),
+	});
+	return `
 (function() {
-  return new Promise((resolve) => {
-    if (window.__branchlight_inspector_cleanup__) {
-      window.__branchlight_inspector_cleanup__({ canceled: true });
+  const token = ${JSON.stringify(token)};
+  const targetAgent = ${targetJson};
+  const initialQueue = ${queueJson};
+  return (async function() {
+    if (window.__gradivus_inspector_cleanup__) {
+      try { window.__gradivus_inspector_cleanup__({ canceled: true }); } catch {}
     }
-
-    const isLocal = Boolean(
-      location.hostname === 'localhost' ||
-      location.hostname === '127.0.0.1' ||
-      location.hostname === '0.0.0.0' ||
-      location.hostname === '::1' ||
-      location.hostname.endsWith('.local') ||
-      location.hostname.startsWith('local.') ||
-      location.hostname.includes('.local.') ||
-      location.hostname.endsWith('.localhost') ||
-      location.hostname.endsWith('.test') ||
-      location.hostname.endsWith('.internal')
-    );
-
-    const container = document.createElement('div');
-    container.id = '__branchlight_inspector_root__';
-    container.style.cssText = 'all: initial; position: absolute; top: 0; left: 0; z-index: 2147483647; pointer-events: none;';
-    
-    const shadow = container.attachShadow({ mode: 'closed' });
-    const style = document.createElement('style');
+    const root = document.createElement("div");
+    root.id = "__gradivus_inspector_root__";
+    root.dataset.theme = ${themeJson};
+    root.style.cssText = "all:initial;position:absolute;top:0;left:0;z-index:2147483647;pointer-events:none;";
+    const shadow = root.attachShadow({ mode: "closed" });
+    const themeValues = ${themeValuesJson};
+    const style = document.createElement("style");
     style.textContent = [
-      '* { box-sizing: border-box; margin: 0; padding: 0; }',
-      '.inspector-box {',
-      '  position: fixed;',
-      '  pointer-events: none;',
-      '  box-sizing: border-box;',
-      '  border: 2px solid #f97316;',
-      '  background: rgba(249, 115, 22, 0.20);',
-      '  border-radius: 3px;',
-      '  z-index: 2147483646;',
-      '  display: none;',
-      '  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 0 14px rgba(249, 115, 22, 0.45);',
-      '  transition: all 40ms ease-out;',
-      '}',
-      '.inspector-box.selected {',
-      '  border: 2px solid #f97316;',
-      '  background: rgba(249, 115, 22, 0.28);',
-      '  box-shadow: 0 0 0 2px rgba(0,0,0,0.7), 0 0 24px rgba(249, 115, 22, 0.7);',
-      '  transition: none;',
-      '}',
-      '.inspector-pill {',
-      '  position: absolute;',
-      '  bottom: calc(100% + 5px);',
-      '  left: 0;',
-      '  background: #1c1b1a;',
-      '  color: #f6f2eb;',
-      '  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;',
-      '  font-size: 11px;',
-      '  line-height: 14px;',
-      '  padding: 3px 8px;',
-      '  border-radius: 4px;',
-      '  box-shadow: 0 4px 14px rgba(0,0,0,0.6);',
-      '  border: 1px solid rgba(255,255,255,0.25);',
-      '  white-space: nowrap;',
-      '  display: flex;',
-      '  gap: 6px;',
-      '  align-items: center;',
-      '  pointer-events: none;',
-      '}',
-      '.pill-tag { color: #f97316; font-weight: 700; }',
-      '.pill-id { color: #38bdf8; }',
-      '.pill-class { color: #a78bfa; }',
-      '.pill-dim { color: #94a3b8; font-size: 10px; font-weight: 500; }',
-      '.floating-card {',
-      '  position: fixed;',
-      '  z-index: 2147483647;',
-      '  width: min(520px, calc(100vw - 32px));',
-      '  padding: 14px;',
-      '  border-radius: 12px;',
-      '  background: rgba(28, 27, 26, 0.96);',
-      '  border: 1px solid rgba(249, 115, 22, 0.4);',
-      '  box-shadow: 0 20px 50px rgba(0,0,0,0.7), 0 0 0 1px rgba(249, 115, 22, 0.2);',
-      '  backdrop-filter: blur(16px);',
-      '  color: #f6f2eb;',
-      '  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;',
-      '  font-size: 12px;',
-      '  pointer-events: auto;',
-      '  animation: cardFadeIn 160ms cubic-bezier(0.16, 1, 0.3, 1);',
-      '}',
-      '@keyframes cardFadeIn {',
-      '  from { opacity: 0; transform: translateY(8px); }',
-      '  to { opacity: 1; transform: translateY(0); }',
-      '}',
-      '.card-header {',
-      '  display: flex;',
-      '  align-items: center;',
-      '  justify-content: space-between;',
-      '  gap: 8px;',
-      '  padding-bottom: 10px;',
-      '  border-bottom: 1px solid rgba(255,255,255,0.1);',
-      '}',
-      '.target-info {',
-      '  display: flex;',
-      '  align-items: center;',
-      '  gap: 6px;',
-      '  min-width: 0;',
-      '}',
-      '.target-icon { color: #f97316; font-weight: bold; font-size: 13px; }',
-      '.target-name { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 700; color: #fff; }',
-      '.target-selector { font-family: ui-monospace, monospace; font-size: 10.5px; color: #a49d93; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-      '.mode-badge { font-family: ui-monospace, monospace; font-size: 9px; font-weight: 750; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }',
-      '.mode-badge.local { background: rgba(249, 115, 22, 0.2); color: #f97316; }',
-      '.mode-badge.external { background: rgba(255, 255, 255, 0.1); color: #a49d93; border: 1px solid rgba(255,255,255,0.15); }',
-      '.card-close-btn {',
-      '  width: 22px;',
-      '  height: 22px;',
-      '  border: 0;',
-      '  background: transparent;',
-      '  color: #a49d93;',
-      '  font-size: 16px;',
-      '  line-height: 1;',
-      '  cursor: pointer;',
-      '  display: flex;',
-      '  align-items: center;',
-      '  justify-content: center;',
-      '  border-radius: 4px;',
-      '}',
-      '.card-close-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }',
-      '.card-textarea {',
-      '  width: 100%;',
-      '  min-height: 64px;',
-      '  margin-top: 10px;',
-      '  padding: 8px 10px;',
-      '  border: 1px solid rgba(255,255,255,0.15);',
-      '  border-radius: 6px;',
-      '  background: #141312;',
-      '  color: #fff;',
-      '  font-family: inherit;',
-      '  font-size: 12px;',
-      '  line-height: 1.45;',
-      '  resize: vertical;',
-      '  outline: none;',
-      '}',
-      '.card-textarea:focus { border-color: #f97316; box-shadow: 0 0 0 1px #f97316; }',
-      '.card-chips {',
-      '  display: flex;',
-      '  flex-wrap: wrap;',
-      '  gap: 6px;',
-      '  margin-top: 8px;',
-      '}',
-      '.chip {',
-      '  display: inline-flex;',
-      '  align-items: center;',
-      '  padding: 3px 8px;',
-      '  border: 1px solid rgba(255,255,255,0.12);',
-      '  border-radius: 999px;',
-      '  background: rgba(255,255,255,0.04);',
-      '  color: #a49d93;',
-      '  font-size: 10.5px;',
-      '  font-weight: 600;',
-      '  cursor: pointer;',
-      '  user-select: none;',
-      '}',
-      '.chip:hover { border-color: #f97316; color: #fff; background: rgba(249, 115, 22, 0.15); }',
-      '.recreate-dropdown-wrap { position: relative; display: inline-block; }',
-      '.recreate-trigger-btn {',
-      '  display: inline-flex;',
-      '  align-items: center;',
-      '  gap: 4px;',
-      '  height: 24px;',
-      '  padding: 0 10px;',
-      '  border: 1px solid rgba(255,255,255,0.18);',
-      '  border-radius: 999px;',
-      '  background: #141312;',
-      '  color: #f97316;',
-      '  font-family: inherit;',
-      '  font-size: 10.5px;',
-      '  font-weight: 700;',
-      '  cursor: pointer;',
-      '  user-select: none;',
-      '}',
-      '.recreate-trigger-btn:hover { border-color: #f97316; background: rgba(249, 115, 22, 0.15); }',
-      '.recreate-menu {',
-      '  position: absolute;',
-      '  top: calc(100% + 4px);',
-      '  left: 0;',
-      '  z-index: 2147483647;',
-      '  width: 170px;',
-      '  padding: 4px;',
-      '  border-radius: 8px;',
-      '  background: #1c1b1a;',
-      '  border: 1px solid rgba(255,255,255,0.2);',
-      '  box-shadow: 0 12px 30px rgba(0,0,0,0.7);',
-      '  display: flex;',
-      '  flex-direction: column;',
-      '  gap: 2px;',
-      '}',
-      '.recreate-item {',
-      '  display: flex;',
-      '  align-items: center;',
-      '  width: 100%;',
-      '  height: 28px;',
-      '  padding: 0 8px;',
-      '  border: 0;',
-      '  border-radius: 5px;',
-      '  background: transparent;',
-      '  color: #f6f2eb;',
-      '  font-family: inherit;',
-      '  font-size: 11px;',
-      '  font-weight: 600;',
-      '  text-align: left;',
-      '  cursor: pointer;',
-      '}',
-      '.recreate-item:hover { background: rgba(249, 115, 22, 0.2); color: #f97316; }',
-      '.card-footer {',
-      '  display: flex;',
-      '  align-items: center;',
-      '  justify-content: space-between;',
-      '  margin-top: 12px;',
-      '  padding-top: 4px;',
-      '}',
-      '.mode-toggles {',
-      '  display: inline-flex;',
-      '  align-items: center;',
-      '  gap: 2px;',
-      '  padding: 2px;',
-      '  border: 1px solid rgba(255,255,255,0.12);',
-      '  border-radius: 5px;',
-      '  background: #141312;',
-      '}',
-      '.mode-toggle {',
-      '  padding: 2px 7px;',
-      '  border: 0;',
-      '  border-radius: 3px;',
-      '  background: transparent;',
-      '  color: #a49d93;',
-      '  font-size: 10.5px;',
-      '  font-weight: 600;',
-      '  cursor: pointer;',
-      '}',
-      '.mode-toggle.active { background: #f97316; color: #fff; font-weight: 700; }',
-      '.card-actions { display: flex; gap: 6px; }',
-      '.btn-cancel {',
-      '  height: 28px;',
-      '  padding: 0 10px;',
-      '  border: 1px solid rgba(255,255,255,0.15);',
-      '  border-radius: 5px;',
-      '  background: transparent;',
-      '  color: #a49d93;',
-      '  font-size: 11px;',
-      '  font-weight: 600;',
-      '  cursor: pointer;',
-      '}',
-      '.btn-cancel:hover { background: rgba(255,255,255,0.08); color: #fff; }',
-      '.btn-submit {',
-      '  height: 28px;',
-      '  padding: 0 12px;',
-      '  border: 1px solid #f97316;',
-      '  border-radius: 5px;',
-      '  background: #f97316;',
-      '  color: #fff;',
-      '  font-size: 11.5px;',
-      '  font-weight: 700;',
-      '  cursor: pointer;',
-      '  display: inline-flex;',
-      '  align-items: center;',
-      '  gap: 4px;',
-      '}',
-      '.btn-submit:hover:not(:disabled) { filter: brightness(1.15); }',
-      '.btn-submit:disabled { opacity: 0.4; cursor: default; }'
-    ].join('\\n');
+      "@font-face{font-family:'Departure Mono';src:url('data:font/woff2;base64," + ${JSON.stringify(DEPARTURE_MONO_BASE64)} + "') format('woff2');font-weight:normal;font-style:normal;font-display:swap}",
+      ":host,*{box-sizing:border-box;margin:0;padding:0;font-family:'Departure Mono',ui-monospace,monospace}",
+      "button,textarea,input,select{font:inherit;color:inherit}",
+".inspector-box{position:fixed;pointer-events:none;border:2px solid var(--inspector-foreground-muted);background:color-mix(in srgb,var(--inspector-foreground-muted) 20%,transparent);display:none;border-radius:var(--inspector-radius-small,5px);box-shadow:0 0 0 2px var(--inspector-focus-inner),0 0 0 4px var(--inspector-focus-outer)}",
+".inspector-box.selected{border-color:var(--inspector-agent-swatch,var(--inspector-accent-boundary));background:color-mix(in srgb,var(--inspector-agent-swatch,var(--inspector-selection-surface)) 35%,transparent)}",
+".inspector-box.working{border-color:var(--inspector-warning-boundary);background:color-mix(in srgb,var(--inspector-warning-surface) 65%,transparent)}",
+".inspector-box.ready{border-color:var(--inspector-success-boundary);background:color-mix(in srgb,var(--inspector-success-surface) 65%,transparent)}",
+".inspector-box.error{border-color:var(--inspector-danger-boundary);background:color-mix(in srgb,var(--inspector-danger-surface) 65%,transparent)}",
+".inspector-pill{position:absolute;bottom:calc(100% + 5px);left:0;padding:3px 8px;white-space:nowrap;color:var(--inspector-foreground);background:var(--inspector-shell-raised);border:1px solid var(--inspector-agent-swatch,var(--inspector-line));border-radius:var(--inspector-radius-small,5px);font:11px/14px 'Departure Mono',ui-monospace,monospace;box-shadow:0 8px 24px var(--inspector-shadow-color)}",
+".pinned-queue-badge{position:absolute;top:-10px;right:-10px;min-width:22px;height:22px;padding:0 5px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--inspector-selection-foreground);background:var(--inspector-agent-swatch,var(--inspector-selection-surface));border:1px solid var(--inspector-agent-swatch,var(--inspector-accent-boundary));font:11px 'Departure Mono',ui-monospace,monospace}",
+      ".inspector-card{position:fixed;z-index:2147483647;width:min(580px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:14px;border-radius:var(--inspector-radius-large,12px);display:none;flex-direction:column;gap:10px;color:var(--inspector-foreground);background:var(--inspector-shell-raised);border:1px solid var(--inspector-line);box-shadow:0 14px 40px var(--inspector-shadow-color);font:12px/1.4 'Departure Mono',ui-monospace,monospace;pointer-events:auto}",
+      ".card-header,.target-info,.card-footer,.card-actions,.inline-response-actions{display:flex;align-items:center;gap:8px}.card-header,.card-footer{justify-content:space-between}.card-header{padding-bottom:10px;border-bottom:1px solid var(--inspector-line-soft)}.target-info{flex-wrap:wrap;min-width:0}.target-selector,.inline-response-view{color:var(--inspector-foreground-muted);background:var(--inspector-code-surface);border:1px solid var(--inspector-line-soft);border-radius:var(--inspector-radius-small,5px)}.target-selector{padding:2px 6px;font:10.5px 'Departure Mono',ui-monospace,monospace;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mode-badge{padding:2px 6px;border-radius:999px;color:var(--inspector-foreground);background:var(--inspector-shell-hover);border:1px solid var(--inspector-line);font-size:10px}.mode-badge.local{background:var(--inspector-selection-surface);border-color:var(--inspector-accent-boundary);color:var(--inspector-selection-foreground)}",
+      ".card-close-btn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;color:var(--inspector-foreground-muted);background:transparent;border:1px solid transparent;border-radius:var(--inspector-radius-small,5px);font:16px/1 'Departure Mono',ui-monospace,monospace;cursor:pointer;transition:all 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.card-close-btn:hover{color:var(--inspector-foreground-strong);background:var(--inspector-shell-hover);border-color:var(--inspector-line-soft)}",
+      ".card-textarea,.agent-select,.mode-toggle,.recreate-menu,.split-action-menu{color:var(--inspector-foreground);background:var(--inspector-code-surface);border:1px solid var(--inspector-line);border-radius:var(--inspector-radius-small,5px)}.card-textarea{width:100%;min-height:64px;padding:8px 10px;resize:vertical;font:12px/1.4 'Departure Mono',ui-monospace,monospace;transition:border-color 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.card-textarea::placeholder{color:var(--inspector-foreground-muted)}.card-chips,.mode-toggles{display:flex;flex-wrap:wrap;gap:6px}.mode-toggles{display:inline-flex;gap:6px}.mode-toggle{padding:4px 8px;color:var(--inspector-foreground);background:var(--inspector-code-surface);border:1px solid var(--inspector-line);border-radius:var(--inspector-radius-small,5px);font:11px 'Departure Mono',ui-monospace,monospace;cursor:pointer;transition:all 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.mode-toggle.active{background:var(--inspector-selection-surface);color:var(--inspector-selection-foreground);border-color:var(--inspector-accent-boundary);font-weight:600}.mode-toggle:hover:not(.active){background:var(--inspector-shell-hover);color:var(--inspector-foreground)}.chip,.recreate-trigger-btn,.btn-cancel,.btn-close-response,.btn-copy-response{padding:4px 8px;border-radius:var(--inspector-radius-small,5px);color:var(--inspector-foreground);background:var(--inspector-shell-hover);border:1px solid var(--inspector-line);font:11px 'Departure Mono',ui-monospace,monospace;cursor:pointer;transition:all 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.chip:hover,.recreate-trigger-btn:hover,.btn-cancel:hover,.btn-close-response:hover,.btn-copy-response:hover{background:var(--inspector-selection-surface);border-color:var(--inspector-accent-boundary);color:var(--inspector-selection-foreground)}.recreate-dropdown-wrap{position:relative}.recreate-menu{position:absolute;z-index:2;padding:4px;border-radius:var(--inspector-radius-medium,8px);background:var(--inspector-code-surface);box-shadow:0 12px 30px var(--inspector-shadow-color)}.recreate-item,.split-action-item{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border-radius:var(--inspector-radius-small,5px);color:var(--inspector-foreground);background:transparent;border:0;font:11px 'Departure Mono',ui-monospace,monospace;text-align:left;cursor:pointer;transition:all 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.recreate-item:hover,.split-action-item:hover{background:var(--inspector-shell-hover);color:var(--inspector-foreground)}.split-action-btn-group{position:relative;display:inline-flex;border-radius:var(--inspector-radius-small,5px);color:var(--inspector-accent-foreground);background:var(--inspector-accent);border:1px solid var(--inspector-accent-boundary);font:11px 'Departure Mono',ui-monospace,monospace;transition:background-color 140ms var(--inspector-ease,cubic-bezier(0.16,1,0.3,1))}.split-action-btn-group:hover{background:var(--inspector-accent-hover)}.split-action-item.active{background:var(--inspector-selection-surface);color:var(--inspector-selection-foreground);border-color:var(--inspector-accent-boundary)}.btn-submit-main,.btn-action-dropdown{padding:6px 10px;color:inherit;background:transparent;border:0;font:inherit;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px}.btn-action-dropdown{border-left:1px solid var(--inspector-accent-boundary);padding:6px 8px}.btn-submit-main:disabled{color:var(--inspector-foreground-disabled);cursor:not-allowed;opacity:0.6}.split-action-menu{position:absolute;right:0;bottom:calc(100% + 4px);min-width:220px;padding:4px;border-radius:var(--inspector-radius-medium,8px);color:var(--inspector-foreground);background:var(--inspector-code-surface);border:1px solid var(--inspector-line);box-shadow:0 12px 30px var(--inspector-shadow-color);z-index:10;display:flex;flex-direction:column;gap:2px}.inline-response-view{display:none;padding:12px;border-radius:var(--inspector-radius-small,5px);font:11.5px/1.5 'Departure Mono',ui-monospace,monospace;white-space:pre-wrap}.inline-response-view.visible{display:flex;flex-direction:column;gap:8px}.inline-response-header{display:flex;justify-content:space-between;color:var(--inspector-foreground-strong)}.inline-response-body{max-height:300px;overflow:auto;white-space:pre-wrap}.card-status{min-height:18px;padding:4px 6px;border-radius:var(--inspector-radius-small,5px);font:11px 'Departure Mono',ui-monospace,monospace;color:var(--inspector-foreground-muted);white-space:pre-wrap}.card-status.error,.card-status.success{border:1px solid;border-radius:var(--inspector-radius-small,5px);color:var(--inspector-foreground)}.card-status.error{background:var(--inspector-danger-surface);border-color:var(--inspector-danger-boundary)}.card-status.success{background:var(--inspector-success-surface);border-color:var(--inspector-success-boundary)}:focus-visible{outline:2px solid var(--inspector-focus-inner);outline-offset:1px;box-shadow:0 0 0 4px var(--inspector-focus-outer)}",
+      "@media(forced-colors:active){.inspector-box,.inspector-pill,.inspector-card,.card-textarea,.agent-select,.mode-toggle,.recreate-menu,.split-action-menu,.chip,.recreate-trigger-btn,.btn-cancel,.btn-close-response,.btn-copy-response,.card-close-btn,.split-action-btn-group,.card-status{background:Canvas;color:CanvasText;border-color:Highlight;box-shadow:none}.recreate-item,.split-action-item{background:Canvas;color:CanvasText}:focus-visible{outline:2px solid Highlight;outline-offset:2px;box-shadow:none}}",
+    ].join("\\n");
     shadow.appendChild(style);
 
-    const cursorStyle = document.createElement('style');
-    cursorStyle.id = '__branchlight_cursor_style__';
-    cursorStyle.textContent = '* { cursor: crosshair !important; }';
-    (document.head || document.documentElement).appendChild(cursorStyle);
-
-    const box = document.createElement('div');
-    box.className = 'inspector-box';
-    const pill = document.createElement('div');
-    pill.className = 'inspector-pill';
-    box.appendChild(pill);
-    shadow.appendChild(box);
-
-    const card = document.createElement('div');
-    card.className = 'floating-card';
-    card.style.display = 'none';
+    let cursorStyle = null;
+    cursorStyle = document.createElement("style");
+    cursorStyle.id = "__gradivus_cursor_style__";
+    cursorStyle.textContent = "*{cursor:crosshair!important}";
+    const activeBox = document.createElement("div");
+    activeBox.className = "inspector-box";
+    activeBox.style.setProperty("--inspector-agent-swatch", targetAgent.swatch);
+    const activePill = document.createElement("div");
+    activePill.className = "inspector-pill";
+    activePill.style.setProperty("--inspector-agent-swatch", targetAgent.swatch);
+    activeBox.appendChild(activePill);
+    shadow.appendChild(activeBox);
+    const card = document.createElement("div");
+    card.className = "inspector-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "false");
+    card.setAttribute("aria-labelledby", "__gradivus_inspector_title__");
     shadow.appendChild(card);
-
-    document.documentElement.appendChild(container);
+    document.documentElement.appendChild(root);
 
     let currentTarget = null;
     let selectedElement = null;
     let selectedMetadata = null;
-    let currentCaptureMode = 'dom';
+    let currentAction = "inline";
+    let currentCaptureMode = "dom";
+    let currentAgentType = "task";
+    let pinnedBoxes = [];
+    let pendingActions = [];
+    let actionWaiters = [];
+    let cardClickHandler = null;
     let rafId = null;
+    let currentTheme = ${themeJson};
+    let captureTimer = null;
+    let cleaned = false;
+
+    function setText(node, value) {
+      if (node) node.textContent = value == null ? "" : String(value);
+    }
+    function notifyAction(action) {
+      if (cleaned) return;
+      const waiter = actionWaiters.shift();
+      if (waiter) waiter(action);
+      else pendingActions.push(action);
+    }
+    function waitForAction() {
+      if (pendingActions.length > 0) return Promise.resolve(pendingActions.shift());
+      return new Promise(resolve => actionWaiters.push(resolve));
+    }
+    function applyTheme(theme) {
+      if (theme !== "dark" && theme !== "light") return;
+      const values = themeValues[theme];
+      for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value);
+      currentTheme = theme;
+      root.dataset.theme = theme;
+      root.style.colorScheme = theme;
+      window.__gradivus_inspector_theme__ = theme;
+      updateCursorStyle(theme);
+    }
+    function updateCursorStyle(theme) {
+      if (!cursorStyle) return;
+      const focusColor = themeValues[theme]["--inspector-focus-outer"];
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 1v22M1 12h22" fill="none" stroke="' + focusColor + '" stroke-width="4" stroke-linecap="round"/><path d="M12 1v22M1 12h22" fill="none" stroke="' + targetAgent.swatch + '" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="2" fill="' + targetAgent.swatch + '" stroke="' + focusColor + '" stroke-width="1"/></svg>';
+      cursorStyle.textContent = "*{cursor:url(data:image/svg+xml," + encodeURIComponent(svg) + ") 12 12,crosshair!important}";
+    }
+    applyTheme(currentTheme);
+    window.__gradivus_inspector_set_theme__ = applyTheme;
 
     function generateSelector(el) {
-      if (!el || el.nodeType !== 1) return '';
+      if (!el || el.nodeType !== 1) return "";
       if (el.id && /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(el.id)) {
         try {
-          if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
-            return '#' + CSS.escape(el.id);
-          }
+          if (document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) return "#" + CSS.escape(el.id);
         } catch {}
       }
-      for (const attr of ['data-testid', 'data-test', 'data-cy']) {
-        const val = el.getAttribute(attr);
-        if (val) {
-          try {
-            const sel = '[' + attr + '="' + CSS.escape(val) + '"]';
-            if (document.querySelectorAll(sel).length === 1) return sel;
-          } catch {}
-        }
+      for (const attr of ["data-testid", "data-test", "data-cy"]) {
+        const value = el.getAttribute(attr);
+        if (!value) continue;
+        try {
+          const selector = "[" + attr + "=\\"" + CSS.escape(value) + "\\"]";
+          if (document.querySelectorAll(selector).length === 1) return selector;
+        } catch {}
       }
       const tag = el.tagName.toLowerCase();
       if (el.classList && el.classList.length > 0) {
         try {
-          const classes = Array.from(el.classList).slice(0, 3).map(c => '.' + CSS.escape(c)).join('');
-          const tagClasses = tag + classes;
-          if (document.querySelectorAll(tagClasses).length === 1) return tagClasses;
+          const classes = Array.from(el.classList).slice(0, 3).map(c => "." + CSS.escape(c)).join("");
+          const selector = tag + classes;
+          if (document.querySelectorAll(selector).length === 1) return selector;
         } catch {}
       }
-      let path = [];
+      const path = [];
       let current = el;
-      while (current && current.nodeType === 1 && current !== document.documentElement && path.length < 5) {
-        let step = current.tagName.toLowerCase();
-        if (current.id && /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(current.id)) {
-          step = '#' + CSS.escape(current.id);
-          path.unshift(step);
-          break;
-        }
+      while (current && current.nodeType === 1 && current !== document.documentElement && path.length < 6) {
+        let part = current.tagName.toLowerCase();
         let sibling = current;
         let nth = 1;
         while ((sibling = sibling.previousElementSibling)) {
           if (sibling.tagName.toLowerCase() === current.tagName.toLowerCase()) nth++;
         }
-        if (nth > 1) step += ':nth-of-type(' + nth + ')';
-        path.unshift(step);
+        if (nth > 1) part += ":nth-of-type(" + nth + ")";
+        path.unshift(part);
         current = current.parentElement;
       }
-      return path.join(' > ');
+      return path.join(" > ");
     }
-
+    function boundsFor(el) {
+      if (!el || !el.isConnected) return null;
+      const rect = el.getBoundingClientRect();
+      if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return null;
+      return {
+        x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height),
+        top: Math.round(rect.top), right: Math.round(rect.right), bottom: Math.round(rect.bottom), left: Math.round(rect.left),
+      };
+    }
     function updateOverlay(el) {
-      if (!el || el === container || container.contains(el) || selectedElement) return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) {
-        box.style.display = 'none';
-        return;
-      }
-      box.style.display = 'block';
-      box.style.top = rect.top + 'px';
-      box.style.left = rect.left + 'px';
-      box.style.width = rect.width + 'px';
-      box.style.height = rect.height + 'px';
-
-      const tag = el.tagName.toLowerCase();
-      const idStr = el.id ? '#' + el.id : '';
-      const classStr = el.className && typeof el.className === 'string'
-        ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.')
-        : '';
-      const dimStr = Math.round(rect.width) + ' × ' + Math.round(rect.height);
-
-      pill.innerHTML = '<span class="pill-tag">&lt;' + tag + '&gt;</span>' +
-        (idStr ? '<span class="pill-id">' + idStr + '</span>' : '') +
-        (classStr ? '<span class="pill-class">' + classStr + '</span>' : '') +
-        '<span class="pill-dim">' + dimStr + '</span>';
-
-      if (rect.top < 34) {
-        pill.style.bottom = 'auto';
-        pill.style.top = 'calc(100% + 4px)';
-      } else {
-        pill.style.top = 'auto';
-        pill.style.bottom = 'calc(100% + 4px)';
-      }
+      const bounds = boundsFor(el);
+      if (!bounds) { activeBox.style.display = "none"; return; }
+      activeBox.style.display = "block";
+      activeBox.style.top = bounds.top + "px";
+      activeBox.style.left = bounds.left + "px";
+      activeBox.style.width = bounds.width + "px";
+      activeBox.style.height = bounds.height + "px";
+      activePill.style.bottom = bounds.top < 34 ? "auto" : "calc(100% + 5px)";
+      activePill.style.top = bounds.top < 34 ? "calc(100% + 4px)" : "auto";
+      setText(activePill, "<" + el.tagName.toLowerCase() + "> " + Math.round(bounds.width) + " × " + Math.round(bounds.height));
     }
-
     function extractMetadata(el) {
-      const rect = el.getBoundingClientRect();
-      const computed = window.getComputedStyle(el);
+      const bounds = boundsFor(el);
       const attributes = {};
-      for (let i = 0; i < el.attributes.length; i++) {
-        const attr = el.attributes[i];
-        attributes[attr.name] = attr.value;
-      }
+      for (let i = 0; i < el.attributes.length; i++) attributes[el.attributes[i].name] = el.attributes[i].value;
       const hierarchy = [];
-      let cur = el.parentElement;
-      while (cur && hierarchy.length < 8) {
-        hierarchy.push(cur.tagName.toLowerCase());
-        cur = cur.parentElement;
-      }
+      let parent = el.parentElement;
+      while (parent && hierarchy.length < 8) { hierarchy.push(parent.tagName.toLowerCase()); parent = parent.parentElement; }
       return {
         tagName: el.tagName.toLowerCase(),
         selector: generateSelector(el),
         id: el.id || undefined,
         classes: Array.from(el.classList || []),
-        attributes: attributes,
-        role: el.getAttribute('role') || undefined,
-        name: el.getAttribute('aria-label') || el.getAttribute('title') || undefined,
-        text: (el.innerText || el.textContent || '').trim().slice(0, 1024),
-        outerHTML: (el.outerHTML || '').slice(0, 32768),
-        bounds: {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-          top: Math.round(rect.top),
-          left: Math.round(rect.left),
-          bottom: Math.round(rect.bottom),
-          right: Math.round(rect.right)
-        },
-        computedStyles: {
-          display: computed.display,
-          position: computed.position,
-          fontSize: computed.fontSize,
-          fontFamily: computed.fontFamily,
-          color: computed.color,
-          backgroundColor: computed.backgroundColor,
-          padding: computed.paddingTop + ' ' + computed.paddingRight + ' ' + computed.paddingBottom + ' ' + computed.paddingLeft,
-          margin: computed.marginTop + ' ' + computed.marginRight + ' ' + computed.marginBottom + ' ' + computed.marginLeft,
-          borderRadius: computed.borderRadius,
-          zIndex: computed.zIndex
-        },
-        hierarchy: hierarchy,
-        devicePixelRatio: window.devicePixelRatio || 1
+        attributes,
+        role: el.getAttribute("role") || undefined,
+        name: el.getAttribute("aria-label") || el.getAttribute("title") || undefined,
+        text: (el.innerText || el.textContent || "").trim().slice(0, 1024),
+        outerHTML: (el.outerHTML || "").slice(0, 32768),
+        bounds,
+        hierarchy,
       };
     }
-
+    function setBox(box, el, state, label) {
+      const bounds = boundsFor(el);
+      if (!bounds) { box.style.display = "none"; return; }
+      box.className = "inspector-box " + state;
+      box.style.display = "block";
+      box.style.top = bounds.top + "px"; box.style.left = bounds.left + "px";
+      box.style.width = bounds.width + "px"; box.style.height = bounds.height + "px";
+      const pill = box.querySelector(".inspector-pill");
+      if (pill) setText(pill, label);
+    }
+    function stopPicking() {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerdown", interceptEvent, true);
+      window.removeEventListener("mousedown", interceptEvent, true);
+      window.removeEventListener("mouseup", interceptEvent, true);
+      window.removeEventListener("click", onElementClick, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+      cursorStyle.remove();
+    }
+    function startPicking() {
+      if (cleaned) return;
+      selectedElement = null;
+      selectedMetadata = null;
+      activeBox.style.display = "none";
+      card.style.display = "none";
+      document.documentElement.appendChild(cursorStyle);
+      window.addEventListener("pointermove", onPointerMove, true);
+      window.addEventListener("pointerdown", interceptEvent, true);
+      window.addEventListener("mousedown", interceptEvent, true);
+      window.addEventListener("mouseup", interceptEvent, true);
+      window.addEventListener("click", onElementClick, true);
+      window.addEventListener("keydown", onKeyDown, true);
+    }
+    function resetDraft() {
+      if (cardClickHandler) card.removeEventListener("click", cardClickHandler, true);
+      cardClickHandler = null;
+      card.style.display = "none";
+      activeBox.style.display = "none";
+      selectedElement = null;
+      selectedMetadata = null;
+      currentAction = "inline";
+      startPicking();
+    }
     function renderFloatingCard(el, meta) {
-      const rect = el.getBoundingClientRect();
-      const cardWidth = Math.min(520, window.innerWidth - 32);
-      
-      let left = Math.max(16, Math.min(window.innerWidth - cardWidth - 16, rect.left));
-      let top;
-      if (rect.bottom + 230 < window.innerHeight) {
-        top = rect.bottom + 12;
-      } else if (rect.top - 240 > 0) {
-        top = rect.top - 240;
-      } else {
-        top = Math.max(16, window.innerHeight - 260);
-      }
-
-      card.style.left = left + 'px';
-      card.style.top = top + 'px';
-      card.style.display = 'block';
-
-      const tag = meta.tagName;
-      const selectorStr = meta.selector || tag;
-      const placeholder = isLocal 
-        ? "Describe changes to this element (e.g. 'Make it full-width with a smooth hover gradient')..." 
-        : "Ask OMP about this element, request debugging analysis, or extract its design...";
-      const submitLabel = isLocal ? "Apply Edit" : "Ask OMP";
-      const modeBadge = isLocal ? "Local · Edit" : "External · Debug";
-      const modeClass = isLocal ? "local" : "external";
-
-      const chips = isLocal 
-        ? [
-            { label: '🎨 Restyle', prompt: 'Restyle this element with modern colors, subtle borders, and clean typography.' },
-            { label: '📝 Edit Copy', prompt: 'Update the text and messaging of this element to be clear and concise.' },
-            { label: '📐 Spacing & Layout', prompt: 'Fix the alignment, padding, and layout of this element.' },
-            { label: '✨ Add Hover', prompt: 'Add a smooth hover and focus transition effect to this element.' }
-          ]
-        : [
-            { label: '🔍 Explain', prompt: 'Explain how this element is structured, its CSS styling, and layout behavior.' },
-            { label: '🐛 Debug Layout', prompt: "Analyze this element's DOM and styles for layout bugs, overflows, or a11y issues." },
-            { label: '📐 Extract Specs', prompt: 'Extract the exact CSS rules, colors, typography, and spacing for this component.' }
-          ];
-
-      const recreateHtml = !isLocal ? [
-        '<div class="recreate-dropdown-wrap">',
-        '  <button type="button" class="recreate-trigger-btn">📋 Recreate in… <span class="arrow">▾</span></button>',
-        '  <div class="recreate-menu" style="display: none;">',
-        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern Svelte 5 component with scoped styles and TypeScript.">✦ Svelte 5</button>',
-        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern React component with TypeScript and Tailwind CSS.">✦ React</button>',
-        '    <button type="button" class="recreate-item" data-prompt="Recreate this element as an accessible, modern Vue 3 component with <script setup> and scoped styles.">✦ Vue 3</button>',
-        '  </div>',
-        '</div>'
-      ].join('\\n') : '';
-
+      stopPicking();
+      currentAction = "inline";
+      const bounds = boundsFor(el);
+      const width = Math.min(580, window.innerWidth - 32);
+      const left = Math.max(16, Math.min(window.innerWidth - width - 16, bounds ? bounds.left : 16));
+      const estimatedHeight = 350;
+      const top = bounds && bounds.bottom + estimatedHeight < window.innerHeight - 16
+        ? bounds.bottom + 12
+        : bounds && bounds.top - estimatedHeight > 16
+          ? bounds.top - estimatedHeight - 12
+          : Math.max(16, (window.innerHeight - estimatedHeight) / 2);
+      card.style.left = left + "px";
+      card.style.top = top + "px";
+      card.style.display = "flex";
       card.innerHTML = [
-        '<div class="card-header">',
-        '  <div class="target-info">',
-        '    <span class="target-icon">⌖</span>',
-        '    <strong class="target-name">&lt;' + tag + '&gt;</strong>',
-        '    <code class="target-selector" title="' + selectorStr + '">' + selectorStr + '</code>',
-        '    <span class="mode-badge ' + modeClass + '">' + modeBadge + '</span>',
-        '  </div>',
-        '  <button type="button" class="card-close-btn" aria-label="Cancel selection">×</button>',
-        '</div>',
-        '<textarea class="card-textarea" placeholder="' + placeholder + '" rows="3"></textarea>',
-        '<div class="card-chips">',
-        chips.map(c => '<button type="button" class="chip" data-prompt="' + c.prompt + '">' + c.label + '</button>').join(''),
-        recreateHtml,
-        '</div>',
-        '<div class="card-footer">',
-        '  <div class="mode-toggles">',
-        '    <button type="button" class="mode-toggle active" data-mode="dom">DOM</button>',
-        '    <button type="button" class="mode-toggle" data-mode="screenshot">Screenshot</button>',
-        '  </div>',
-        '  <div class="card-actions">',
-        '    <button type="button" class="btn-cancel">Cancel</button>',
-        '    <button type="button" class="btn-submit" disabled>' + submitLabel + ' <span>↗</span></button>',
-        '  </div>',
-        '</div>'
-      ].join('\\n');
-
-      const textarea = card.querySelector('.card-textarea');
-      const submitBtn = card.querySelector('.btn-submit');
-      const cancelBtn = card.querySelector('.btn-cancel');
-      const closeBtn = card.querySelector('.card-close-btn');
-      const chipBtns = card.querySelectorAll('.chip');
-      const modeBtns = card.querySelectorAll('.mode-toggle');
-      const recreateWrap = card.querySelector('.recreate-dropdown-wrap');
-
-      if (recreateWrap) {
-        const trigger = recreateWrap.querySelector('.recreate-trigger-btn');
-        const menu = recreateWrap.querySelector('.recreate-menu');
-        const items = recreateWrap.querySelectorAll('.recreate-item');
-
-        trigger.addEventListener('click', (e) => {
-          e.stopPropagation();
-          menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
-        });
-
-        items.forEach(item => {
-          item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const p = item.getAttribute('data-prompt');
-            if (textarea.value.trim()) {
-              textarea.value = textarea.value.trim() + '\\n' + p;
-            } else {
-              textarea.value = p;
-            }
-            submitBtn.disabled = false;
-            textarea.focus();
-            menu.style.display = 'none';
-          });
-        });
-
-        card.addEventListener('click', () => {
-          menu.style.display = 'none';
-        });
+        '<div class="card-header"><div class="target-info"><span class="target-icon" aria-hidden="true">⌖</span><strong id="__gradivus_inspector_title__" class="target-name"></strong><code class="target-selector"></code><span class="mode-badge"></span></div><button type="button" class="card-close-btn" aria-label="Cancel selection">×</button></div>',
+        '<textarea class="card-textarea" aria-label="Element instruction" placeholder="Describe changes or ask OMP about this element…" rows="3"></textarea>',
+        '<div class="card-chips"></div>',
+        '<div class="card-status" role="status" aria-live="polite"></div>',
+        '<div class="inline-response-view"><div class="inline-response-header"><strong>OMP result</strong><span class="inline-response-status">Complete</span></div><pre class="inline-response-body"></pre><div class="inline-response-actions"><button type="button" class="btn-copy-response">Copy</button><button type="button" class="btn-close-response">Close</button></div></div>',
+        '<div class="card-footer"><select class="agent-select" aria-label="Subagent role"><option value="task">task (General)</option><option value="designer">designer (UI/CSS)</option><option value="quick_task">quick_task (Fast Fix)</option><option value="reviewer">reviewer (Review)</option><option value="librarian">librarian (Docs/API)</option></select><div class="mode-toggles" role="radiogroup" aria-label="Capture mode"><button type="button" class="mode-toggle active" data-mode="dom">DOM</button><button type="button" class="mode-toggle" data-mode="screenshot">Screenshot</button></div><div class="card-actions"><button type="button" class="btn-cancel">Cancel</button><div class="split-action-btn-group"><button type="button" class="btn-submit-main" disabled><span class="submit-icon">⚡</span><span class="submit-label">Ask OMP</span></button><button type="button" class="btn-action-dropdown" aria-label="Choose action">▾</button><div class="split-action-menu" style="display:none"><button type="button" class="split-action-item active" data-action="inline">Ask OMP (Inline)</button><button type="button" class="split-action-item" data-action="chat">Send to Chat</button><button type="button" class="split-action-item" data-action="queue">Add to Queue</button></div></div></div></div>',
+      ].join("");
+      setText(card.querySelector(".target-name"), "<" + meta.tagName + ">");
+      setText(card.querySelector(".target-selector"), meta.selector || meta.tagName);
+      const selectorPill = card.querySelector(".target-selector");
+      if (selectorPill) {
+        selectorPill.style.setProperty("--inspector-agent-swatch", targetAgent.swatch);
+        selectorPill.style.borderColor = "var(--inspector-agent-swatch)";
       }
-
-      textarea.focus();
-
-      textarea.addEventListener('input', () => {
-        submitBtn.disabled = !textarea.value.trim();
-      });
-
-      textarea.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          cleanup();
-          resolve({ canceled: true });
-        } else if (e.key === 'Enter' && !e.shiftKey && textarea.value.trim()) {
-          e.preventDefault();
-          doSubmit();
-        }
-      });
-
-      chipBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-          const p = btn.getAttribute('data-prompt');
-          if (textarea.value.trim()) {
-            textarea.value = textarea.value.trim() + '\\n' + p;
-          } else {
-            textarea.value = p;
-          }
-          submitBtn.disabled = false;
-          textarea.focus();
-        });
-      });
-
-      modeBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-          modeBtns.forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          currentCaptureMode = btn.getAttribute('data-mode') || 'dom';
-        });
-      });
-
-      function doSubmit() {
+      setText(card.querySelector(".mode-badge"), isLocalPage() ? "Local · Edit" : "External · Debug");
+      const textarea = card.querySelector(".card-textarea");
+      const submit = card.querySelector(".btn-submit-main");
+      const actionMenu = card.querySelector(".split-action-menu");
+      const actionDropdown = card.querySelector(".btn-action-dropdown");
+      const select = card.querySelector(".agent-select");
+      const status = card.querySelector(".card-status");
+      const responseView = card.querySelector(".inline-response-view");
+      select.value = currentAgentType;
+      card.querySelectorAll(".mode-toggle").forEach(item =>
+        item.classList.toggle("active", item.getAttribute("data-mode") === currentCaptureMode)
+      );
+      const responseBody = card.querySelector(".inline-response-body");
+      const chips = card.querySelector(".card-chips");
+      const prompts = isLocalPage()
+        ? [["Restyle", "Restyle this element with modern colors, subtle borders, and clean typography."], ["Edit Copy", "Update the text and messaging of this element to be clear and concise."], ["Spacing", "Fix the alignment, padding, and layout of this element."], ["Add Hover", "Add a smooth hover and focus transition effect to this element."]]
+        : [["Explain", "Explain how this element is structured, its CSS styling, and layout behavior."], ["Debug Layout", "Analyze this element's DOM and styles for layout bugs, overflows, or a11y issues."], ["Extract Specs", "Extract the exact CSS rules, colors, typography, and spacing for this component."]];
+      for (const [label, prompt] of prompts) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "chip"; setText(button, label);
+        button.addEventListener("click", () => { textarea.value = textarea.value.trim() ? textarea.value.trim() + "\\n" + prompt : prompt; submit.disabled = false; textarea.focus(); });
+        chips.appendChild(button);
+      }
+      function updateActionControls() {
+        const labels = { inline: ["", "Ask OMP"], chat: ["", "Send to Chat"], queue: ["", "Add to Queue"] };
+        const pair = labels[currentAction] || labels.inline;
+        setText(submit.querySelector(".submit-icon"), pair[0]);
+        setText(submit.querySelector(".submit-label"), pair[1]);
+        card.querySelectorAll(".split-action-item").forEach(item => item.classList.toggle("active", item.getAttribute("data-action") === currentAction));
+      }
+      actionDropdown.addEventListener("click", event => { event.stopPropagation(); actionMenu.style.display = actionMenu.style.display === "none" ? "block" : "none"; });
+      card.querySelectorAll(".split-action-item").forEach(item => item.addEventListener("click", event => { event.stopPropagation(); currentAction = item.getAttribute("data-action") || "inline"; updateActionControls(); actionMenu.style.display = "none"; }));
+      select.addEventListener("change", () => { currentAgentType = select.value || "task"; });
+      card.querySelectorAll(".mode-toggle").forEach(item => item.addEventListener("click", () => { currentCaptureMode = item.getAttribute("data-mode") === "screenshot" ? "screenshot" : "dom"; card.querySelectorAll(".mode-toggle").forEach(other => other.classList.toggle("active", other === item)); }));
+      textarea.addEventListener("input", () => { submit.disabled = textarea.value.trim().length === 0; });
+      function finishClose() { notifyAction({ closed: true }); }
+      card.querySelector(".btn-close-response").addEventListener("click", finishClose);
+      card.querySelector(".btn-copy-response").addEventListener("click", async event => { try { await navigator.clipboard.writeText(responseBody.textContent || ""); setText(event.currentTarget, "Copied"); } catch { setText(event.currentTarget, "Copy failed"); } });
+      function submitAction() {
         const instruction = textarea.value.trim();
         if (!instruction) return;
-        submitBtn.disabled = true;
-        submitBtn.textContent = isLocal ? 'Applying…' : 'Sending…';
-        cleanup();
-        resolve({
-          ...meta,
-          instruction: instruction,
-          captureMode: currentCaptureMode
-        });
+        submit.disabled = true;
+        textarea.disabled = true;
+        status.className = "card-status";
+        if (currentAction === "queue") {
+          setText(status, "Adding to queue…");
+          activeBox.className = "inspector-box selected";
+          if (!selectedElement || !selectedElement.isConnected) {
+            notifyAction({ enqueue: true, queueValidationError: "Selected element is no longer available" });
+            return;
+          }
+          setText(activePill, "Adding to queue…");
+          notifyAction({
+            enqueue: true,
+            targetAgentId: targetAgent.id,
+            instruction,
+            agentType: currentAgentType,
+            captureMode: currentCaptureMode,
+            ...meta,
+            domHtml: meta.outerHTML,
+          });
+          return;
+        }
+        setText(status, currentAction === "chat" ? "Sending to OMP Chat…" : "Running with OMP…");
+        activeBox.className = "inspector-box working";
+        setText(activePill, currentAction === "chat" ? "Sending to OMP Chat…" : "Running with OMP…");
+        notifyAction({ ...meta, instruction, action: currentAction, agentType: currentAgentType, captureMode: currentCaptureMode });
       }
-
-      submitBtn.addEventListener('click', doSubmit);
-      cancelBtn.addEventListener('click', () => { cleanup(); resolve({ canceled: true }); });
-      closeBtn.addEventListener('click', () => { cleanup(); resolve({ canceled: true }); });
+      submit.addEventListener("click", submitAction);
+      textarea.addEventListener("keydown", event => {
+        if (event.key === "Escape") { event.preventDefault(); if (actionMenu.style.display !== "none") actionMenu.style.display = "none"; else if (responseView.classList.contains("visible")) finishClose(); else resetDraft(); }
+        else if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && event.shiftKey) { event.preventDefault(); currentAction = "queue"; updateActionControls(); submitAction(); }
+        else if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && textarea.value.trim()) { event.preventDefault(); submitAction(); }
+      });
+      card.querySelector(".btn-cancel").addEventListener("click", () => { notifyAction({ canceled: true }); cleanup({ canceled: true }); });
+      card.querySelector(".card-close-btn").addEventListener("click", () => { notifyAction({ canceled: true }); cleanup({ canceled: true }); });
+      cardClickHandler = event => { if (!event.target.closest(".split-action-btn-group")) actionMenu.style.display = "none"; };
+      card.addEventListener("click", cardClickHandler, true);
+      textarea.focus();
     }
-
-    function onPointerMove(e) {
+    function isLocalPage() {
+      const host = location.hostname;
+      return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".test") || host.endsWith(".internal") || host.startsWith("local.");
+    }
+    function onPointerMove(event) {
       if (selectedElement) return;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
-        const el = document.elementFromPoint(e.clientX, e.clientY);
-        if (el && el !== currentTarget && el !== container && !container.contains(el)) {
-          currentTarget = el;
-          updateOverlay(el);
-        }
+        const el = document.elementFromPoint(event.clientX, event.clientY);
+        if (el && el !== root && !root.contains(el)) { currentTarget = el; updateOverlay(el); }
       });
     }
-
-    function interceptEvent(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-    }
-
-    function onElementClick(e) {
+    function interceptEvent(event) { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); }
+    function onElementClick(event) {
       if (selectedElement) return;
-      interceptEvent(e);
-      const target = currentTarget || document.elementFromPoint(e.clientX, e.clientY);
-      if (!target || target === container || container.contains(target)) return;
-      
+      if (event.composedPath().some(item => item === root)) return;
+      interceptEvent(event);
+      let target = document.elementFromPoint(event.clientX, event.clientY);
+      if (!target) target = event.composedPath().find(candidate => candidate instanceof Element && candidate.isConnected && candidate !== root && !root.contains(candidate)) || null;
+      if (!target || !target.isConnected || target === root || root.contains(target)) return;
+      const bounds = boundsFor(target);
+      if (!bounds) return;
       selectedElement = target;
       selectedMetadata = extractMetadata(target);
-
-      cursorStyle.remove();
-      window.removeEventListener('pointermove', onPointerMove, true);
-      window.removeEventListener('pointerdown', interceptEvent, true);
-      window.removeEventListener('mousedown', interceptEvent, true);
-      window.removeEventListener('mouseup', interceptEvent, true);
-      window.removeEventListener('click', onElementClick, true);
-
-      box.classList.add('selected');
-      const rect = target.getBoundingClientRect();
-      box.style.display = 'block';
-      box.style.top = rect.top + 'px';
-      box.style.left = rect.left + 'px';
-      box.style.width = rect.width + 'px';
-      box.style.height = rect.height + 'px';
-
-      pill.innerHTML = '<span class="pill-tag">&lt;' + selectedMetadata.tagName + '&gt;</span><span class="pill-id">Selected</span>';
-
+      activeBox.className = "inspector-box selected";
+      updateOverlay(target);
       renderFloatingCard(target, selectedMetadata);
     }
-
-    function onKeyDown(e) {
-      if (e.key === 'Escape') {
-        interceptEvent(e);
-        cleanup();
-        resolve({ canceled: true });
-      }
+    function onKeyDown(event) {
+      if (event.key !== "Escape") return;
+      interceptEvent(event);
+      if (card.style.display !== "none") { resetDraft(); return; }
+      notifyAction({ canceled: true });
+      cleanup({ canceled: true });
     }
-
     function onScrollOrResize() {
-      if (selectedElement) {
+      if (selectedElement) updateOverlay(selectedElement);
+      else if (currentTarget) updateOverlay(currentTarget);
+      pinnedBoxes.forEach(item => setBox(item.box, item.el, item.box.className.replace("inspector-box ", "") || "selected", item.pill.textContent || ""));
+      if (card.style.display !== "none" && selectedElement) {
         const rect = selectedElement.getBoundingClientRect();
-        box.style.top = rect.top + 'px';
-        box.style.left = rect.left + 'px';
-        box.style.width = rect.width + 'px';
-        box.style.height = rect.height + 'px';
-      } else if (currentTarget) {
-        updateOverlay(currentTarget);
+        const cardRect = card.getBoundingClientRect();
+        if (cardRect.bottom > window.innerHeight - 16) card.style.top = Math.max(16, window.innerHeight - card.offsetHeight - 16) + "px";
+        if (rect.left + card.offsetWidth > window.innerWidth - 16) card.style.left = Math.max(16, window.innerWidth - card.offsetWidth - 16) + "px";
       }
     }
-
-    function cleanup(res) {
-      window.removeEventListener('pointermove', onPointerMove, true);
-      window.removeEventListener('pointerdown', interceptEvent, true);
-      window.removeEventListener('mousedown', interceptEvent, true);
-      window.removeEventListener('mouseup', interceptEvent, true);
-      window.removeEventListener('click', onElementClick, true);
-      window.removeEventListener('keydown', onKeyDown, true);
-      window.removeEventListener('scroll', onScrollOrResize, true);
-      window.removeEventListener('resize', onScrollOrResize, true);
+    function cleanup(result) {
+      if (result?.token && result.token !== token) return false;
+      if (cleaned) return;
+      cleaned = true;
+      stopPicking();
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize, true);
       if (rafId) cancelAnimationFrame(rafId);
-      container.remove();
+      if (captureTimer) clearTimeout(captureTimer);
+      root.remove();
+      if (actionWaiters.length > 0) actionWaiters.splice(0).forEach(waiter => waiter(result || { canceled: true }));
+      pendingActions.length = 0;
+      delete window.__gradivus_inspector_wait_for_action__;
+      delete window.__gradivus_inspector_get_current_target_bounds__;
+      delete window.__gradivus_inspector_clear_queue__;
+      delete window.__gradivus_inspector_set_capture_hidden__;
+      delete window.__gradivus_inspector_finish__;
+      delete window.__gradivus_inspector_cleanup__;
+      delete window.__gradivus_inspector_set_theme__;
+      delete window.__gradivus_inspector_theme__;
       cursorStyle.remove();
-      window.__branchlight_inspector_cleanup__ = undefined;
-      if (res) resolve(res);
     }
-
-    window.addEventListener('pointermove', onPointerMove, true);
-    window.addEventListener('pointerdown', interceptEvent, true);
-    window.addEventListener('mousedown', interceptEvent, true);
-    window.addEventListener('mouseup', interceptEvent, true);
-    window.addEventListener('click', onElementClick, true);
-    window.addEventListener('keydown', onKeyDown, true);
-    window.addEventListener('scroll', onScrollOrResize, { capture: true, passive: true });
-    window.addEventListener('resize', onScrollOrResize, { capture: true, passive: true });
-
-    window.__branchlight_inspector_cleanup__ = cleanup;
-  });
+    window.__gradivus_inspector_wait_for_action__ = waitForAction;
+    window.__gradivus_inspector_get_current_target_bounds__ = () => boundsFor(selectedElement);
+    window.__gradivus_inspector_clear_queue__ = () => {
+      for (const item of pinnedBoxes) item.box.remove();
+      pinnedBoxes = [];
+      return true;
+    };
+    window.__gradivus_inspector_set_capture_hidden__ = hidden => {
+      root.style.visibility = hidden ? "hidden" : "visible";
+      return new Promise(resolve => {
+        if (captureTimer) clearTimeout(captureTimer);
+        requestAnimationFrame(() => {
+          captureTimer = setTimeout(() => { captureTimer = null; resolve(true); }, 0);
+        });
+      });
+    };
+    function pinTask(task, element) {
+      if (!task || !element || !element.isConnected) return false;
+      if (typeof task.agentSwatch !== "string" || !task.agentSwatch) return false;
+      if (!Number.isFinite(Number(task.taskIndex))) return false;
+      const swatch = task.agentSwatch;
+      const pinned = document.createElement("div");
+      pinned.className = "inspector-box";
+      pinned.style.setProperty("--inspector-agent-swatch", swatch);
+      const pill = document.createElement("div");
+      pill.className = "inspector-pill";
+      pill.style.setProperty("--inspector-agent-swatch", swatch);
+      pinned.appendChild(pill);
+      const badge = document.createElement("div");
+      badge.className = "pinned-queue-badge";
+      badge.style.setProperty("--inspector-agent-swatch", swatch);
+      setText(badge, "#" + task.taskIndex);
+      pinned.appendChild(badge);
+      shadow.appendChild(pinned);
+      pinnedBoxes.push({
+        taskId: task.taskId || task.id,
+        taskIndex: Number(task.taskIndex),
+        el: element,
+        box: pinned,
+        pill,
+        badge,
+        agentSwatch: swatch,
+      });
+      const taskStatus = task.status || "pending";
+      const state = taskStatus === "error" ? "error" : taskStatus === "completed" ? "ready" : taskStatus === "running" ? "working" : "selected";
+      setBox(pinned, element, state, "#" + task.taskIndex + " <" + (task.tagName || "element") + "> " + taskStatus);
+      pinned.style.borderColor = swatch;
+      return true;
+    }
+    function pinAuthoritativeTask(result) {
+      if (
+        !result ||
+        typeof result.taskId !== "string" ||
+        !Number.isFinite(Number(result.taskIndex)) ||
+        typeof result.targetAgentId !== "string" ||
+        typeof result.targetAgentName !== "string" ||
+        typeof result.agentSwatch !== "string"
+      ) return false;
+      return pinTask(result, selectedElement);
+    }
+    function rehydratePins() {
+      for (const task of initialQueue) {
+        try {
+          pinTask(task, document.querySelector(task.selector));
+        } catch {}
+      }
+    }
+    window.__gradivus_inspector_finish__ = result => {
+      if (cleaned || !result || result.token !== token) return false;
+      if (result.kind === "inline-success" || result.kind === "chat-success" || result.kind === "error") {
+        card.style.display = "flex";
+        activeBox.className = result.kind === "error" ? "inspector-box error" : "inspector-box ready";
+        setText(activePill, result.kind === "error" ? "Error" : "Ready");
+        const status = card.querySelector(".card-status");
+        status.className = "card-status " + (result.kind === "error" ? "error" : "success");
+        setText(status, result.message || (result.kind === "chat-success" ? "Delivered to OMP Chat." : "Completed."));
+        const responseView = card.querySelector(".inline-response-view");
+        const responseBody = card.querySelector(".inline-response-body");
+        if (result.response || result.kind === "chat-success") {
+          setText(responseBody, result.response || "Sent to OMP Chat.");
+          responseView.classList.add("visible");
+        }
+        const textarea = card.querySelector(".card-textarea");
+        if (textarea) textarea.disabled = true;
+        return true;
+      }
+      if (result.kind === "queue-added") {
+        pinAuthoritativeTask(result);
+        resetDraft();
+        return true;
+      }
+      if (result.kind === "queue-add-error") {
+        card.style.display = "flex";
+        activeBox.className = "inspector-box error";
+        setText(activePill, "Queue error");
+        const status = card.querySelector(".card-status");
+        status.className = "card-status error";
+        setText(status, result.message || "Could not add this element to the queue.");
+        const textarea = card.querySelector(".card-textarea");
+        if (textarea) textarea.disabled = false;
+        const submit = card.querySelector(".btn-submit-main");
+        if (submit) submit.disabled = false;
+        return true;
+      }
+      return false;
+    };
+    window.__gradivus_inspector_cleanup__ = cleanup;
+    window.addEventListener("scroll", onScrollOrResize, { capture: true, passive: true });
+    window.addEventListener("resize", onScrollOrResize, { capture: true, passive: true });
+    rehydratePins();
+    startPicking();
+    return await waitForAction();
+  })();
 })();
 `;
+}
 const DEFAULT_BROWSER_URL = "https://omp.sh";
 interface PendingNavigation {
 	url: string;
@@ -800,6 +759,19 @@ function browserBounds(value: unknown): BrowserBounds {
 	};
 }
 
+type ChatTerminalRecord = {
+	presentationId: string;
+	terminalId: string;
+	workspace: string;
+	cwd: string;
+};
+type SelectionQueueState = {
+	generation: number;
+	nextTaskIndex: number;
+	running: boolean;
+	tasks: QueuedElementTask[];
+};
+
 export class WorkspaceHost {
 	#window: Electron.BaseWindow & { webContents?: Electron.WebContents };
 	#visibleBrowsers = new Set<string>();
@@ -808,50 +780,85 @@ export class WorkspaceHost {
 	#terminalIds = new Map<string, string>();
 	#terminalStates = new Map<string, string>();
 	#terminalOffsets = new Map<string, number>();
+	#chatTerminals = new Map<string, ChatTerminalRecord>();
 	#selectionCoordinator: ElementSelectionCoordinator;
 	#activeSelectionPaneId?: string;
+	#selectionStates = new Map<string, ElementEditState>();
+	#selectionGenerationSequence = 0;
+	#selectionGenerations = new Map<string, number>();
+	#selectionTokens = new Map<string, string>();
 	#boundScopes = new Map<string, SelectionAuthScope>();
+	#selectionQueues = new Map<string, SelectionQueueState>();
+	#selectionQueueGenerations = new Map<string, number>();
 	#client?: WorkspaceClient;
 	#settingsStore?: AppSettingsStore;
+	#desktopHost?: DesktopHost;
 	constructor(
 		window: Electron.BaseWindow & { webContents?: Electron.WebContents },
 		settingsStoreOrCdpUrl?: AppSettingsStore | string,
-		cdpUrl = "http://127.0.0.1:9222",
+		cdpUrlOrDesktopHost: string | DesktopHost = "http://127.0.0.1:9222",
+		desktopHost?: DesktopHost,
 	) {
 		this.#window = window;
 		if (typeof settingsStoreOrCdpUrl !== "string") {
 			this.#settingsStore = settingsStoreOrCdpUrl;
 		}
+		if (typeof cdpUrlOrDesktopHost !== "string") {
+			this.#desktopHost = cdpUrlOrDesktopHost;
+		} else if (desktopHost) {
+			this.#desktopHost = desktopHost;
+		}
 		// Retained for constructor compatibility with older callers.
-		void cdpUrl;
+		void cdpUrlOrDesktopHost;
 		this.#selectionCoordinator = new ElementSelectionCoordinator();
 		if ("nativeTheme" in electron && electron.nativeTheme && typeof electron.nativeTheme.on === "function") {
 			electron.nativeTheme.on("updated", () => this.updateTheme());
 		}
 	}
+	setDesktopHost(desktopHost: DesktopHost): void {
+		this.#desktopHost = desktopHost;
+	}
 
-	resolveTheme(): "dark" | "light" {
-		const setting = this.#settingsStore?.settings.theme;
-		if (setting === "light") return "light";
-		if (setting === "dark") return "dark";
-		if (
+	resolveTheme(): ResolvedTheme {
+		const setting = this.#settingsStore?.settings.theme ?? "system";
+		const systemDark =
 			"nativeTheme" in electron &&
 			electron.nativeTheme &&
 			typeof electron.nativeTheme.shouldUseDarkColors === "boolean"
-		) {
-			return electron.nativeTheme.shouldUseDarkColors ? "dark" : "light";
-		}
-		return "dark";
+				? electron.nativeTheme.shouldUseDarkColors
+				: true;
+		return resolveSharedTheme(setting, systemDark);
 	}
 
 	getBrowserBackgroundColor(): string {
-		return this.resolveTheme() === "dark" ? BROWSER_BG_DARK : BROWSER_BG_LIGHT;
+		return DESKTOP_THEME_PALETTES[this.resolveTheme()].browserBackground;
 	}
 
 	updateTheme(): void {
-		const bg = this.getBrowserBackgroundColor();
+		const theme = this.resolveTheme();
+		const palette = DESKTOP_THEME_PALETTES[theme];
+		const windowWithBackground = this.#window as Electron.BaseWindow & {
+			setBackgroundColor?: (color: string) => void;
+		};
+		windowWithBackground.setBackgroundColor?.(palette.windowBackground);
 		for (const entry of this.#browsers.values()) {
-			entry.view.setBackgroundColor(bg);
+			entry.view.setBackgroundColor?.(palette.browserBackground);
+		}
+		const activePaneId = this.#activeSelectionPaneId;
+		const activeEntry = activePaneId ? this.#browsers.get(activePaneId) : undefined;
+		const activeWebContents = activeEntry?.view.webContents;
+		if (
+			activeWebContents &&
+			typeof activeWebContents.isDestroyed === "function" &&
+			!activeWebContents.isDestroyed() &&
+			typeof activeWebContents.executeJavaScript === "function"
+		) {
+			const notification = activeWebContents.executeJavaScript(
+				`window.__gradivus_inspector_set_theme__?.(${JSON.stringify(theme)})`,
+			);
+			if (notification && typeof notification.catch === "function") {
+				void notification.catch(() => {});
+			}
 		}
 	}
 	#getBrowserUrl(value: unknown): URL {
@@ -886,6 +893,11 @@ export class WorkspaceHost {
 					void this.#subscribeTerminal(paneId, terminal.id).catch(() => {});
 				}
 			}
+			for (const record of this.#chatTerminals.values()) {
+				if (doc.terminals.some(item => item.id === record.terminalId)) {
+					void this.#subscribeTerminal(record.presentationId, record.terminalId).catch(() => {});
+				}
+			}
 		}
 	}
 
@@ -911,8 +923,25 @@ export class WorkspaceHost {
 				this.#terminalStates.set(terminal.paneId, terminal.status);
 			}
 		}
+		for (const record of this.#chatTerminals.values()) {
+			const terminal = document.terminals.find(item => item.id === record.terminalId);
+			if (!terminal) continue;
+			const previousStatus = this.#terminalStates.get(record.presentationId);
+			if (previousStatus !== terminal.status) {
+				if (terminal.status === "failed") {
+					this.#send({
+						type: "terminal-error",
+						paneId: record.presentationId,
+						message: terminal.error ?? "Terminal failed",
+					});
+				} else if (terminal.status === "exited" || terminal.status === "closed") {
+					this.#send({ type: "terminal-exit", paneId: record.presentationId, exitCode: -1 });
+				}
+				this.#terminalStates.set(record.presentationId, terminal.status);
+			}
+		}
 		for (const paneId of this.#terminalIds.keys()) {
-			if (activeTerminalIds.has(paneId)) continue;
+			if (activeTerminalIds.has(paneId) || this.#chatTerminals.has(paneId)) continue;
 			this.#unsubscribeTerminal(paneId);
 			this.#terminalIds.delete(paneId);
 			this.#terminalStates.delete(paneId);
@@ -920,7 +949,7 @@ export class WorkspaceHost {
 		}
 	}
 
-	async #subscribeTerminal(paneId: string, terminalId: string): Promise<void> {
+	async #subscribeTerminal(paneId: string, terminalId: string): Promise<TerminalStatusFrame> {
 		const client = this.#client;
 		if (!client) throw new Error("WorkspaceClient is not configured");
 		if (!this.#terminalSubscriptions.has(paneId)) {
@@ -929,15 +958,23 @@ export class WorkspaceHost {
 				const currentOffset = this.#terminalOffsets.get(paneId) ?? 0;
 				if (frame.offset < currentOffset) return;
 				this.#terminalOffsets.set(paneId, Math.max(currentOffset, nextOffset));
-				this.#send({ type: "terminal-data", paneId, data: frame.data });
+				this.#send({ type: "terminal-data", paneId, data: frame.data, offset: frame.offset });
 			});
 			this.#terminalSubscriptions.set(paneId, removeOutputListener);
 		}
 		try {
-			const snapshot = await client.subscribeTerminal(terminalId, this.#terminalOffsets.get(paneId) ?? 0);
+			const localOffset = this.#terminalOffsets.get(paneId) ?? 0;
+			const snapshot = await client.subscribeTerminal(terminalId, localOffset);
+			const remoteOffset =
+				typeof snapshot.totalBytesProduced === "number" && Number.isFinite(snapshot.totalBytesProduced)
+					? snapshot.totalBytesProduced
+					: localOffset;
+			this.#terminalOffsets.set(paneId, Math.max(localOffset, remoteOffset));
 			if (snapshot.status === "failed") {
-				this.#send({ type: "terminal-error", paneId, message: "Terminal failed" });
+				const message = client.document?.terminals.find(item => item.id === terminalId)?.error ?? "Terminal failed";
+				throw new Error(message);
 			}
+			return snapshot;
 		} catch (error) {
 			this.#unsubscribeTerminal(paneId);
 			this.#send({
@@ -1206,12 +1243,12 @@ export class WorkspaceHost {
 
 	async closeBrowser(rawId: unknown): Promise<void> {
 		const id = paneId(rawId);
-		if (this.#activeSelectionPaneId === id) {
-			await this.#endSelection(id, "Browser closed");
-		}
 
 		if (!this.#client?.isConnected || !this.#client.document) {
 			this.destroyBrowserView(id);
+			if (this.#activeSelectionPaneId === id && !this.#browsers.has(id)) {
+				await this.#endSelection(id, "Browser closed");
+			}
 			return;
 		}
 
@@ -1219,6 +1256,9 @@ export class WorkspaceHost {
 		const browser = doc.browsers.find(b => b.paneId === id || b.id === id);
 		if (!browser || browser.status === "closed") {
 			this.destroyBrowserView(id);
+			if (this.#activeSelectionPaneId === id && !this.#browsers.has(id)) {
+				await this.#endSelection(id, "Browser closed");
+			}
 			return;
 		}
 
@@ -1254,10 +1294,10 @@ export class WorkspaceHost {
 		const entry = this.#browsers.get(id);
 		if (!entry) return;
 
-		void this.#endSelection(id, "Browser view destroyed");
-
+		this.#invalidateQueueForPane(id);
 		this.#browsers.delete(id);
 		this.#visibleBrowsers.delete(id);
+		void this.#endSelection(id, "Browser view destroyed");
 		this.#detach(entry);
 		if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close?.();
 	}
@@ -1325,8 +1365,158 @@ export class WorkspaceHost {
 		this.syncWithDocument(res.document);
 	}
 
+	async openChatTerminal(
+		input: OpenChatTerminalInput,
+		resolvedInput?: { workspace: string; cwd: string },
+	): Promise<ChatTerminalViewState> {
+		if (!input || typeof input !== "object") throw new TypeError("OpenChatTerminalInput must be an object");
+		const resolved = resolvedInput ?? this.#desktopHost?.resolveSessionWorkspace(input.sessionId);
+		if (!resolved) throw new Error("Session workspace is unavailable");
+		if (!/^[a-z0-9-]{8,100}$/i.test(input.id)) throw new TypeError("Invalid chat terminal presentation id");
+		const presentationId = input.id;
+		const cols = dimension(input.cols, "Terminal columns");
+		const rows = dimension(input.rows, "Terminal rows");
+		if (!Number.isSafeInteger(input.fromOffset) || input.fromOffset < 0)
+			throw new RangeError("invalid replay offset");
+		let createdTerminalId: string | undefined;
+		try {
+			const client = this.#client;
+			if (!client?.isConnected || !client.document) throw new Error("Workspace runtime is not connected");
+			let document = client.document;
+			const workspace =
+				document.workspaces.find(item => {
+					const location = document.locations.find(candidate => candidate.id === item.locationId);
+					return location?.address.kind === "local" && location.address.path === resolved.cwd;
+				}) ??
+				document.workspaces.find(item => item.id === document.activeWorkspaceId) ??
+				document.workspaces[0];
+			if (!workspace) throw new Error("No active workspace found in authority document");
+			for (const [id, terminal] of this.#chatTerminals) {
+				if (terminal.workspace !== resolved.cwd) await this.#closeChatTerminal(id);
+			}
+
+			const existing = [...this.#chatTerminals.values()].find(item => item.workspace === resolved.cwd);
+			if (existing && document.terminals.some(item => item.id === existing.terminalId)) {
+				this.#unsubscribeTerminal(existing.presentationId);
+				this.#chatTerminals.delete(existing.presentationId);
+				this.#terminalIds.delete(existing.presentationId);
+				this.#terminalStates.delete(existing.presentationId);
+				const nextOffset = Math.max(this.#terminalOffsets.get(existing.presentationId) ?? 0, input.fromOffset);
+				this.#terminalOffsets.delete(existing.presentationId);
+				existing.presentationId = presentationId;
+				this.#chatTerminals.set(presentationId, existing);
+				this.#terminalIds.set(presentationId, existing.terminalId);
+				this.#terminalOffsets.set(presentationId, nextOffset);
+				await client.resizeTerminal(existing.terminalId, cols, rows);
+				const snapshot = await this.#subscribeTerminal(presentationId, existing.terminalId);
+				const currentTerminal = client.document?.terminals.find(item => item.id === existing.terminalId);
+				const status = snapshot.status === "closed" ? "exited" : snapshot.status;
+				this.#terminalStates.set(presentationId, status);
+				return {
+					id: presentationId,
+					workspace: resolved.workspace,
+					cwd: resolved.cwd,
+					status,
+					offset: this.#terminalOffsets.get(presentationId) ?? nextOffset,
+					...(currentTerminal?.error ? { error: currentTerminal.error } : {}),
+				};
+			}
+
+			const location = document.locations.find(item => item.id === workspace.locationId);
+			if (!location) throw new Error(`Location '${workspace.locationId}' does not exist`);
+			const terminalId = `term-chat-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+			createdTerminalId = terminalId;
+			const result = await client.executeCommandWithRetry(currentDocument => ({
+				version: 1 as const,
+				commandId: uniqueCommandId("cmd-chat-terminal-open"),
+				workspaceId: workspace.id,
+				expectedRevision: currentDocument.revision,
+				issuedAt: Date.now(),
+				type: "terminal.open" as const,
+				payload: {
+					id: terminalId,
+					detached: true,
+					locationId: location.id,
+					label: "Chat shell",
+					cwd: resolved.cwd,
+					columns: cols,
+					rows,
+					...(this.#settingsStore?.settings.terminal.shell
+						? { shell: this.#settingsStore.settings.terminal.shell }
+						: {}),
+				},
+			}));
+			if (result.status !== "accepted" && result.status !== "duplicate") {
+				throw new Error(`Failed to open chat terminal: ${result.error?.message ?? result.status}`);
+			}
+			document = result.document;
+			this.syncWithDocument(document);
+			const terminal = document.terminals.find(item => item.id === terminalId);
+			if (!terminal) throw new Error("Chat terminal was not created");
+			this.#chatTerminals.set(presentationId, {
+				presentationId,
+				terminalId,
+				workspace: resolved.cwd,
+				cwd: resolved.cwd,
+			});
+			this.#terminalIds.set(presentationId, terminalId);
+			this.#terminalOffsets.set(presentationId, input.fromOffset);
+			const snapshot = await this.#subscribeTerminal(presentationId, terminalId);
+			const currentTerminal = client.document?.terminals.find(item => item.id === terminalId);
+			const status = snapshot.status === "closed" ? "exited" : snapshot.status;
+			this.#terminalStates.set(presentationId, status);
+			return {
+				id: presentationId,
+				workspace: resolved.workspace,
+				cwd: resolved.cwd,
+				status,
+				offset: this.#terminalOffsets.get(presentationId) ?? input.fromOffset,
+				...(currentTerminal?.error ? { error: currentTerminal.error } : {}),
+			};
+		} catch (error) {
+			if (createdTerminalId && this.#chatTerminals.has(presentationId)) {
+				await this.#closeChatTerminal(presentationId).catch(() => {});
+			}
+			return {
+				id: presentationId,
+				workspace: resolved.workspace,
+				cwd: resolved.cwd,
+				status: "failed",
+				offset: Math.max(this.#terminalOffsets.get(presentationId) ?? 0, input.fromOffset),
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
+	async #closeChatTerminal(presentationId: string): Promise<void> {
+		const record = this.#chatTerminals.get(presentationId);
+		if (!record) return;
+		const client = this.#client;
+		try {
+			if (client?.isConnected && client.document?.terminals.some(item => item.id === record.terminalId)) {
+				const workspaceId = client.document.activeWorkspaceId ?? "workspace-default";
+				const result = await client.executeCommandWithRetry(currentDocument => ({
+					version: 1 as const,
+					commandId: uniqueCommandId("cmd-chat-terminal-close"),
+					workspaceId,
+					expectedRevision: currentDocument.revision,
+					issuedAt: Date.now(),
+					type: "terminal.close" as const,
+					payload: { id: record.terminalId },
+				}));
+				if (result.status !== "rejected") this.syncWithDocument(result.document);
+			}
+		} finally {
+			this.#unsubscribeTerminal(presentationId);
+			this.#chatTerminals.delete(presentationId);
+			this.#terminalIds.delete(presentationId);
+			this.#terminalStates.delete(presentationId);
+			this.#terminalOffsets.delete(presentationId);
+		}
+	}
 	async closePane(rawPaneId: unknown): Promise<void> {
 		const id = paneId(rawPaneId);
+
 		const doc = this.#client?.document;
 		const paneRecord = doc?.panes.find(p => p.id === id);
 		if (paneRecord?.kind === "browser" || this.#browsers.has(id)) {
@@ -1405,6 +1595,12 @@ export class WorkspaceHost {
 		const id = paneId(rawId);
 		if (typeof rawData !== "string" || Buffer.byteLength(rawData, "utf8") > 512 * 1024)
 			throw new TypeError("Invalid terminal input");
+		const chat = this.#chatTerminals.get(id);
+		if (chat) {
+			if (!this.#client) throw new Error("WorkspaceClient is not configured");
+			await this.#client.sendTerminalInput(chat.terminalId, rawData);
+			return;
+		}
 		const terminalId = this.#terminalEntityId(id);
 		if (!this.#client) throw new Error("WorkspaceClient is not configured");
 		await this.#client.sendTerminalInput(terminalId, rawData);
@@ -1412,6 +1608,16 @@ export class WorkspaceHost {
 
 	async resizeTerminal(rawId: unknown, rawCols: unknown, rawRows: unknown): Promise<void> {
 		const id = paneId(rawId);
+		const chat = this.#chatTerminals.get(id);
+		if (chat) {
+			if (!this.#client) throw new Error("WorkspaceClient is not configured");
+			await this.#client.resizeTerminal(
+				chat.terminalId,
+				dimension(rawCols, "Terminal columns"),
+				dimension(rawRows, "Terminal rows"),
+			);
+			return;
+		}
 		const terminalId = this.#terminalEntityId(id);
 		if (!this.#client) throw new Error("WorkspaceClient is not configured");
 		await this.#client.resizeTerminal(
@@ -1423,6 +1629,10 @@ export class WorkspaceHost {
 
 	async closeTerminal(rawId: unknown): Promise<void> {
 		const id = paneId(rawId);
+		if (this.#chatTerminals.has(id)) {
+			await this.#closeChatTerminal(id);
+			return;
+		}
 		const client = this.#client;
 		if (!client?.isConnected || !client.document) {
 			this.#unsubscribeTerminal(id);
@@ -1459,7 +1669,6 @@ export class WorkspaceHost {
 				: undefined) ??
 			client.document.activeWorkspaceId ??
 			"workspace-default";
-
 		const result = await client.executeCommandWithRetry(currentDocument => ({
 			version: 1 as const,
 			commandId: uniqueCommandId("cmd-terminal-close"),
@@ -1469,11 +1678,9 @@ export class WorkspaceHost {
 			type: "terminal.close" as const,
 			payload: { id: terminal.id },
 		}));
-
 		if (result.status === "rejected") {
 			throw new Error(`Failed to close terminal in runtime: ${result.error?.message ?? "rejected"}`);
 		}
-
 		this.syncWithDocument(result.document);
 		if (this.#terminalIds.has(id)) {
 			this.#unsubscribeTerminal(id);
@@ -1496,36 +1703,404 @@ export class WorkspaceHost {
 		]);
 		menu.popup({ window: this.#window });
 	}
+	#nextSelectionGeneration(paneId: string): number {
+		const generation = ++this.#selectionGenerationSequence;
+		this.#selectionGenerations.set(paneId, generation);
+		return generation;
+	}
+	#isCurrentSelection(paneId: string, generation: number, selectionId: string): boolean {
+		return (
+			this.#selectionGenerations.get(paneId) === generation &&
+			this.#activeSelectionPaneId === paneId &&
+			this.#selectionCoordinator.activeSelectionId === selectionId &&
+			this.#boundScopes.has(paneId)
+		);
+	}
+	#staleSelectionState(paneId: string): ElementEditState {
+		return { phase: "idle", paneId, updatedAt: Date.now() };
+	}
+	async #waitForInspectorAction(entry: BrowserEntry): Promise<InspectorActionPayload | null> {
+		if (entry.view.webContents.isDestroyed()) return null;
+		let value: unknown;
+		try {
+			value = await entry.view.webContents.executeJavaScript("window.__gradivus_inspector_wait_for_action__?.()");
+		} catch {
+			value = null;
+		}
+		if (typeof value === "object" && value !== null) return value as InspectorActionPayload;
+		await new Promise<void>(resolve => setTimeout(resolve, 16));
+		return null;
+	}
 
-	async #endSelection(paneId: string, reason?: string): Promise<void> {
-		const entry = this.#browsers.get(paneId);
-		if (entry && !entry.view.webContents.isDestroyed()) {
+	async #finishInspector(entry: BrowserEntry, token: string, result: Record<string, unknown>): Promise<void> {
+		if (entry.view.webContents.isDestroyed()) return;
+		const payload = JSON.stringify({ ...result, token });
+		for (let attempt = 0; attempt < 5; attempt += 1) {
+			const script = `window.__gradivus_inspector_finish__?.(${payload})`;
+			const applied = await entry.view.webContents.executeJavaScript(script).catch(() => false);
+			if (applied === true) return;
+			if (attempt < 4) await Bun.sleep(100);
+		}
+	}
+
+	async #cleanupInspector(entry: BrowserEntry, token: string, result: Record<string, unknown>): Promise<void> {
+		if (entry.view.webContents.isDestroyed()) return;
+		const payload = JSON.stringify({ ...result, token });
+		for (let attempt = 0; attempt < 3; attempt += 1) {
 			try {
-				await entry.view.webContents
-					.executeJavaScript("window.__branchlight_inspector_cleanup__?.({ canceled: true })")
-					.catch(() => {});
+				const cleanup = entry.view.webContents.executeJavaScript(
+					`window.__gradivus_inspector_cleanup__?.(${payload})`,
+				);
+				await Promise.race([cleanup, Bun.sleep(250)]);
+			} catch {}
+			try {
+				const present = await entry.view.webContents.executeJavaScript(
+					"Boolean(document.getElementById('__gradivus_inspector_root__'))",
+				);
+				if (present !== true) return;
+			} catch {}
+			if (attempt < 2) await Bun.sleep(16);
+		}
+	}
+
+	async #currentInspectorBounds(entry: BrowserEntry): Promise<InspectorBounds | null> {
+		if (entry.view.webContents.isDestroyed()) return null;
+		const bridge = "window.__gradivus_inspector_get_current_target_bounds__?.()";
+		try {
+			const bounds = await entry.view.webContents.executeJavaScript(bridge);
+			if (typeof bounds !== "object" || bounds === null) return null;
+			const value = bounds as Partial<InspectorBounds>;
+			if (
+				typeof value.x !== "number" ||
+				typeof value.y !== "number" ||
+				typeof value.width !== "number" ||
+				typeof value.height !== "number" ||
+				!Number.isFinite(value.x) ||
+				!Number.isFinite(value.y) ||
+				!Number.isFinite(value.width) ||
+				!Number.isFinite(value.height) ||
+				value.width <= 0 ||
+				value.height <= 0
+			) {
+				return null;
+			}
+			return {
+				x: value.x,
+				y: value.y,
+				width: value.width,
+				height: value.height,
+				top: typeof value.top === "number" ? value.top : value.y,
+				left: typeof value.left === "number" ? value.left : value.x,
+				right: typeof value.right === "number" ? value.right : value.x + value.width,
+				bottom: typeof value.bottom === "number" ? value.bottom : value.y + value.height,
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	#selectionCaptureRect(entry: BrowserEntry, bounds: InspectorBounds): InspectorBounds {
+		const zoomFactor =
+			typeof this.#window.webContents?.getZoomFactor === "function" ? this.#window.webContents.getZoomFactor() : 1;
+		const zoom = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+		const viewportWidth = entry.cssBounds?.width ?? entry.bounds.width;
+		const viewportHeight = entry.cssBounds?.height ?? entry.bounds.height;
+		const padding = SELECTION_LIMITS.screenshotPaddingPx;
+		const left = Math.max(0, Math.floor((bounds.left ?? bounds.x) * zoom - padding));
+		const top = Math.max(0, Math.floor((bounds.top ?? bounds.y) * zoom - padding));
+		const right = Math.min(
+			Math.max(left + 1, Math.ceil((bounds.right ?? bounds.x + bounds.width) * zoom + padding)),
+			Math.max(1, Math.round(viewportWidth * zoom)),
+		);
+		const bottom = Math.min(
+			Math.max(top + 1, Math.ceil((bounds.bottom ?? bounds.y + bounds.height) * zoom + padding)),
+			Math.max(1, Math.round(viewportHeight * zoom)),
+		);
+		return { x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
+	}
+
+	async #captureSelectionScreenshot(
+		entry: BrowserEntry,
+		_token: string,
+		bounds: InspectorBounds | null,
+	): Promise<ElementScreenshot> {
+		if (typeof entry.view.webContents.capturePage !== "function")
+			throw new Error("Screenshot capture is unavailable");
+		const currentBounds = bounds ?? (await this.#currentInspectorBounds(entry));
+		if (!currentBounds) throw new Error("target_unavailable");
+		const clip = this.#selectionCaptureRect(entry, currentBounds);
+		try {
+			await entry.view.webContents
+				.executeJavaScript("window.__gradivus_inspector_set_capture_hidden__?.(true)")
+				.catch(() => undefined);
+			const nativeImage = await entry.view.webContents.capturePage(clip);
+			let image = nativeImage;
+			let size = typeof image.getSize === "function" ? image.getSize() : { width: clip.width, height: clip.height };
+			if (
+				size.width > SELECTION_LIMITS.maxScreenshotDimension ||
+				size.height > SELECTION_LIMITS.maxScreenshotDimension
+			) {
+				if (typeof image.resize !== "function") throw new Error("Screenshot capture exceeds selection limits");
+				const scale = Math.min(
+					SELECTION_LIMITS.maxScreenshotDimension / size.width,
+					SELECTION_LIMITS.maxScreenshotDimension / size.height,
+				);
+				image = image.resize({
+					width: Math.max(1, Math.floor(size.width * scale)),
+					height: Math.max(1, Math.floor(size.height * scale)),
+				});
+				size = image.getSize();
+			}
+			let buffer = image.toJPEG(80);
+			if (buffer.byteLength > SELECTION_LIMITS.maxImageBytes) buffer = image.toJPEG(60);
+			if (buffer.byteLength > SELECTION_LIMITS.maxImageBytes) {
+				throw new Error("Screenshot capture exceeds selection limits");
+			}
+			const base64 = buffer.toString("base64");
+			return {
+				dataUrl: `data:image/jpeg;base64,${base64}`,
+				base64,
+				mimeType: "image/jpeg",
+				width: size.width,
+				height: size.height,
+				byteLength: buffer.byteLength,
+			};
+		} finally {
+			await entry.view.webContents
+				.executeJavaScript("window.__gradivus_inspector_set_capture_hidden__?.(false)")
+				.catch(() => undefined);
+		}
+	}
+	#queueForPane(id: string): SelectionQueueState {
+		const existing = this.#selectionQueues.get(id);
+		if (existing) return existing;
+		const queue: SelectionQueueState = {
+			generation: this.#selectionQueueGenerations.get(id) ?? 0,
+			nextTaskIndex: 0,
+			running: false,
+			tasks: [],
+		};
+		this.#selectionQueues.set(id, queue);
+		return queue;
+	}
+
+	#cloneQueuedTasks(tasks: QueuedElementTask[]): QueuedElementTask[] {
+		return tasks.map(task => structuredClone(task));
+	}
+
+	#stateWithQueue(state: ElementEditState): ElementEditState {
+		const queue = state.paneId ? this.#selectionQueues.get(state.paneId) : undefined;
+		return {
+			...state,
+			queueRunning: queue?.running ?? false,
+			queuedTasks: queue ? this.#cloneQueuedTasks(queue.tasks) : [],
+		};
+	}
+
+	#enqueueQueuedTask(
+		id: string,
+		input: Omit<QueuedElementTask, "id" | "taskIndex" | "paneId" | "createdAt" | "status">,
+	): QueuedElementTask {
+		const queue = this.#queueForPane(id);
+		if (queue.tasks.length >= SELECTION_LIMITS.maxLiveRequests) {
+			throw new Error(`Selection queue is full (${SELECTION_LIMITS.maxLiveRequests} tasks)`);
+		}
+		const task: QueuedElementTask = {
+			...input,
+			id: `selection-task-${crypto.randomUUID()}`,
+			taskIndex: ++queue.nextTaskIndex,
+			paneId: id,
+			createdAt: Date.now(),
+			status: "pending",
+		};
+		queue.tasks.push(task);
+		return structuredClone(task);
+	}
+
+	async #clearQueuedTasks(id: string): Promise<ElementEditState> {
+		const queue = this.#queueForPane(id);
+		if (queue.running) throw new Error("Cannot clear selection queue while it is running");
+		queue.tasks = [];
+		queue.nextTaskIndex = 0;
+		queue.generation += 1;
+		this.#selectionQueueGenerations.set(id, queue.generation);
+		const entry = this.#browsers.get(id);
+		if (entry && !entry.view.webContents.isDestroyed()) {
+			await entry.view.webContents
+				.executeJavaScript("window.__gradivus_inspector_clear_queue__?.()")
+				.catch(() => undefined);
+		}
+		const base = this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id, updatedAt: Date.now() };
+		const state = this.#stateWithQueue({ ...base, updatedAt: Date.now() });
+		this.#emitSelectionState(state);
+		return state;
+	}
+
+	#invalidateQueueForPane(id: string): void {
+		const current = this.#selectionQueues.get(id);
+		const generation = current?.generation ?? this.#selectionQueueGenerations.get(id) ?? 0;
+		this.#selectionQueueGenerations.set(id, generation + 1);
+		this.#selectionQueues.delete(id);
+	}
+	async #enqueueSelectionPayload(
+		id: string,
+		generation: number,
+		selectionId: string,
+		token: string,
+		scope: SelectionAuthScope,
+		entry: BrowserEntry,
+		target: SelectionTargetAgent,
+		payload: InspectorActionPayload,
+	): Promise<QueuedElementTask> {
+		if (!this.#isCurrentSelection(id, generation, selectionId)) throw STALE_SELECTION_OPERATION;
+		if (payload.queueValidationError) throw new Error(payload.queueValidationError);
+		const queue = this.#queueForPane(id);
+		const queueGeneration = queue.generation;
+		const requestedAgentId = payload.targetAgentId?.trim() || target.id;
+		const resolved =
+			this.#desktopHost?.resolveSelectionTarget(id, requestedAgentId, entry.documentEpoch) ??
+			(requestedAgentId === scope.agentId ? { scope, target } : undefined);
+		if (!resolved) throw new Error("No deliverable workspace agent is available for selection");
+		const instruction = payload.instruction?.trim() || "";
+		if (!instruction) throw new Error("An instruction is required to add an element to the queue");
+		const selector = payload.selector?.trim() || payload.tagName?.trim() || "element";
+		const captureMode = payload.captureMode === "screenshot" ? "screenshot" : "dom";
+		const bounds = payload.bounds ?? null;
+		let screenshot: ElementScreenshot | undefined;
+		if (captureMode === "screenshot") {
+			screenshot = await this.#captureSelectionScreenshot(entry, token, bounds);
+		}
+		if (
+			!this.#isCurrentSelection(id, generation, selectionId) ||
+			this.#browsers.get(id) !== entry ||
+			this.#selectionQueues.get(id)?.generation !== queueGeneration
+		) {
+			throw STALE_SELECTION_OPERATION;
+		}
+		const domSnapshot = {
+			selector,
+			tagName: payload.tagName || "div",
+			role: payload.role,
+			name: payload.name,
+			html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
+			text: payload.text,
+			attributes: payload.attributes || {},
+			bounds: bounds ?? { x: 0, y: 0, width: 0, height: 0 },
+			hierarchy: payload.hierarchy || ["body", "html"],
+		};
+		const domBytes = Buffer.byteLength(JSON.stringify(domSnapshot), "utf8");
+		if (domBytes > SELECTION_LIMITS.maxDomBytes) {
+			throw new Error(
+				`DOM snapshot size (${domBytes} bytes) exceeds limit of ${SELECTION_LIMITS.maxDomBytes} bytes`,
+			);
+		}
+		const summary = payload.text?.trim() || undefined;
+		if (summary && Buffer.byteLength(summary, "utf8") > SELECTION_LIMITS.maxSummaryBytes) {
+			throw new Error(
+				`DOM summary size (${Buffer.byteLength(summary, "utf8")} bytes) exceeds limit of ${SELECTION_LIMITS.maxSummaryBytes} bytes`,
+			);
+		}
+		const requestBytes = Buffer.byteLength(
+			JSON.stringify({
+				selector,
+				url: entry.state.url,
+				domSnapshot,
+				screenshot,
+				instruction,
+			}),
+			"utf8",
+		);
+		if (requestBytes > SELECTION_LIMITS.maxRequestStorageBytes) {
+			throw new Error(
+				`Selection request size (${requestBytes} bytes) exceeds per-request cap of ${SELECTION_LIMITS.maxRequestStorageBytes} bytes`,
+			);
+		}
+		const task = this.#enqueueQueuedTask(id, {
+			targetAgentId: resolved.scope.agentId,
+			targetAgentName: resolved.target.name,
+			agentSwatch: resolved.target.swatch,
+			instruction,
+			tagName: domSnapshot.tagName,
+			selector,
+			agentType: payload.agentType?.trim() || undefined,
+			captureMode,
+			url: entry.state.url,
+			summary,
+			domHtml: domSnapshot.html,
+			domSnapshot,
+			screenshot: screenshot?.base64,
+			screenshotWidth: screenshot?.width,
+			screenshotHeight: screenshot?.height,
+		});
+		this.#emitSelectionState({
+			phase: "picking",
+			selectionId,
+			workspaceId: scope.workspaceId,
+			paneId: id,
+			locationId: scope.locationId,
+			locationGeneration: scope.locationGeneration,
+			browserSessionId: entry.state.id,
+			agentId: scope.agentId,
+			captureMode,
+			url: entry.state.url,
+			updatedAt: Date.now(),
+		});
+		await this.#finishInspector(entry, token, {
+			kind: "queue-added",
+			taskId: task.id,
+			taskIndex: task.taskIndex,
+			targetAgentId: task.targetAgentId,
+			targetAgentName: task.targetAgentName,
+			agentSwatch: task.agentSwatch,
+		});
+		return task;
+	}
+
+	async #endSelection(
+		paneId: string,
+		reason?: string,
+		expectedGeneration?: number,
+		expectedSelectionId?: string,
+	): Promise<void> {
+		const currentGeneration = this.#selectionGenerations.get(paneId);
+		if (expectedGeneration !== undefined && currentGeneration !== expectedGeneration) return;
+
+		this.#nextSelectionGeneration(paneId);
+		const entry = this.#browsers.get(paneId);
+		const scope = this.#boundScopes.get(paneId);
+		const selectionId = expectedSelectionId ?? this.#selectionCoordinator.activeSelectionId;
+		const token = this.#selectionTokens.get(paneId) ?? "";
+		this.#selectionTokens.delete(paneId);
+		if (scope && (selectionId === undefined || selectionId === this.#selectionCoordinator.activeSelectionId)) {
+			try {
+				this.#selectionCoordinator.cancelSelection(scope, selectionId, reason);
 			} catch {}
 		}
-
-		const scope = this.#boundScopes.get(paneId);
-		if (scope) {
-			this.#selectionCoordinator.cancelSelection(scope, undefined, reason);
-			this.#boundScopes.delete(paneId);
-			const activeId = this.#selectionCoordinator.activeSelectionId;
-			if (activeId) this.#boundScopes.delete(activeId);
+		for (const [key, boundScope] of this.#boundScopes) {
+			if (key === paneId || boundScope.paneId === paneId || boundScope === scope) this.#boundScopes.delete(key);
 		}
-		if (this.#activeSelectionPaneId === paneId) {
-			this.#activeSelectionPaneId = undefined;
-		}
-		this.#emitSelectionState({ phase: "idle", paneId, updatedAt: Date.now() });
+		if (this.#activeSelectionPaneId === paneId) this.#activeSelectionPaneId = undefined;
+		this.#emitSelectionState(this.#stateWithQueue({ phase: "idle", paneId, selectionId, updatedAt: Date.now() }));
+		if (entry && token) await this.#cleanupInspector(entry, token, { canceled: true });
 	}
 
 	async startSelection(scope: SelectionAuthScope, options: StartSelectionOptions = {}): Promise<ElementEditState> {
 		const id = paneId(scope.paneId);
-		if (this.#activeSelectionPaneId && this.#activeSelectionPaneId !== id) {
-			await this.#endSelection(this.#activeSelectionPaneId, "Switching selection to another pane");
+		const previousPanes = new Set<string>([
+			...(this.#activeSelectionPaneId ? [this.#activeSelectionPaneId] : []),
+			...this.#selectionTokens.keys(),
+		]);
+		for (const previousPaneId of previousPanes) {
+			if (previousPaneId === id) continue;
+			await this.#endSelection(previousPaneId, "Switching selection to another pane");
+		}
+		if (this.#activeSelectionPaneId === id) {
+			await this.#endSelection(id, "Restarting selection on this pane");
 		}
 		const entry = this.#requireBrowser(id);
+		const generation = this.#nextSelectionGeneration(id);
+		const token = crypto.randomUUID();
+		this.#selectionTokens.set(id, token);
 		this.#activeSelectionPaneId = id;
 		this.#boundScopes.set(id, scope);
 
@@ -1533,158 +2108,146 @@ export class WorkspaceHost {
 			...options,
 			url: entry.state.url,
 		});
-		if (state.selectionId) {
-			this.#boundScopes.set(state.selectionId, scope);
-		}
-
+		const activeId = state.selectionId ?? "";
+		if (activeId) this.#boundScopes.set(activeId, scope);
+		const target = options.target ?? {
+			id: scope.agentId,
+			name: scope.agentId,
+			swatch: getAgentSwatch(scope.agentId),
+		};
 		const { webContents } = entry.view;
 		if (!webContents.isDestroyed()) {
-			if (typeof webContents.focus === "function") {
-				webContents.focus();
-			}
-
-			const activeId = state.selectionId ?? "";
+			webContents.focus?.();
 			void (async () => {
 				try {
-					const payload = (await webContents.executeJavaScript(INSPECTOR_SCRIPT)) as {
-						canceled?: boolean;
-						tagName?: string;
-						selector?: string;
-						id?: string;
-						classes?: string[];
-						attributes?: Record<string, string>;
-						role?: string;
-						name?: string;
-						text?: string;
-						outerHTML?: string;
-						bounds?: {
-							x: number;
-							y: number;
-							width: number;
-							height: number;
-							top: number;
-							left: number;
-							bottom: number;
-							right: number;
-						};
-						computedStyles?: Record<string, string>;
-						hierarchy?: string[];
-						devicePixelRatio?: number;
-					} | null;
-
-					if (!payload || payload.canceled) {
-						if (this.#activeSelectionPaneId === id) {
-							await this.#endSelection(id, "Canceled by user");
+					const initial = (await webContents.executeJavaScript(
+						buildInspectorScript(
+							this.resolveTheme(),
+							token,
+							target,
+							this.#cloneQueuedTasks(this.#queueForPane(id).tasks),
+						),
+					)) as InspectorActionPayload | null;
+					let payload = initial;
+					while (this.#isCurrentSelection(id, generation, activeId)) {
+						if (!payload) {
+							payload = await this.#waitForInspectorAction(entry);
+							continue;
 						}
-						return;
-					}
-
-					if (this.#activeSelectionPaneId !== id) return;
-					const boundScope = this.#boundScopes.get(id);
-					if (!boundScope) return;
-
-					let screenshot: ElementScreenshot | undefined;
-					if (typeof webContents.capturePage === "function" && payload.bounds) {
-						try {
-							const padding = 12;
-							const clipRect = {
-								x: Math.max(0, Math.floor(payload.bounds.x - padding)),
-								y: Math.max(0, Math.floor(payload.bounds.y - padding)),
-								width: Math.min(entry.bounds.width || 1200, Math.ceil(payload.bounds.width + padding * 2)),
-								height: Math.min(entry.bounds.height || 800, Math.ceil(payload.bounds.height + padding * 2)),
-							};
-							if (clipRect.width > 0 && clipRect.height > 0) {
-								const nativeImage = await webContents.capturePage(clipRect);
-								const size =
-									typeof nativeImage.getSize === "function"
-										? nativeImage.getSize()
-										: { width: clipRect.width, height: clipRect.height };
-								let buffer = nativeImage.toJPEG(80);
-								if (buffer.byteLength > SELECTION_LIMITS.maxImageBytes) {
-									buffer = nativeImage.toJPEG(60);
-								}
-								const base64 = buffer.toString("base64");
-								screenshot = {
-									dataUrl: `data:image/jpeg;base64,${base64}`,
-									base64,
-									mimeType: "image/jpeg",
-									width: size.width,
-									height: size.height,
-									byteLength: buffer.byteLength,
-								};
+						if (payload.canceled || payload.closed) {
+							await this.#endSelection(
+								id,
+								payload.closed ? "Closed by user" : "Canceled by user",
+								generation,
+								activeId,
+							);
+							return;
+						}
+						if (payload.enqueue) {
+							try {
+								await this.#enqueueSelectionPayload(
+									id,
+									generation,
+									activeId,
+									token,
+									scope,
+									entry,
+									target,
+									payload,
+								);
+							} catch (error) {
+								if (!this.#isCurrentSelection(id, generation, activeId) || isStaleSelectionOperation(error))
+									return;
+								const message = error instanceof Error ? error.message : String(error);
+								await this.#finishInspector(entry, token, { kind: "queue-add-error", message });
 							}
-						} catch {}
-					}
-
-					const selector = payload.selector || payload.tagName || "element";
-					const updated = this.#selectionCoordinator.updateSelection(boundScope, activeId, {
-						selector,
-						domSnapshot: {
+							payload = await this.#waitForInspectorAction(entry);
+							continue;
+						}
+						const instruction = typeof payload.instruction === "string" ? payload.instruction.trim() : "";
+						if (!instruction) {
+							payload = await this.#waitForInspectorAction(entry);
+							continue;
+						}
+						if (!this.#isCurrentSelection(id, generation, activeId)) return;
+						const boundScope = this.#boundScopes.get(id);
+						if (!boundScope) return;
+						const selector = payload.selector?.trim() || payload.tagName?.trim() || "element";
+						const bounds = payload.bounds ?? null;
+						let screenshot: ElementScreenshot | undefined;
+						if (payload.captureMode === "screenshot") {
+							screenshot = await this.#captureSelectionScreenshot(entry, token, bounds);
+						}
+						const updated = this.#selectionCoordinator.updateSelection(boundScope, activeId, {
 							selector,
-							tagName: payload.tagName || "div",
-							role: payload.role,
-							name: payload.name,
-							html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
-							text: payload.text,
-							attributes: payload.attributes || {},
-							bounds: payload.bounds || {
-								x: 0,
-								y: 0,
-								width: 0,
-								height: 0,
-								top: 0,
-								left: 0,
-								bottom: 0,
-								right: 0,
+							captureMode: payload.captureMode === "screenshot" ? "screenshot" : "dom",
+							domSnapshot: {
+								selector,
+								tagName: payload.tagName || "div",
+								role: payload.role,
+								name: payload.name,
+								html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
+								text: payload.text,
+								attributes: payload.attributes || {},
+								bounds: bounds ?? { x: 0, y: 0, width: 0, height: 0 },
+								hierarchy: payload.hierarchy || ["body", "html"],
 							},
-							hierarchy: payload.hierarchy || ["body", "html"],
-						},
-						screenshot,
-						url: entry.state.url,
-					});
-					this.#emitSelectionState(updated);
-
-					if (typeof payload.instruction === "string" && payload.instruction.trim().length > 0) {
-						await this.commitSelection(id, payload.instruction.trim());
+							screenshot,
+							url: entry.state.url,
+						});
+						this.#emitSelectionState(updated);
+						await this.#commitSelectionForGeneration(
+							id,
+							generation,
+							activeId,
+							instruction,
+							payload.action,
+							payload.agentType,
+						);
+						payload = await this.#waitForInspectorAction(entry);
 					}
 				} catch (error) {
+					if (!this.#isCurrentSelection(id, generation, activeId) || isStaleSelectionOperation(error)) return;
 					const message = error instanceof Error ? error.message : String(error);
 					const errState = this.#selectionCoordinator.reportError(scope, activeId, "inspect_failed", message);
 					this.#emitSelectionState(errState);
+					await this.#finishInspector(entry, token, { kind: "error", message });
+					const acknowledgement = await this.#waitForInspectorAction(entry);
+					if (acknowledgement) {
+						await this.#endSelection(
+							id,
+							acknowledgement.closed ? "Closed by user" : "Canceled by user",
+							generation,
+							activeId,
+						);
+					}
 				}
 			})();
 		}
-
-		this.#emitSelectionState(state);
-		return state;
+		this.#emitSelectionState(this.#stateWithQueue(state));
+		return this.#stateWithQueue(state);
 	}
+
 	async cancelSelection(rawPaneId: unknown, rawReason?: unknown): Promise<ElementEditState> {
 		const id = paneId(rawPaneId);
 		const reason = typeof rawReason === "string" ? rawReason : undefined;
 		await this.#endSelection(id, reason);
-		return { phase: "idle", paneId: id, updatedAt: Date.now() };
+		return this.getSelectionState(id);
 	}
 
 	async #deliverSelection(
 		scope: SelectionAuthScope,
 		selectionState: ElementEditState,
-		instruction?: string,
-	): Promise<void> {
-		const client = this.#client;
-		if (!client?.isConnected || !client.document) {
-			throw new Error("WorkspaceClient is not connected to authoritative runtime");
-		}
-		const doc = client.document;
-		const agent = doc.agents.find(a => a.id === scope.agentId);
-		if (!agent) {
-			return;
-		}
-		if (agent.sessionId !== scope.sessionId) {
-			throw new Error(`Target agent '${scope.agentId}' session mismatch`);
-		}
-
+		generation: number,
+		selectionId: string,
+		instruction: string | undefined,
+		action: ElementTaskAction,
+		agentType: string | undefined,
+	): Promise<ElementEditState> {
+		if (!this.#isCurrentSelection(scope.paneId, generation, selectionId)) throw STALE_SELECTION_OPERATION;
 		const promptData = {
 			url: selectionState.url,
+			agentType,
 			selector: selectionState.selector,
 			tagName: selectionState.selectedElement?.tagName || selectionState.domSnapshot?.tagName,
 			captureMode: selectionState.captureMode,
@@ -1696,109 +2259,328 @@ export class WorkspaceHost {
 			domHtml: selectionState.selectedElement?.html || selectionState.domSnapshot?.html,
 			instruction: instruction?.trim() || undefined,
 		};
-
 		const promptText = prompt.render(elementSelectionPromptTemplate, promptData);
+		const entry = this.#browsers.get(scope.paneId);
+		if (action === "inline") {
+			selectionState.phase = "analyzing";
+			selectionState.action = "inline";
+			selectionState.instruction = instruction;
+			selectionState.workingMessage = "Analyzing element with AI...";
+			selectionState.updatedAt = Date.now();
+			this.#emitSelectionState({ ...selectionState });
+			try {
+				if (!this.#desktopHost) throw new Error("OMP Chat is unavailable for inline selection");
+				const response = await this.#desktopHost.executeInlinePrompt(promptText, scope.sessionId, {
+					paneId: scope.paneId,
+					selector: selectionState.selector,
+					tagName: promptData.tagName,
+					instruction,
+					url: selectionState.url,
+					agentType,
+					captureMode: selectionState.captureMode,
+					screenshot: selectionState.screenshot,
+				});
+				if (!this.#isCurrentSelection(scope.paneId, generation, selectionId)) throw STALE_SELECTION_OPERATION;
+				if (!response.trim()) throw new Error("OMP returned no inline output");
+				if (entry)
+					await this.#finishInspector(entry, this.#selectionTokens.get(scope.paneId) ?? "", {
+						kind: "inline-success",
+						response,
+					});
+				selectionState.phase = "ready";
+				selectionState.response = response;
+				selectionState.workingMessage = undefined;
+				selectionState.updatedAt = Date.now();
+				this.#emitSelectionState({ ...selectionState });
+				return selectionState;
+			} catch (error) {
+				if (isStaleSelectionOperation(error)) throw error;
+				const message = error instanceof Error ? error.message : String(error);
+				if (entry)
+					await this.#finishInspector(entry, this.#selectionTokens.get(scope.paneId) ?? "", {
+						kind: "error",
+						message,
+					});
+				throw error;
+			}
+		}
 
-		const result = await client.executeCommandWithRetry(currentDocument => ({
-			version: 1 as const,
-			commandId: uniqueCommandId("cmd-selection-deliver"),
-			workspaceId: scope.workspaceId,
-			expectedRevision: currentDocument.revision,
-			issuedAt: Date.now(),
-			type: "agent.message" as const,
-			payload: {
-				id: agent.id,
-				message: promptText,
-				selector: selectionState.selector,
-				url: selectionState.url,
-				...(selectionState.selectedElement || selectionState.domSnapshot
-					? { domSnapshot: selectionState.selectedElement || selectionState.domSnapshot }
-					: {}),
-				...(selectionState.screenshot ? { screenshot: selectionState.screenshot } : {}),
-			},
-		}));
-
-		if (result.status === "rejected") {
-			throw new Error(result.error?.message ?? "Delivery rejected by workspace runtime");
+		selectionState.phase = "working";
+		selectionState.action = "chat";
+		selectionState.instruction = instruction;
+		selectionState.workingMessage = "Delivering to chat...";
+		selectionState.updatedAt = Date.now();
+		this.#emitSelectionState({ ...selectionState });
+		try {
+			if (this.#desktopHost) {
+				await this.#desktopHost.deliverElementPrompt(promptText, scope.sessionId, {
+					paneId: scope.paneId,
+					selector: selectionState.selector,
+					tagName: promptData.tagName,
+					instruction,
+					url: selectionState.url,
+					agentType,
+					captureMode: selectionState.captureMode,
+					screenshot: selectionState.screenshot,
+				});
+			} else {
+				const workspaceAgent = scope.agentId
+					? this.#client?.document?.agents.find(
+							(agent: WorkspaceDocumentV1["agents"][number]) => agent.id === scope.agentId,
+						)
+					: undefined;
+				if (!workspaceAgent) throw new Error("No OMP Chat delivery route is available");
+				const client = this.#client;
+				if (!client?.isConnected || !client.document)
+					throw new Error("WorkspaceClient is not connected to authoritative runtime");
+				if (workspaceAgent.sessionId !== scope.sessionId)
+					throw new Error(`Target agent '${scope.agentId}' session mismatch`);
+				const result = await client.executeCommandWithRetry(currentDocument => ({
+					version: 1 as const,
+					commandId: uniqueCommandId("cmd-selection-deliver"),
+					workspaceId: scope.workspaceId,
+					expectedRevision: currentDocument.revision,
+					issuedAt: Date.now(),
+					type: "agent.message" as const,
+					payload: {
+						id: workspaceAgent.id,
+						message: promptText,
+						selector: selectionState.selector,
+						url: selectionState.url,
+						...(selectionState.selectedElement || selectionState.domSnapshot
+							? { domSnapshot: selectionState.selectedElement || selectionState.domSnapshot }
+							: {}),
+						...(selectionState.screenshot ? { screenshot: selectionState.screenshot } : {}),
+					},
+				}));
+				if (result.status === "rejected")
+					throw new Error(result.error?.message ?? "Delivery rejected by workspace runtime");
+			}
+			if (!this.#isCurrentSelection(scope.paneId, generation, selectionId)) throw STALE_SELECTION_OPERATION;
+			if (entry)
+				await this.#finishInspector(entry, this.#selectionTokens.get(scope.paneId) ?? "", {
+					kind: "chat-success",
+					message: "Delivered to OMP Chat.",
+				});
+			selectionState.phase = "ready";
+			selectionState.workingMessage = "Delivered to chat";
+			selectionState.updatedAt = Date.now();
+			this.#emitSelectionState({ ...selectionState });
+			return selectionState;
+		} catch (error) {
+			if (isStaleSelectionOperation(error)) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			if (entry)
+				await this.#finishInspector(entry, this.#selectionTokens.get(scope.paneId) ?? "", {
+					kind: "error",
+					message,
+				});
+			throw error;
 		}
 	}
 
-	async commitSelection(rawPaneId: unknown, rawInstruction?: unknown): Promise<ElementEditState> {
-		const id = paneId(rawPaneId);
-		const entry = this.#requireBrowser(id);
+	async #commitSelectionForGeneration(
+		id: string,
+		generation: number,
+		selectionId: string,
+		rawInstruction?: unknown,
+		rawAction?: unknown,
+		agentType?: string,
+	): Promise<ElementEditState> {
+		if (!this.#isCurrentSelection(id, generation, selectionId)) return this.#staleSelectionState(id);
 		const scope = this.#boundScopes.get(id);
-		if (!scope) {
-			throw new Error("No active selection scope for pane");
-		}
-		const activeId = this.#selectionCoordinator.activeSelectionId;
-		if (!activeId) return this.#selectionCoordinator.getState(scope);
-
-		const currentState = this.#selectionCoordinator.getState(scope);
-		const { webContents } = entry.view;
-		if (!webContents.isDestroyed()) {
-			try {
-				if (
-					webContents.debugger &&
-					typeof webContents.debugger.isAttached === "function" &&
-					webContents.debugger.isAttached()
-				) {
-					await webContents.debugger.sendCommand("Overlay.hideHighlight").catch(() => {});
-					await webContents.debugger
-						.sendCommand("Overlay.setInspectMode", { mode: "none", highlightConfig: {} })
-						.catch(() => {});
-				}
-
-				if (currentState.captureMode === "screenshot" && typeof webContents.capturePage === "function") {
-					const nativeImage = await webContents.capturePage();
-					const size =
-						typeof nativeImage.getSize === "function"
-							? nativeImage.getSize()
-							: { width: entry.bounds.width, height: entry.bounds.height };
-					let buffer = nativeImage.toJPEG(80);
-					if (buffer.byteLength > SELECTION_LIMITS.maxImageBytes) {
-						buffer = nativeImage.toJPEG(60);
-					}
-					const base64 = buffer.toString("base64");
-					const screenshot: ElementScreenshot = {
-						dataUrl: `data:image/jpeg;base64,${base64}`,
-						base64,
-						mimeType: "image/jpeg",
-						width: size.width,
-						height: size.height,
-						byteLength: buffer.byteLength,
-					};
-
-					this.#selectionCoordinator.updateSelection(scope, activeId, {
-						screenshot,
-						url: entry.state.url,
-					});
-				}
-			} catch {}
-		}
-
-		const committedState = this.#selectionCoordinator.commitSelection(scope, activeId);
-
+		if (!scope) return this.#staleSelectionState(id);
+		const action: ElementTaskAction =
+			rawAction === "inline" || rawAction === "queue" || rawAction === "chat" ? rawAction : "chat";
 		const instruction = typeof rawInstruction === "string" ? rawInstruction.trim() : undefined;
-
+		if (!instruction) return this.#staleSelectionState(id);
+		const committedState = this.#selectionCoordinator.commitSelection(scope, selectionId);
+		committedState.action = action;
+		committedState.instruction = instruction;
 		try {
-			await this.#deliverSelection(scope, committedState, instruction);
-			await this.#endSelection(id, "Delivered");
-			return { phase: "idle", paneId: id, updatedAt: Date.now() };
+			return await this.#deliverSelection(
+				scope,
+				committedState,
+				generation,
+				selectionId,
+				instruction,
+				action,
+				agentType,
+			);
 		} catch (error) {
+			if (!this.#isCurrentSelection(id, generation, selectionId) || isStaleSelectionOperation(error)) {
+				return this.#staleSelectionState(id);
+			}
 			const message = error instanceof Error ? error.message : String(error);
-			const errState = this.#selectionCoordinator.reportError(scope, activeId, "delivery_failed", message);
+			const errState = this.#selectionCoordinator.reportError(scope, selectionId, "delivery_failed", message);
 			this.#emitSelectionState(errState);
 			return errState;
 		}
 	}
 
+	async commitSelection(rawPaneId: unknown, rawInstruction?: unknown, rawAction?: unknown): Promise<ElementEditState> {
+		const id = paneId(rawPaneId);
+		const generation = this.#selectionGenerations.get(id);
+		const selectionId = this.#selectionCoordinator.activeSelectionId;
+		if (generation === undefined || !selectionId) return this.#staleSelectionState(id);
+		return this.#commitSelectionForGeneration(id, generation, selectionId, rawInstruction, rawAction);
+	}
+
+	async #executeQueuedTasks(id: string, queueGeneration: number): Promise<ElementEditState> {
+		const queue = this.#selectionQueues.get(id);
+		if (!queue || queue.generation !== queueGeneration) return this.getSelectionState(id);
+		const pendingTaskIds = queue.tasks.filter(task => task.status === "pending").map(task => task.id);
+		try {
+			for (const taskId of pendingTaskIds) {
+				const currentQueue = this.#selectionQueues.get(id);
+				const entry = this.#browsers.get(id);
+				if (!currentQueue || currentQueue.generation !== queueGeneration || !entry)
+					return this.getSelectionState(id);
+				const task = currentQueue.tasks.find(candidate => candidate.id === taskId);
+				if (task?.status !== "pending") continue;
+
+				let resolved: { scope: SelectionAuthScope; target: SelectionTargetAgent };
+				try {
+					if (!this.#desktopHost) throw new Error("OMP Chat is unavailable for queued inline task");
+					resolved = this.#desktopHost.resolveSelectionTarget(id, task.targetAgentId, entry.documentEpoch);
+				} catch (error) {
+					task.status = "error";
+					task.error = error instanceof Error ? error.message : String(error);
+					this.#emitSelectionState(
+						this.#stateWithQueue({
+							...(this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id }),
+							updatedAt: Date.now(),
+						}),
+					);
+					continue;
+				}
+
+				task.status = "running";
+				task.error = undefined;
+				this.#emitSelectionState(
+					this.#stateWithQueue({
+						...(this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id }),
+						workingMessage: `Running task ${task.taskIndex}: ${task.instruction.slice(0, 40)}…`,
+						updatedAt: Date.now(),
+					}),
+				);
+				try {
+					let screenshot: ElementScreenshot | undefined;
+					if (task.captureMode === "screenshot") {
+						if (!task.screenshot || !task.screenshotWidth || !task.screenshotHeight) {
+							throw new Error("Queued screenshot capture is unavailable");
+						}
+						const base64 = task.screenshot.startsWith("data:")
+							? task.screenshot.slice(task.screenshot.indexOf(",") + 1)
+							: task.screenshot;
+						screenshot = {
+							dataUrl: task.screenshot.startsWith("data:")
+								? task.screenshot
+								: `data:image/jpeg;base64,${task.screenshot}`,
+							base64,
+							mimeType: "image/jpeg",
+							width: task.screenshotWidth,
+							height: task.screenshotHeight,
+							byteLength: Buffer.from(base64, "base64").byteLength,
+						};
+					}
+					if (task.captureMode === "screenshot" && !screenshot) {
+						throw new Error("Queued screenshot capture is unavailable");
+					}
+					const promptText = prompt.render(elementSelectionPromptTemplate, {
+						url: task.url ?? entry.state.url,
+						targetAgentId: resolved.target.id,
+						targetAgentName: resolved.target.name,
+						agentType: task.agentType,
+						selector: task.selector,
+						tagName: task.tagName,
+						captureMode: task.captureMode,
+						summary: task.summary ?? task.domSnapshot?.summary ?? task.domSnapshot?.text,
+						domHtml: task.domHtml ?? task.domSnapshot?.html,
+						instruction: task.instruction,
+						screenshotAttached: Boolean(screenshot),
+						screenshotWidth: task.screenshotWidth,
+						screenshotHeight: task.screenshotHeight,
+					});
+					if (!this.#desktopHost) throw new Error("OMP Chat is unavailable for queued inline task");
+					const response = await this.#desktopHost.executeInlinePrompt(promptText, resolved.scope.sessionId, {
+						paneId: id,
+						selector: task.selector,
+						tagName: task.tagName,
+						instruction: task.instruction,
+						url: task.url ?? entry.state.url,
+						agentType: task.agentType,
+						captureMode: task.captureMode,
+						screenshot,
+					});
+					const liveQueue = this.#selectionQueues.get(id);
+					if (!liveQueue || liveQueue.generation !== queueGeneration || !this.#browsers.has(id)) {
+						return this.getSelectionState(id);
+					}
+					if (!response.trim()) throw new Error("OMP returned no inline output");
+					task.response = response;
+					task.error = undefined;
+					task.status = "completed";
+				} catch (error) {
+					const liveQueue = this.#selectionQueues.get(id);
+					if (!liveQueue || liveQueue.generation !== queueGeneration || !this.#browsers.has(id)) {
+						return this.getSelectionState(id);
+					}
+					task.status = "error";
+					task.error = error instanceof Error ? error.message : String(error);
+				}
+				this.#emitSelectionState(
+					this.#stateWithQueue({
+						...(this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id }),
+						workingMessage: undefined,
+						updatedAt: Date.now(),
+					}),
+				);
+			}
+		} finally {
+			const liveQueue = this.#selectionQueues.get(id);
+			if (liveQueue && liveQueue.generation === queueGeneration) {
+				liveQueue.running = false;
+				this.#emitSelectionState(
+					this.#stateWithQueue({
+						...(this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id }),
+						workingMessage: undefined,
+						updatedAt: Date.now(),
+					}),
+				);
+			}
+		}
+		return this.getSelectionState(id);
+	}
+
+	async runQueuedTasks(rawPaneId: unknown): Promise<ElementEditState> {
+		const id = paneId(rawPaneId);
+		this.#requireBrowser(id);
+		const queue = this.#queueForPane(id);
+		if (queue.running) throw new Error("Selection queue is already running");
+		if (!queue.tasks.some(task => task.status === "pending")) return this.getSelectionState(id);
+		queue.running = true;
+		const state = this.#stateWithQueue({
+			...(this.#selectionStates.get(id) ?? { phase: "idle" as const, paneId: id }),
+			updatedAt: Date.now(),
+		});
+		this.#emitSelectionState(state);
+		return this.#executeQueuedTasks(id, queue.generation);
+	}
+
+	async clearQueuedTasks(rawPaneId: unknown): Promise<ElementEditState> {
+		const id = paneId(rawPaneId);
+		this.#requireBrowser(id);
+		return this.#clearQueuedTasks(id);
+	}
+
 	getSelectionState(rawPaneId: unknown): ElementEditState {
 		const id = paneId(rawPaneId);
+		const current = this.#selectionStates.get(id);
+		if (current) return this.#stateWithQueue(current);
 		const scope = this.#boundScopes.get(id);
-		if (scope) {
-			return this.#selectionCoordinator.getState(scope);
-		}
-		return { phase: "idle", updatedAt: Date.now() };
+		if (scope) return this.#stateWithQueue(this.#selectionCoordinator.getState(scope));
+		return this.#stateWithQueue({ phase: "idle", paneId: id, updatedAt: Date.now() });
 	}
 
 	getBrowserDocumentEpoch(rawPaneId: unknown): number {
@@ -1810,17 +2592,29 @@ export class WorkspaceHost {
 		return entry.documentEpoch;
 	}
 	#emitSelectionState(state: ElementEditState): void {
+		const projected = this.#stateWithQueue(state);
+		if (projected.paneId) {
+			this.#selectionStates.set(projected.paneId, {
+				...projected,
+				queuedTasks: projected.queuedTasks ? this.#cloneQueuedTasks(projected.queuedTasks) : [],
+			});
+		}
+		const outbound = {
+			...projected,
+			queuedTasks: projected.queuedTasks ? this.#cloneQueuedTasks(projected.queuedTasks) : [],
+		};
 		if (!this.#window.isDestroyed() && this.#window.webContents && !this.#window.webContents.isDestroyed()) {
 			try {
-				this.#window.webContents.send("branchlight:selection-state", state);
-				if (state.paneId) {
-					this.#send({ type: "selection-state", paneId: state.paneId, state });
+				this.#window.webContents.send("gradivus:selection-state", outbound);
+				if (outbound.paneId) {
+					this.#send({ type: "selection-state", paneId: outbound.paneId, state: outbound });
 				}
 			} catch {}
 		}
 	}
 
 	async stop(): Promise<void> {
+		for (const id of [...this.#chatTerminals.keys()]) await this.#closeChatTerminal(id);
 		for (const paneId of this.#terminalSubscriptions.keys()) this.#unsubscribeTerminal(paneId);
 		this.#terminalIds.clear();
 		this.#terminalStates.clear();
@@ -1983,7 +2777,7 @@ export class WorkspaceHost {
 	#send(event: WorkspaceEvent): void {
 		if (!this.#window.isDestroyed() && this.#window.webContents && !this.#window.webContents.isDestroyed()) {
 			try {
-				this.#window.webContents.send("branchlight:workspace", event);
+				this.#window.webContents.send("gradivus:workspace", event);
 			} catch {}
 		}
 	}

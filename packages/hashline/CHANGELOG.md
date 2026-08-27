@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed prepared hashline commits to revalidate source and move-destination identities while holding the process-local mutation lease, returning a no-write conflict instead of recording or writing stale bytes.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed

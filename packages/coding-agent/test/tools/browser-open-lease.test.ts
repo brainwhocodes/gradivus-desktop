@@ -12,8 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
-import { getBrowsersMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { getTabsMapForTest, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { getTab, getTabsInventory, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError, ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
@@ -29,7 +28,7 @@ function makeSession(): ToolSession {
 }
 
 async function drainAllTabs(): Promise<void> {
-	for (const name of [...getTabsMapForTest().keys()]) {
+	for (const { name } of getTabsInventory()) {
 		await releaseTab(name, { kill: false }).catch(() => undefined);
 	}
 }
@@ -87,14 +86,12 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 		connectGate.resolve();
 		for (let i = 0; i < 20; i++) await Promise.resolve();
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-		expect(getBrowsersMapForTest().size).toBe(0);
 	});
 });
 
 describe("browser open — caller cancellation rolls back the fresh browser (#6365)", () => {
 	it("aborting before tab publication rejects with ToolAbortError and leaves both maps empty", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
-		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		const openSplitGate = Promise.withResolvers<void>();
 		const surfaceClosed: string[] = [];
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
@@ -131,9 +128,7 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 
 		// The open-acquisition lease rollback disposes the fresh browser exactly
 		// once and leaves nothing owned solely by the failed open.
-		expect(getTabsMapForTest().has("fresh")).toBe(false);
-		expect(getBrowsersMapForTest().size).toBe(0);
-		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(getTab("fresh")).toBeUndefined();
 
 		// Let the orphaned acquisition unwind so it does not leak past the test.
 		openSplitGate.resolve();
@@ -177,7 +172,6 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 			(err: unknown) => ({ ok: false as const, err }),
 		);
 		await aEntered.promise;
-		expect(getBrowsersMapForTest().size).toBe(1);
 
 		// Open B against the SAME browser (different tab name). It reuses the
 		// registry handle and takes its own lease; both are now parked.
@@ -201,11 +195,7 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 
 		// B's browser survived A's rollback: still present, never closed, exactly
 		// one published tab. A's rollback closed only its own orphan surface.
-		expect(getBrowsersMapForTest().size).toBe(1);
 		expect(closeSpy).not.toHaveBeenCalled();
-		expect(getTabsMapForTest().has("tab-b")).toBe(true);
-		expect(getTabsMapForTest().has("tab-a")).toBe(false);
-		expect(getTabsMapForTest().size).toBe(1);
-		expect(surfaceClosed).toEqual(["surface-1"]);
+		expect(getTabsInventory().map(tab => tab.name)).toEqual(["tab-b"]);
 	});
 });

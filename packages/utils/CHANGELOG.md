@@ -10,6 +10,11 @@
 ### Changed
 
 - Changed the Chromium installer contract to pin the Chrome-for-Testing build required by Playwright 1.62.1 and expose the OMP-managed browser cache/version to browser runtimes.
+
+### Fixed
+
+- Fixed `TempDir.create()` and `TempDir.createSync()` with nested custom prefixes by creating missing parent directories before allocation.
+
 ## [17.3.5] - 2026-08-16
 
 ### Fixed

@@ -5,7 +5,7 @@ import * as path from "node:path";
 const packageDir = path.join(import.meta.dir, "..");
 const distDir = path.join(packageDir, "dist");
 const entry = path.join(packageDir, "src", "cli.ts");
-const outName = process.platform === "win32" ? "branchlight.exe" : "branchlight";
+const outName = process.platform === "win32" ? "gradivus.exe" : "gradivus";
 const outfile = path.join(distDir, outName);
 
 await fsp.mkdir(distDir, { recursive: true });

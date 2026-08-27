@@ -44,7 +44,7 @@ import {
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
-import { createBranchlightLifecycleExtension } from "./desktop-terminal/runtime-attach";
+import { createGradivusLifecycleExtension } from "./desktop-terminal/runtime-attach";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -905,8 +905,8 @@ export async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
-	const branchlightLifecycleExtension = createBranchlightLifecycleExtension();
-	if (branchlightLifecycleExtension) options.extensions = [branchlightLifecycleExtension];
+	const gradivusLifecycleExtension = createGradivusLifecycleExtension();
+	if (gradivusLifecycleExtension) options.extensions = [gradivusLifecycleExtension];
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;

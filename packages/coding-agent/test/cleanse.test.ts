@@ -95,7 +95,7 @@ describe("cleanse diagnostics", () => {
 			await Bun.write(
 				path.join(root, "package.json"),
 				JSON.stringify({
-					packageManager: "bun@1.3.14",
+					packageManager: "bun@1.4.0",
 					scripts: { test: `bun -e "process.exit(3)"` },
 				}),
 			);

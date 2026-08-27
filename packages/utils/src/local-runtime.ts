@@ -263,6 +263,11 @@ export async function ensureSecureRuntimeRoot(root: string): Promise<string> {
 				throw new Error(`Runtime root is not a directory: ${current}`);
 		}
 	}
+	if (process.platform !== "win32") {
+		try {
+			await fsp.chmod(root, 0o700);
+		} catch {}
+	}
 	const stat = await fsp.lstat(root);
 	assertOwnedMode(stat, 0o700, root);
 	return root;

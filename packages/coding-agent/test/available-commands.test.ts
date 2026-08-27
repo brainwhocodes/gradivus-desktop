@@ -47,6 +47,8 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName["reset-usage"]).toBeUndefined();
 
 		expect(byName.fast.description).toBe("Toggle fast mode");
+		expect(byName.plan.description).toBe("Toggle plan mode");
+		expect(byName.thinking.description).toBe("Configure thinking level");
 		expect(byName["ext:hello"].description).toBe("Extension hello");
 		expect(byName["custom:hello"].description).toBe("Custom hello");
 		expect(byName["server:prompt"].description).toBe("MCP prompt");
@@ -54,6 +56,8 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName["skill:reviewer"].description).toBe("Review code");
 
 		expect(byName.model.source).toBe("builtin");
+		expect(byName.plan.source).toBe("builtin");
+		expect(byName.thinking.source).toBe("builtin");
 		expect(byName["skill:reviewer"].source).toBe("skill");
 		expect(byName["ext:hello"].source).toBe("extension");
 		expect(byName["server:prompt"].source).toBe("mcp_prompt");

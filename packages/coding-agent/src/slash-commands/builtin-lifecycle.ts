@@ -103,8 +103,21 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "clear",
 		description: "Clear the conversation context in place, keeping the session",
+		acpDescription: "Clear the conversation context",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Clear: unavailable while streaming" : "Clear: drop context, keep session",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Cannot clear context while streaming.", runtime);
+			}
+			const result = await runtime.session.resetSessionContext();
+			if (!result) {
+				return usage("Cannot clear context while streaming or busy.", runtime);
+			}
+			const noun = result.droppedCount === 1 ? "message" : "messages";
+			await runtime.output(`Context reset — ${result.droppedCount} ${noun} dropped; session continues.`);
+			return commandConsumed();
+		},
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleResetContextCommand();
@@ -270,6 +283,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "retry",
 		description: "Retry the last failed agent turn",
+		acpDescription: "Retry the last failed agent turn",
+		handle: async (_command, runtime) => {
+			const didRetry = await runtime.session.retry();
+			if (!didRetry) {
+				await runtime.output("Nothing to retry.");
+			}
+			return commandConsumed();
+		},
 		handleTui: async (_command, runtime) => {
 			const didRetry = await runtime.ctx.session.retry();
 			if (!didRetry) {

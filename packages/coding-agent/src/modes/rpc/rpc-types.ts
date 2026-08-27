@@ -39,6 +39,13 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| {
+			id?: string;
+			type: "set_plan_mode";
+			enabled: boolean;
+			planFilePath?: string;
+			workflow?: "parallel" | "iterative";
+	  }
 	| { id?: string; type: "get_settings" }
 	| { id?: string; type: "set_setting"; path: string; value: RpcSettingValue }
 	| { id?: string; type: "get_available_commands" }
@@ -48,6 +55,11 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "get_agent_hub" }
+	| { id?: string; type: "get_agent_hub_messages"; agentId: string; fromByte?: number }
+	| { id?: string; type: "agent_hub_message"; agentId: string; message: string }
+	| { id?: string; type: "agent_hub_kill"; agentId: string }
+	| { id?: string; type: "agent_hub_revive"; agentId: string }
 	| { id?: string; type: "get_oauth_accounts" }
 	| { id?: string; type: "set_oauth_account_lock"; providerId: string; credentialId?: number }
 	| { id?: string; type: "set_oauth_account_failover"; enabled: boolean }
@@ -105,7 +117,7 @@ export type RpcCommand =
 // ============================================================================
 
 export type RpcSettingValue = boolean | string | number;
-export type RpcSettingTab = "appearance" | "model" | "interaction" | "context" | "tools" | "tasks";
+export type RpcSettingTab = "appearance" | "model" | "interaction" | "context" | "files" | "shell" | "tools" | "tasks";
 
 export interface RpcSettingOption {
 	value: RpcSettingValue;
@@ -158,6 +170,8 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Current plan mode state. */
+	planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" };
 }
 
 export interface RpcAvailableSlashCommand {
@@ -173,11 +187,18 @@ export interface RpcAvailableCommandsUpdateFrame {
 	type: "available_commands_update";
 	commands: RpcAvailableSlashCommand[];
 }
+export interface RpcConfigUpdateFrame {
+	type: "config_update";
+	model?: Model;
+	thinkingLevel?: ThinkingLevel;
+	planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" };
+}
 
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
 	agentInvoked: boolean;
+	error?: { message: string; code?: string };
 }
 
 export interface RpcHandoffResult {
@@ -208,6 +229,70 @@ export interface RpcSubagentMessagesResult {
 	reset: boolean;
 	entries: FileEntry[];
 	messages: AgentMessage[];
+}
+
+export type RpcAgentHubAgentKind = "sub" | "advisor";
+export type RpcAgentHubAgentStatus = "running" | "idle" | "parked" | "aborted";
+
+export interface RpcAgentHubMetrics {
+	tokens: number;
+	requests: number;
+	tools: number;
+	cost: number;
+	durationMs: number;
+	contextTokens?: number;
+	contextWindow?: number;
+}
+
+/** Safe, stable roster row for the retained Agent Hub. */
+export interface RpcAgentHubAgent {
+	id: string;
+	displayName: string;
+	kind: RpcAgentHubAgentKind;
+	parentId?: string;
+	status: RpcAgentHubAgentStatus;
+	activity?: string;
+	createdAt: number;
+	lastActivity: number;
+	transcriptAvailable: boolean;
+	readOnly: boolean;
+	agent?: string;
+	modelRole?: string;
+	resolvedModel?: string;
+	metrics?: RpcAgentHubMetrics;
+	progress?: {
+		currentTool?: string;
+		lastIntent?: string;
+		tokens?: number;
+		contextTokens?: number;
+		contextWindow?: number;
+		cost?: number;
+		durationMs?: number;
+		recentOutput?: string[];
+		resolvedModel?: string;
+		requests?: number;
+	};
+}
+
+export interface RpcAgentHubSnapshot {
+	agents: RpcAgentHubAgent[];
+}
+
+/** Incremental transcript page addressed by agent id, never by a renderer path. */
+export interface RpcAgentHubMessagePage {
+	fromByte: number;
+	nextByte: number;
+	reset: boolean;
+	entries: FileEntry[];
+	messages: AgentMessage[];
+}
+
+export interface RpcAgentHubActionResult {
+	agentId: string;
+}
+
+export interface RpcAgentHubUpdateFrame extends RpcAgentHubSnapshot {
+	type: "agent_hub_update";
 }
 
 export interface RpcOAuthAccount {
@@ -262,6 +347,13 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "set_plan_mode";
+			success: true;
+			data: { planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" } };
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "get_available_commands";
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
@@ -283,6 +375,41 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_agent_hub";
+			success: true;
+			data: RpcAgentHubSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_agent_hub_messages";
+			success: true;
+			data: RpcAgentHubMessagePage;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "agent_hub_message";
+			success: true;
+			data: RpcAgentHubActionResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "agent_hub_kill";
+			success: true;
+			data: RpcAgentHubActionResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "agent_hub_revive";
+			success: true;
+			data: RpcAgentHubActionResult;
+	  }
 	| {
 			id?: string;
 			type: "response";
@@ -442,7 +569,7 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcPromptResultFrame | RpcAgentHubUpdateFrame;
 
 // ============================================================================
 // Extension UI Events

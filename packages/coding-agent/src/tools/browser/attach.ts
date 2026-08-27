@@ -4,7 +4,7 @@ import { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
-	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker|localhost:5173|127\.0\.0\.1:5173|Mars\s+Kommander|Branchlight|^app:\/\/|^file:\/\/.*index\.html/i;
+	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker|localhost:5173|127\.0\.0\.1:5173|Gradivus|^app:\/\/|^file:\/\/.*index\.html/i;
 const CDP_PROBE_TIMEOUT_MS = 2_000;
 
 export interface CdpVersionInfo {
@@ -256,7 +256,7 @@ export async function pickCdpTarget(
 
 	if (usable.length > 0) return usable[0]!;
 
-	if (process.env.BRANCHLIGHT_TERMINAL === "1" && process.env.PI_RUNTIME_DIR && process.env.PI_RUNTIME_TOKEN) {
+	if (process.env.GRADIVUS_TERMINAL === "1" && process.env.PI_RUNTIME_DIR && process.env.PI_RUNTIME_TOKEN) {
 		try {
 			const client = new WorkspaceClient({
 				runtimeRoot: process.env.PI_RUNTIME_DIR,
@@ -265,10 +265,7 @@ export async function pickCdpTarget(
 			await client.connect();
 			const doc = client.document ?? (await client.getDocument());
 			const workspaceId =
-				process.env.BRANCHLIGHT_WORKSPACE_ID ??
-				doc.activeWorkspaceId ??
-				doc.workspaces[0]?.id ??
-				"workspace-default";
+				process.env.GRADIVUS_WORKSPACE_ID ?? doc.activeWorkspaceId ?? doc.workspaces[0]?.id ?? "workspace-default";
 			const locationId =
 				doc.workspaces.find(w => w.id === workspaceId)?.locationId ?? doc.locations[0]?.id ?? "loc-1";
 			const tabId = `tab-${crypto.randomUUID()}`;

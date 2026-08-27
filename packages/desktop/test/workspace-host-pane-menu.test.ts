@@ -91,9 +91,9 @@ describe("WorkspaceHost pane context menu", () => {
 		select(capturedMenuItem("Close Pane"));
 
 		expect(send.mock.calls).toEqual([
-			["branchlight:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "split-columns" }],
-			["branchlight:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "split-rows" }],
-			["branchlight:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "close" }],
+			["gradivus:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "split-columns" }],
+			["gradivus:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "split-rows" }],
+			["gradivus:workspace", { type: "pane-context-action", paneId: PANE_ID, action: "close" }],
 		]);
 	});
 

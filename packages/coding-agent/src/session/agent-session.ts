@@ -347,6 +347,10 @@ export * from "./agent-session-events";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
+export type SamplingParameters = Partial<
+	Record<"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty", number>
+>;
+
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
@@ -4615,6 +4619,24 @@ export class AgentSession {
 	/** Applies the external-thinking setting to the private scratchpad tool immediately. */
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
+	}
+
+	/** Applies the omit-thinking setting to subsequent provider requests. */
+	setOmitThinking(enabled: boolean): void {
+		this.agent.hideThinkingSummary = enabled;
+	}
+
+	/** Applies one or more provider sampling parameters, mapping -1 to provider defaults. */
+	setSamplingParameters(parameters: SamplingParameters): void {
+		if (parameters.temperature !== undefined)
+			this.agent.temperature = parameters.temperature === -1 ? undefined : parameters.temperature;
+		if (parameters.topP !== undefined) this.agent.topP = parameters.topP === -1 ? undefined : parameters.topP;
+		if (parameters.topK !== undefined) this.agent.topK = parameters.topK === -1 ? undefined : parameters.topK;
+		if (parameters.minP !== undefined) this.agent.minP = parameters.minP === -1 ? undefined : parameters.minP;
+		if (parameters.presencePenalty !== undefined)
+			this.agent.presencePenalty = parameters.presencePenalty === -1 ? undefined : parameters.presencePenalty;
+		if (parameters.repetitionPenalty !== undefined)
+			this.agent.repetitionPenalty = parameters.repetitionPenalty === -1 ? undefined : parameters.repetitionPenalty;
 	}
 
 	/**

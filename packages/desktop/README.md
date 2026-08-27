@@ -1,24 +1,71 @@
-# Branchlight
+# Gradivus
 
-Branchlight is a local terminal and browser workspace for Oh My Pi. It replaces the chat-style desktop client with a tabbed shell for working beside the pages it controls, whether or not OMP is installed on the shell's `PATH`.
+Gradivus is a local workspace for Oh My Pi. It combines OMP Chat with
+workspace-scoped terminal and browser surfaces, whether or not OMP is installed
+on the shell's `PATH`.
 
 ## Workspace behavior
 
-- Open terminal tabs and browser tabs from the top tab strip.
-- Split a terminal tab into terminals only, or a browser tab into browsers only.
-- Arrange two panes as columns or rows. Three and four panes use a compact grid.
-- Right-click any terminal or browser pane to split it right or down, or to close it.
-- Keep the browser address bar inside each browser pane. Terminal panes never render browser controls.
+- Open OMP Chat or browser tabs from the top tab strip.
+- Split a browser tab into browsers only.
+- Arrange two browser panes as columns or rows. Three and four panes use a compact grid.
+- Right-click any browser pane to split it right or down, or to close it.
+- Keep the browser address bar inside each browser pane.
 - Rename browser tabs and persist browser navigation in the workspace runtime.
-- Start regular login shells rooted in the workspace path, with a sanitized inherited environment and runtime-scoped OMP attachment credentials.
+- Use the active chat's Local terminal drawer for workspace-rooted shell sessions; its inherited environment is sanitized and its OMP attachment credentials are runtime-scoped.
 
-A terminal tab uses `ghostty-web` for its WebAssembly VT parser and canvas renderer. The authoritative workspace runtime daemon owns terminal PTYs, bounded output history, input/resize leases, and durable terminal lifecycle. Electron forwards only presentation and user input through preload IPC.
+Browser panes are sandboxed Electron `WebContentsView` instances projected from durable runtime browser records. Visible browser use remains available in every pane; runtime authorization is exact to the workspace, pane, terminal generation, and capability lease. Gradivus does not expose a global Electron CDP port or correlate targets by title or URL.
 
-Browser panes are sandboxed Electron `WebContentsView` instances projected from durable runtime browser records. Visible browser use remains available in every pane; runtime authorization is exact to the workspace, pane, terminal generation, and capability lease. Branchlight does not expose a global Electron CDP port or correlate targets by title or URL.
+### OMP Chat terminal drawer
+
+The active chat includes a lightweight **Local terminal** drawer without
+restoring terminal tabs, pane chrome, or a second app shell. Its single
+Show/Hide control lives in the chat header; the drawer remains a divided
+bottom section of the chat surface:
+
+- **Agent activity** shows a bounded, read-only command/status projection for
+  the active chat. It does not expose arbitrary arguments, output, cwd,
+  environment values, runtime tokens, or session IDs.
+- **Shell** opens an independent, workspace-rooted PTY rendered by Ghostty
+  WebAssembly. Its input and output stay local to the drawer and never enter
+  OMP context or the chat transcript.
+- Hide/show, resize, and renderer reload preserve the shell session and use
+  bounded monotonic output offsets. Switching workspaces, restarting the
+  session, or explicitly closing the drawer cleans up only its ephemeral PTY;
+  durable workspace terminals are unaffected.
+
+### Chat activity and inspectors
+
+Chat timeline follow state is scoped to each chat session. While the viewport
+is at the bottom, tool and assistant activity keeps the timeline at the latest
+item; scrolling upward pauses following without stealing the user's place.
+**Jump to latest** returns to the bottom and resumes following. Selecting an
+activity item does not change that follow intent.
+
+The chat header exposes Agent Hub and Files inspector counts alongside the
+terminal control. Agent Hub is scoped to the selected chat's coding-agent
+process and shows retained agents, bounded progress, transcripts, unread state,
+and lifecycle actions permitted for each row. The Files inspector shows safe,
+bounded read previews and successful write/edit summaries or diffs, with
+open-in-editor and full diff review where available; raw tool arguments and
+results are not exposed.
+
+## Theme
+
+Gradivus uses a neutral black-and-white desktop theme in both light and
+dark modes: light mode uses white and near-white surfaces with black text,
+while dark mode uses black and near-black surfaces with white text. Crimson is
+reserved for selected and active states, primary and destructive actions,
+errors, the Gradivus mark, and the element inspector target; green and
+amber identify success and warning notices. Readable text, configured terminal
+colors, selected content, and meaningful state boundaries are designed for AAA
+contrast, and keyboard focus remains a neutral two-band indicator. The
+`dark`, `light`, and `system` preferences update renderer, native, terminal,
+browser, and inspector surfaces together without losing active state.
 
 ## Settings and image tools
 
-Branchlight no longer embeds Work or Code chat sessions. If `omp` is available on the inherited `PATH`, run it inside a terminal tab like any other command; the desktop shell remains focused on terminals, browser targets, and global configuration.
+OMP Chat remains the primary interaction surface. If `omp` is available on the inherited `PATH`, it can still run from the Local terminal drawer; the desktop shell keeps browser, chat, and global configuration concerns separate.
 
 The settings surface manages credential-free OMP defaults without opening a session runtime. Native image generation and delegated image inspection remain configurable under **Tools**, and changes persist through OMP's settings RPC.
 
@@ -26,9 +73,9 @@ Provider credentials stay outside the renderer. Settings show stored account ide
 
 ## Launching
 
-From this repository, an argument-free `omp` command opens Branchlight and uses the current directory as the workspace. The workspace runtime owns terminal startup and injects only its trusted OMP executable directory into terminal `PATH`.
+From this repository, an argument-free `omp` command opens Gradivus and uses the current directory as the workspace. The workspace runtime owns chat-drawer shell startup and injects only its trusted OMP executable directory into the drawer's `PATH`.
 
-To keep normal terminal-only behavior when launching an installed OMP command outside Branchlight, run:
+To keep normal terminal-only behavior when launching an installed OMP command outside Gradivus, run:
 
 ```sh
 OMP_DESKTOP=0 omp
@@ -37,13 +84,13 @@ OMP_DESKTOP=0 omp
 ## Architecture
 
 | Electron main process | `src/main/` | Window lifecycle, browser `WebContentsView` presentation, preload IPC, and runtime-client connection |
-| Workspace runtime | `../workspace-runtime/` | Durable workspace document, authoritative terminal PTYs, capability leases, browser intent, and lifecycle effects |
-| Preload bridge | `src/main/preload.ts` | Narrow, validated browser, terminal, and workspace IPC boundary |
-| Svelte renderer | `src/renderer/` | Runtime-projected tabs, homogeneous splits, pane controls, Ghostty WASM terminal surfaces, and responsive layout |
+| Workspace runtime | `../workspace-runtime/` | Durable workspace document, terminal PTY services, capability leases, browser intent, and lifecycle effects |
+| Preload bridge | `src/main/preload.ts` | Narrow, validated browser, chat-terminal, and workspace IPC boundary |
+| Svelte renderer | `src/renderer/` | OMP Chat, browser tabs and panes, chat-terminal drawer, and responsive layout |
 | Shared contracts | `src/shared/` and `../wire/` | Renderer IPC, workspace document, command, and terminal stream contracts |
-| OMP backend | `../coding-agent/` | OMP process launched inside runtime-owned terminal panes; it attaches only through a scoped runtime token |
+| OMP backend | `../coding-agent/` | OMP process attached to a runtime-scoped chat-terminal lease |
 
-Branchlight starts one workspace runtime daemon under the Electron user-data root. Desktop shutdown disconnects presentation clients but leaves the durable document and PTYs running; explicit runtime shutdown is separate.
+Gradivus starts one workspace runtime daemon under the Electron user-data root. Desktop shutdown disconnects presentation clients while durable browser state and runtime-owned PTYs follow their explicit lifecycle; explicit runtime shutdown is separate.
 
 ## Requirements
 
@@ -75,14 +122,14 @@ bun run test:e2e
 
 The focused Vitest coverage verifies runtime-owned PTY startup, bounded terminal streams, durable command transitions, browser presentation, and native pane menu routing. The Playwright journey launches the real Electron shell and verifies:
 
-- the chatless terminal/browser shell and dark settings palette;
+- the OMP Chat workspace with browser surfaces, the Local terminal drawer, and neutral black/white settings and terminal themes;
 - native image-generation and image-inspection settings persistence;
 - provider sign-in, account lock/unlock, sibling failover, removal, and sign-out;
 - runtime-owned shell startup through the workspace client and Ghostty WASM renderer;
-- terminal-only and browser-only split invariants;
-- native right-click split and close actions for terminal and browser panes;
+- browser split invariants;
+- native right-click split and close actions for browser panes;
 - browser-local address bars, tab naming, durable navigation, and browser rehydration;
-- presentation disconnect without terminal/browser closure on normal desktop shutdown;
+- presentation disconnect without browser closure on normal desktop shutdown;
 - responsive layout, window controls, and serious accessibility violations.
 
 ## Packaging
@@ -92,16 +139,16 @@ bun run backend:build
 bun run package
 ```
 
-Electron Forge writes the unpacked application under `out/`. The packaged resources include the OMP executable used to bootstrap the workspace runtime, Branchlight's RPC defaults, and third-party notices.
+Electron Forge writes the unpacked application under `out/`. The packaged resources include the OMP executable used to bootstrap the workspace runtime, Gradivus's RPC defaults, and third-party notices.
 
 ## Local data and security
 
 - Renderer context isolation, sandboxing, Electron fuses, and a restrictive content security policy remain enabled.
-- Browser panes accept only HTTP and HTTPS navigation. Popups become new Branchlight browser tabs.
+- Browser panes accept only HTTP and HTTPS navigation. Popups become new Gradivus browser tabs.
 - Browser DevTools access binds to `127.0.0.1`; it is not exposed to the local network.
 - Browser panes have Node integration disabled and deny permission requests by default.
 - OMP owns provider credentials and session data under its local data directory.
 
 ## License and notices
 
-Branchlight is licensed under the repository's [MIT License](../../LICENSE). Bundled icon, font, and terminal dependencies are recorded in [`THIRD_PARTY_LICENSES.txt`](./THIRD_PARTY_LICENSES.txt).
+Gradivus is licensed under the repository's [MIT License](../../LICENSE). Bundled icon, font, and terminal dependencies are recorded in [`THIRD_PARTY_LICENSES.txt`](./THIRD_PARTY_LICENSES.txt).

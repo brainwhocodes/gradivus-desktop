@@ -1,84 +1,23 @@
-// Mars Kommander design foundation.
-// Shared color, type, spacing, and motion tokens for the desktop shell and OMP Chat.
+// Gradivus design foundation.
+// Base element styles for the desktop shell and chat surface.
+// Design tokens live in styles/tokens/ (primitives, semantic, layout).
+// Keep the global token contract stable for native and renderer consumers.
+
+@font-face {
+	font-family: "Departure Mono";
+	src:
+		url("../assets/fonts/DepartureMono-Regular.woff2") format("woff2"),
+		url("../assets/fonts/DepartureMono-Regular.woff") format("woff"),
+		url("../assets/fonts/DepartureMono-Regular.otf") format("opentype");
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
 
 :root {
-	font-family: "Nunito Sans Variable", "Segoe UI", sans-serif;
+	font-family: "Departure Mono", ui-monospace, monospace;
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
-	--font-sans: "Nunito Sans Variable", "Segoe UI", sans-serif;
-	--font-display: "Sora Variable", "Segoe UI", sans-serif;
-	--font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-	--ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
-	--radius-small: 5px;
-	--radius-medium: 8px;
-	--radius-large: 12px;
-	--session-rail-width: clamp(228px, 18vw, 264px);
-	--inspector-width: clamp(288px, 22vw, 340px);
-	--chat-content-width: 900px;
-	--chat-message-width: 72ch;
-	--control-height: 36px;
-}
-
-:root,
-:root[data-theme="dark"] {
-	color-scheme: dark;
-	color: oklch(0.91 0.012 62);
-	background: oklch(0.19 0.008 66);
-	--shell: oklch(0.205 0.009 65);
-	--shell-raised: oklch(0.235 0.011 64);
-	--shell-hover: oklch(0.275 0.012 62);
-	--chat-canvas: oklch(0.175 0.012 58);
-	--browser: oklch(0.19 0.008 66);
-	--line: oklch(0.35 0.012 64);
-	--line-soft: oklch(0.29 0.01 64);
-	--foreground: oklch(0.91 0.012 62);
-	--foreground-strong: oklch(0.98 0.005 60);
-	--foreground-muted: oklch(0.68 0.016 64);
-	--inverse-foreground: oklch(0.18 0.01 60);
-	--inverse-surface: oklch(0.95 0.008 65);
-	--accent: oklch(0.69 0.145 48);
-	--accent-soft: oklch(0.69 0.145 48 / 0.12);
-	--danger: oklch(0.66 0.16 30);
-	--danger-surface: oklch(0.25 0.08 30);
-	--success: oklch(0.72 0.105 154);
-	--warning: oklch(0.8 0.12 82);
-	--shadow-color: oklch(0.04 0.01 60 / 0.42);
-
-	// The outer Electron shell currently consumes these semantic aliases.
-	--surface-base: var(--shell);
-	--surface-raised: var(--shell-raised);
-	--text-primary: var(--foreground-strong);
-	--text-muted: var(--foreground-muted);
-}
-
-:root[data-theme="light"] {
-	color-scheme: light;
-	color: oklch(0.22 0.02 260);
-	background: oklch(0.96 0.005 240);
-	--shell: oklch(0.95 0.005 240);
-	--shell-raised: oklch(0.99 0 0);
-	--shell-hover: oklch(0.92 0.01 240);
-	--chat-canvas: oklch(0.985 0.002 240);
-	--browser: oklch(1 0 0);
-	--line: oklch(0.82 0.01 240);
-	--line-soft: oklch(0.88 0.008 240);
-	--foreground: oklch(0.22 0.02 260);
-	--foreground-strong: oklch(0.12 0.02 260);
-	--foreground-muted: oklch(0.48 0.02 260);
-	--inverse-foreground: oklch(0.98 0.005 60);
-	--inverse-surface: oklch(0.22 0.02 260);
-	--accent: oklch(0.55 0.16 250);
-	--accent-soft: oklch(0.55 0.16 250 / 0.1);
-	--danger: oklch(0.58 0.18 25);
-	--danger-surface: oklch(0.94 0.06 25);
-	--success: oklch(0.48 0.12 154);
-	--warning: oklch(0.52 0.13 72);
-	--shadow-color: oklch(0.22 0.02 260 / 0.16);
-
-	--surface-base: var(--shell);
-	--surface-raised: var(--shell-raised);
-	--text-primary: var(--foreground-strong);
-	--text-muted: var(--foreground-muted);
 }
 
 * {
@@ -100,43 +39,46 @@ body {
 	color: var(--foreground);
 	background: var(--shell);
 }
+.eyebrow {
+	color: var(--foreground-muted);
+	font: 700 14px/1 var(--font-mono);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
 
 button,
 textarea,
-input,
-select {
+input {
 	font: inherit;
 }
 
 button {
 	color: inherit;
 }
-
 button:focus-visible,
 textarea:focus-visible,
 input:focus-visible,
-select:focus-visible,
 summary:focus-visible,
 [tabindex]:focus-visible {
-	outline: 2px solid var(--accent);
-	outline-offset: 2px;
+	outline: 2px solid var(--focus-inner);
+	box-shadow: 0 0 0 4px var(--focus-outer);
 }
 
 button:disabled,
 input:disabled,
-textarea:disabled,
-select:disabled {
+textarea:disabled {
 	cursor: default;
-	opacity: 0.38;
+	color: var(--foreground-disabled);
+	border-color: var(--line-soft);
+	box-shadow: none;
 }
-
 ::selection {
-	color: var(--foreground-strong);
-	background: color-mix(in oklab, var(--accent) 32%, transparent);
+	color: var(--selection-foreground);
+	background: var(--selection-surface);
 }
 
 * {
-	scrollbar-color: var(--line) transparent;
+	scrollbar-color: var(--line) var(--shell);
 	scrollbar-width: thin;
 }
 
@@ -158,7 +100,6 @@ select:disabled {
 		transform: rotate(360deg);
 	}
 }
-
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,
@@ -168,13 +109,26 @@ select:disabled {
 		transition-duration: 0.001ms !important;
 	}
 }
+:root[data-reduce-motion="true"] *,
+:root[data-reduce-motion="true"] *::before,
+:root[data-reduce-motion="true"] *::after {
+	scroll-behavior: auto !important;
+	animation-duration: 0.001ms !important;
+	transition-duration: 0.001ms !important;
+}
 
 @media (forced-colors: active) {
 	button:focus-visible,
 	textarea:focus-visible,
 	input:focus-visible,
-	select:focus-visible,
-	summary:focus-visible {
-		outline: 2px solid CanvasText;
+	summary:focus-visible,
+	[tabindex]:focus-visible {
+		outline: 2px solid Highlight;
+		box-shadow: none;
+	}
+
+	::selection {
+		color: HighlightText;
+		background: Highlight;
 	}
 }

@@ -17,6 +17,17 @@ function safeHref(value: string): string | null {
 	if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
 	return null;
 }
+const MAGIC_KEYWORD_REGEX = /\b(ultrathink|orchestrate|workflowz)\b/g;
+
+export function highlightMagicKeywords(text: string): string {
+	if (!text.includes("ultrathink") && !text.includes("orchestrate") && !text.includes("workflowz")) {
+		return text;
+	}
+	return text.replace(
+		MAGIC_KEYWORD_REGEX,
+		match => `<span class="magic-keyword magic-keyword-${match}">${match}</span>`,
+	);
+}
 
 const markdown = new Marked({
 	gfm: true,
@@ -24,6 +35,33 @@ const markdown = new Marked({
 	renderer: {
 		html({ text }) {
 			return escapeHtml(text);
+		},
+		code({ text, lang }) {
+			if (lang === "diff") {
+				const lines = text.split("\n");
+				const formattedLines = lines.map(line => {
+					let kind = "context";
+					if (line.startsWith("@@")) kind = "hunk";
+					else if (line.startsWith("+") && !line.startsWith("+++")) kind = "added";
+					else if (line.startsWith("-") && !line.startsWith("---")) kind = "removed";
+					else if (
+						line.startsWith("diff ") ||
+						line.startsWith("index ") ||
+						line.startsWith("---") ||
+						line.startsWith("+++")
+					) {
+						kind = "meta";
+					}
+					return `<span class="diff-line line-${kind}">${escapeHtml(line || " ")}</span>`;
+				});
+				return `<pre class="diff-code"><code>${formattedLines.join("\n")}</code></pre>`;
+			}
+			const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+			return `<pre><code${langClass}>${escapeHtml(text)}</code></pre>`;
+		},
+		text(token) {
+			const raw = typeof token === "string" ? token : token.text;
+			return highlightMagicKeywords(raw);
 		},
 		link({ href, title, tokens }) {
 			const inner = this.parser.parseInline(tokens);

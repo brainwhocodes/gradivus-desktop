@@ -1,0 +1,341 @@
+// Browser selection queue: docked host-owned task progress and retained output.
+
+.browser-pane {
+	container-name: browser-pane;
+	container-type: inline-size;
+}
+
+.browser-pane-content {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	min-width: 0;
+	min-height: 0;
+}
+
+.selection-queue-pane {
+	display: grid;
+	grid-template-rows: auto minmax(0, 1fr);
+	width: clamp(280px, 24vw, 360px);
+	min-width: 0;
+	min-height: 0;
+	border-left: 1px solid var(--line);
+	color: var(--foreground);
+	background: var(--shell);
+}
+
+.selection-queue-header {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-2);
+	border-bottom: 1px solid var(--line);
+	background: var(--shell-raised);
+}
+
+.selection-queue-heading,
+.selection-queue-controls,
+.selection-queue-row-header,
+.selection-queue-agent {
+	display: flex;
+	align-items: center;
+}
+
+.selection-queue-heading {
+	justify-content: space-between;
+	gap: var(--space-2);
+}
+
+.selection-queue-heading h2 {
+	margin: 0;
+	font-size: 14px;
+	line-height: 1.25;
+	font-weight: 700;
+}
+
+.selection-queue-count {
+	font-size: 14px;
+	line-height: 1;
+	color: var(--foreground-muted);
+}
+
+.selection-queue-controls {
+	gap: var(--space-1);
+}
+
+.selection-queue-action,
+.selection-queue-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 28px;
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	background: transparent;
+	color: var(--foreground);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	transition:
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard),
+		color 140ms var(--ease-standard);
+}
+
+.selection-queue-action {
+	padding-inline: var(--space-2);
+}
+
+.selection-queue-action.is-primary {
+	border-color: var(--accent-boundary);
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.selection-queue-close {
+	width: 28px;
+	margin-left: auto;
+	font-size: 16px;
+}
+
+.selection-queue-action:hover:not(:disabled),
+.selection-queue-close:hover:not(:disabled) {
+	border-color: var(--line);
+	background: var(--shell-hover);
+	color: var(--foreground-strong);
+}
+
+.selection-queue-action.is-primary:hover:not(:disabled) {
+	border-color: var(--accent-boundary);
+	background: var(--accent-hover);
+	color: var(--accent-foreground);
+}
+
+.selection-queue-action:disabled {
+	background: transparent;
+}
+
+.selection-queue-list {
+	min-height: 0;
+	overflow: auto;
+}
+
+.selection-queue-empty {
+	max-width: 30ch;
+	margin: 0;
+	padding: var(--space-3);
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.selection-queue-row {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-3);
+	border-bottom: 1px solid var(--line-soft);
+	background: var(--shell);
+}
+
+.selection-queue-row-header {
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+.selection-queue-index {
+	flex: 0 0 auto;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	font-variant-numeric: tabular-nums;
+}
+
+.selection-queue-agent {
+	gap: var(--space-1);
+	min-width: 0;
+	font-size: 14px;
+	font-weight: 700;
+}
+
+.selection-queue-agent > span:last-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.selection-queue-swatch,
+.browser-agent-swatch {
+	flex: 0 0 auto;
+	width: 8px;
+	height: 8px;
+	border: 1px solid var(--focus-inner);
+	border-radius: 50%;
+	background: var(--queue-agent-swatch, var(--foreground-muted));
+	box-shadow: 0 0 0 1px var(--focus-outer);
+}
+
+.selection-queue-status {
+	flex: 0 0 auto;
+	margin-left: auto;
+	padding: 3px var(--space-1);
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1;
+}
+
+.selection-queue-row[data-status="running"] .selection-queue-status {
+	border-color: var(--accent-boundary);
+	color: var(--foreground-strong);
+	background: var(--accent-surface);
+}
+
+.selection-queue-row[data-status="completed"] .selection-queue-status {
+	border-color: var(--success-boundary);
+	color: var(--foreground-strong);
+	background: var(--success-surface);
+}
+
+.selection-queue-row[data-status="error"] .selection-queue-status {
+	border-color: var(--danger-boundary);
+	color: var(--foreground-strong);
+	background: var(--danger-surface);
+}
+
+.selection-queue-selector {
+	display: block;
+	overflow: hidden;
+	color: var(--foreground-muted);
+	font: 14px/1.4 var(--font-mono);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.selection-queue-instruction,
+.selection-queue-error,
+.selection-queue-response p {
+	margin: 0;
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+
+.selection-queue-instruction {
+	color: var(--foreground);
+	font-size: 14px;
+	line-height: 1.45;
+}
+
+.selection-queue-metadata {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	margin: 0;
+}
+
+.selection-queue-metadata div {
+	display: flex;
+	gap: var(--space-1);
+}
+
+.selection-queue-metadata dt,
+.selection-queue-response > span {
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1.3;
+}
+
+.selection-queue-metadata dd {
+	margin: 0;
+	color: var(--foreground-strong);
+	font-size: 14px;
+	line-height: 1.3;
+}
+
+.selection-queue-response,
+.selection-queue-error {
+	padding: var(--space-2);
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	background: var(--shell-raised);
+}
+
+.selection-queue-response p,
+.selection-queue-error {
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.selection-queue-error {
+	border-color: var(--danger-boundary);
+	color: var(--foreground-strong);
+	background: var(--danger-surface);
+}
+
+.browser-agent-picker {
+	display: flex;
+	align-items: center;
+	gap: var(--space-1);
+	flex: 0 1 172px;
+	min-width: 116px;
+}
+
+.browser-agent-picker .custom-dropdown {
+	min-width: 0;
+	width: 100%;
+}
+
+.browser-toolbar .browser-agent-picker .custom-dropdown-trigger {
+	justify-content: flex-start;
+	width: 100%;
+	height: 28px;
+	min-height: 28px;
+	padding-inline: var(--space-2);
+}
+
+.browser-agent-picker .custom-dropdown-trigger-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.browser-agent-picker .custom-dropdown-chevron {
+	margin-left: auto;
+}
+
+.browser-toolbar .queue-count-button {
+	width: auto;
+	min-width: 28px;
+	padding-inline: var(--space-2);
+	gap: var(--space-1);
+	font-size: 14px;
+	font-variant-numeric: tabular-nums;
+}
+
+.browser-toolbar .queue-count-button.is-active {
+	border-color: var(--accent-boundary);
+	background: var(--selection-surface);
+	color: var(--selection-foreground);
+}
+
+@container browser-pane (max-width: 760px) {
+	.browser-pane-content {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: minmax(0, 1fr) auto;
+	}
+
+	.selection-queue-pane {
+		width: 100%;
+		height: clamp(220px, 36vh, 320px);
+		border-top: 1px solid var(--line);
+		border-left: 0;
+	}
+}
+
+@media (forced-colors: active) {
+	.selection-queue-swatch,
+	.browser-agent-swatch,
+	.selection-queue-status,
+	.selection-queue-error,
+	.selection-queue-action.is-primary,
+	.browser-toolbar .queue-count-button.is-active {
+		border-color: Highlight;
+	}
+}

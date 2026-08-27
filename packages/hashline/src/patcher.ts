@@ -39,6 +39,12 @@ import {
 	writeDriftWarning,
 } from "./messages";
 import { MismatchError } from "./mismatch";
+import {
+	globalMutationCoordinator,
+	type MutationCoordinator,
+	type MutationLease,
+	type MutationScope,
+} from "./mutation-coordinator";
 import { detectLineEnding, type LineEnding, normalizeToLF, restoreLineEndings, stripBom } from "./normalize";
 import { InvalidAbsoluteRangeError } from "./parser";
 import { Recovery, type RecoveryResult } from "./recovery";
@@ -88,6 +94,29 @@ export interface PatcherOptions {
 	 * on a fork and publishes it back only after writes land.
 	 */
 	clipboard?: Clipboard;
+	/** Process-local coordinator shared by patchers unless overridden for tests/hosts. */
+	mutationCoordinator?: MutationCoordinator;
+}
+
+export interface NoWriteConflictDetails {
+	path: string;
+	reason: "changed" | "created" | "deleted";
+}
+
+/** A stale prepared section rejected before any filesystem or snapshot write. */
+export class NoWriteConflictError extends Error {
+	readonly path: string;
+	readonly reason: NoWriteConflictDetails["reason"];
+
+	constructor(details: NoWriteConflictDetails) {
+		super(
+			`Hashline edit rejected for ${details.path}: the file ${details.reason} after preparation. ` +
+				"Re-read the file and prepare the edit again; no changes were written.",
+		);
+		this.name = "NoWriteConflictError";
+		this.path = details.path;
+		this.reason = details.reason;
+	}
 }
 
 /** Per-section result returned by {@link Patcher.apply} / {@link Patcher.commit}. */
@@ -135,8 +164,10 @@ export interface PatcherApplyResult {
 
 /**
  * Opaque token returned by {@link Patcher.prepare}. Carries the section, the
- * raw file content read off disk, and the in-memory apply result.
- * {@link Patcher.commit} just writes the {@link PreparedSection.applyResult}.
+ * raw file content read off disk, destination identity for moves, and the
+ * in-memory apply result. {@link Patcher.commit} revalidates those identities
+ * under the mutation lease before writing; it does not blindly write the
+ * prepared bytes.
  */
 export class PreparedSection {
 	/** @internal */
@@ -151,6 +182,10 @@ export class PreparedSection {
 		readonly applyResult: ApplyResult,
 		readonly parseWarnings: readonly string[],
 		readonly fileOp: FileOp | undefined,
+		/** Destination identity captured during preparation for move operations. */
+		readonly destinationCanonicalPath?: string,
+		readonly destinationExists?: boolean,
+		readonly destinationRawContent?: string,
 	) {}
 
 	/** Convenience: returns true when the apply produced no change and no file op. */
@@ -198,13 +233,21 @@ function hasUtf8Bom(bytes: Uint8Array | undefined): boolean {
 function assertUniqueCanonicalPaths(prepared: readonly PreparedSection[]): void {
 	const seen = new Map<string, string>();
 	for (const entry of prepared) {
-		const previous = seen.get(entry.canonicalPath);
-		if (previous !== undefined) {
-			throw new Error(
-				`Multiple hashline sections resolve to the same file (${previous} and ${entry.section.path}). Merge their ops under one header before applying.`,
-			);
+		const paths = [
+			{ canonicalPath: entry.canonicalPath, label: entry.section.path },
+			...(entry.destinationCanonicalPath
+				? [{ canonicalPath: entry.destinationCanonicalPath, label: `${entry.section.path} destination` }]
+				: []),
+		];
+		for (const { canonicalPath, label } of paths) {
+			const previous = seen.get(canonicalPath);
+			if (previous !== undefined) {
+				throw new Error(
+					`Multiple hashline mutations resolve to the same file (${previous} and ${label}). Merge their ops under one header before applying.`,
+				);
+			}
+			seen.set(canonicalPath, label);
 		}
-		seen.set(entry.canonicalPath, entry.section.path);
 	}
 }
 
@@ -221,6 +264,7 @@ export class Patcher {
 	readonly blockResolver: BlockResolver | undefined;
 	readonly clipboard: Clipboard | undefined;
 	readonly #enforceSeenLines: boolean;
+	readonly #mutationCoordinator: MutationCoordinator;
 
 	constructor(options: PatcherOptions) {
 		if (!options.snapshots) {
@@ -232,6 +276,7 @@ export class Patcher {
 		this.blockResolver = options.blockResolver;
 		this.clipboard = options.clipboard;
 		this.#enforceSeenLines = options.enforceSeenLines ?? true;
+		this.#mutationCoordinator = options.mutationCoordinator ?? globalMutationCoordinator;
 	}
 
 	/**
@@ -240,63 +285,74 @@ export class Patcher {
 	 * multi-section batch is naturally all-or-nothing. Returns one
 	 * {@link PatchSectionResult} per section in the original patch order.
 	 */
-	async apply(patch: Patch): Promise<PatcherApplyResult> {
-		// One register per batch: `CUT` in one section feeds `PASTE` in a later
-		// one, so content can move across files. A host-owned register
-		// (see PatcherOptions.clipboard) additionally persists across batches:
-		// work on a fork and publish it per landed section, so a failed batch
-		// never poisons the persistent register and a mid-batch failure still
-		// preserves content already cut from disk.
-		const clipboard = startClipboardBatch(this.clipboard);
-
-		// Single-section fast path.
-		if (patch.sections.length === 1) {
-			const prepared = await this.prepare(patch.sections[0], clipboard);
-			const result = await this.commit(prepared);
-			if (this.clipboard !== undefined) commitClipboard(clipboard, this.clipboard);
-			return { sections: [result] };
-		}
-
-		// Prepare every section first so any failure (stale hash, missing
-		// file, parse error, in-memory no-op) surfaces before any write.
-		const prepared: PreparedSection[] = [];
-		// Register state after each section's prepare. Commits are non-atomic:
-		// when a later write fails, the sections before it are already on disk,
-		// so the host register must reflect exactly the landed prefix — content
-		// a landed CUT deleted would otherwise be lost.
-		const sectionStates: Clipboard[] = [];
-		for (const section of patch.sections) {
-			prepared.push(await this.prepare(section, clipboard));
-			sectionStates.push(forkClipboard(clipboard));
-		}
-		assertUniqueCanonicalPaths(prepared);
-		for (const entry of prepared) {
-			if (entry.isNoop) {
-				throw new Error(`Edits to ${entry.section.path} resulted in no changes being made.`);
-			}
-		}
-
-		const results: PatchSectionResult[] = [];
-		for (let index = 0; index < prepared.length; index++) {
+	async #scopesForSections(sections: readonly PatchSection[]): Promise<MutationScope[]> {
+		const scopes: MutationScope[] = [];
+		for (const section of sections) {
+			const canonicalPath = this.fs.canonicalPath(section.path);
+			scopes.push({ kind: "exact", path: canonicalPath });
+			let fileOp: FileOp | undefined;
 			try {
-				results.push(await this.commit(prepared[index]));
-			} catch (error) {
-				// A mid-batch write failure leaves earlier sections on disk with no
-				// rollback; report exactly which sections landed so the caller can
-				// re-issue only the missing ones instead of double-applying.
-				const written = prepared.slice(0, index).map(entry => entry.section.path);
-				const notWritten = prepared.slice(index + 1).map(entry => entry.section.path);
-				const message = error instanceof Error ? error.message : String(error);
-				throw new Error(
-					`Failed to write ${prepared[index].section.path}: ${message}` +
-						(written.length > 0 ? ` Sections already written: ${written.join(", ")}.` : "") +
-						(notWritten.length > 0 ? ` Sections not written: ${notWritten.join(", ")}.` : ""),
-					{ cause: error },
-				);
+				fileOp = section.fileOp;
+			} catch {
+				// Preserve the richer parser diagnostics from prepare().
 			}
-			if (this.clipboard !== undefined) commitClipboard(sectionStates[index], this.clipboard);
+			if (fileOp?.kind === "move") scopes.push({ kind: "exact", path: this.fs.canonicalPath(fileOp.dest) });
+			if (section.fileHash !== undefined && !(await this.fs.exists(section.path))) {
+				const basename = path.basename(section.path);
+				for (const snapshot of this.snapshots.findByHash(section.fileHash)) {
+					if (path.basename(snapshot.path) === basename) {
+						scopes.push({ kind: "exact", path: this.fs.canonicalPath(snapshot.path) });
+					}
+				}
+			}
 		}
-		return { sections: results };
+		return scopes;
+	}
+
+	async apply(patch: Patch): Promise<PatcherApplyResult> {
+		if (patch.sections.length === 0) return { sections: [] };
+		const clipboard = startClipboardBatch(this.clipboard);
+		const lease = await this.#mutationCoordinator.acquire(await this.#scopesForSections(patch.sections));
+		try {
+			// Prepare every section while the lease is held, then commit under the
+			// same lease. This closes the prepare-to-write window for cooperating
+			// patchers and keeps cross-file CUT/PASTE batches coherent.
+			const prepared: PreparedSection[] = [];
+			const sectionStates: Clipboard[] = [];
+			for (const section of patch.sections) {
+				prepared.push(await this.prepare(section, clipboard));
+				sectionStates.push(forkClipboard(clipboard));
+			}
+			assertUniqueCanonicalPaths(prepared);
+			for (const entry of prepared) {
+				if (entry.isNoop && patch.sections.length > 1) {
+					throw new Error(`Edits to ${entry.section.path} resulted in no changes being made.`);
+				}
+			}
+
+			const results: PatchSectionResult[] = [];
+			for (let index = 0; index < prepared.length; index++) {
+				try {
+					results.push(await this.#commitWithLease(prepared[index], lease));
+				} catch (error) {
+					if (error instanceof NoWriteConflictError) throw error;
+					const written = prepared.slice(0, index).map(entry => entry.section.path);
+					const notWritten = prepared.slice(index + 1).map(entry => entry.section.path);
+					const message = error instanceof Error ? error.message : String(error);
+					throw new Error(
+						`Failed to write ${prepared[index].section.path}: ${message}` +
+							(written.length > 0 ? ` Sections already written: ${written.join(", ")}.` : "") +
+							(notWritten.length > 0 ? ` Sections not written: ${notWritten.join(", ")}.` : ""),
+						{ cause: error },
+					);
+				}
+				if (this.clipboard !== undefined) commitClipboard(sectionStates[index], this.clipboard);
+			}
+			if (this.clipboard !== undefined && prepared.length === 1) commitClipboard(clipboard, this.clipboard);
+			return { sections: results };
+		} finally {
+			lease.release();
+		}
 	}
 
 	/**
@@ -385,8 +441,17 @@ export class Patcher {
 			throw new Error(`File not found: ${target.path}. Use the write tool to create new files.`);
 		}
 
-		if (fileOp?.kind === "move" && this.fs.canonicalPath(fileOp.dest) === canonicalPath) {
-			throw new Error(`MV destination is the same as ${target.path}.`);
+		let destinationCanonicalPath: string | undefined;
+		let destinationExists: boolean | undefined;
+		let destinationRawContent: string | undefined;
+		if (fileOp?.kind === "move") {
+			destinationCanonicalPath = this.fs.canonicalPath(fileOp.dest);
+			if (destinationCanonicalPath === canonicalPath) {
+				throw new Error(`MV destination is the same as ${target.path}.`);
+			}
+			const destination = await this.#tryRead(fileOp.dest);
+			destinationExists = destination.exists;
+			destinationRawContent = destination.rawContent;
 		}
 
 		const { bom: bomFromText, text } = stripBom(read.rawContent);
@@ -425,6 +490,9 @@ export class Patcher {
 			applyResult,
 			parseWarnings,
 			fileOp,
+			destinationCanonicalPath,
+			destinationExists,
+			destinationRawContent,
 		);
 	}
 
@@ -462,11 +530,26 @@ export class Patcher {
 
 	/**
 	 * Commit a previously {@link prepare}d section to the filesystem.
-	 * Restores line endings and BOM, writes via the {@link Filesystem}, and
-	 * records a fresh snapshot in the {@link SnapshotStore} keyed by the
+	 * Revalidates the prepared source and, for moves, destination identities
+	 * while holding the supplied or process-local mutation lease. On drift it
+	 * throws a typed no-write conflict before changing the filesystem or
+	 * snapshot store. Otherwise it restores line endings and BOM, writes via
+	 * the {@link Filesystem}, and records a fresh snapshot keyed by the
 	 * filesystem-canonical path.
 	 */
-	async commit(prepared: PreparedSection): Promise<PatchSectionResult> {
+	async commit(prepared: PreparedSection, lease?: MutationLease): Promise<PatchSectionResult> {
+		if (lease !== undefined) return this.#commitWithLease(prepared, lease);
+		const ownedLease = await this.#mutationCoordinator.acquire(this.#scopesForPrepared(prepared));
+		try {
+			return await this.#commitWithLease(prepared, ownedLease);
+		} finally {
+			ownedLease.release();
+		}
+	}
+
+	async #commitWithLease(prepared: PreparedSection, lease: MutationLease): Promise<PatchSectionResult> {
+		lease.assertCovers(this.#scopesForPrepared(prepared));
+		await this.#revalidatePrepared(prepared);
 		const { section, normalized, bom, lineEnding, parseWarnings, exists, applyResult, canonicalPath, fileOp } =
 			prepared;
 		const after = applyResult.text;
@@ -508,11 +591,10 @@ export class Patcher {
 		}
 
 		const persisted = bom + restoreLineEndings(after, lineEnding);
-
 		if (moveDest !== undefined) {
 			const destCanonical = this.fs.canonicalPath(moveDest);
-			this.snapshots.relocate(canonicalPath, destCanonical);
 			await this.fs.move(section.path, moveDest, persisted);
+			this.snapshots.relocate(canonicalPath, destCanonical);
 			const fileHash = this.#recordFullSnapshot(destCanonical, after);
 			return {
 				path: resultPath,
@@ -572,6 +654,38 @@ export class Patcher {
 			blockResolutions: applyResult.blockResolutions,
 			warnings: allWarnings,
 		};
+	}
+	#scopesForPrepared(prepared: PreparedSection): MutationScope[] {
+		const scopes: MutationScope[] = [{ kind: "exact", path: prepared.canonicalPath }];
+		if (prepared.destinationCanonicalPath !== undefined) {
+			scopes.push({ kind: "exact", path: prepared.destinationCanonicalPath });
+		}
+		return scopes;
+	}
+
+	async #revalidatePrepared(prepared: PreparedSection): Promise<void> {
+		const current = await this.#tryRead(prepared.section.path);
+		if (current.exists !== prepared.exists) {
+			throw new NoWriteConflictError({
+				path: prepared.section.path,
+				reason: current.exists ? "created" : "deleted",
+			});
+		}
+		if (current.exists && current.rawContent !== prepared.rawContent) {
+			throw new NoWriteConflictError({ path: prepared.section.path, reason: "changed" });
+		}
+
+		if (prepared.destinationCanonicalPath === undefined || prepared.fileOp?.kind !== "move") return;
+		const destination = await this.#tryRead(prepared.fileOp.dest);
+		if (destination.exists !== prepared.destinationExists) {
+			throw new NoWriteConflictError({
+				path: prepared.fileOp.dest,
+				reason: destination.exists ? "created" : "deleted",
+			});
+		}
+		if (destination.exists && destination.rawContent !== prepared.destinationRawContent) {
+			throw new NoWriteConflictError({ path: prepared.fileOp.dest, reason: "changed" });
+		}
 	}
 
 	async #readBinaryBom(path: string): Promise<string> {

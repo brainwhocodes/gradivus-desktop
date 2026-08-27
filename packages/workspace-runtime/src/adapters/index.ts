@@ -7,7 +7,6 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { WorkspaceClient } from "../client";
 import type { WorkspaceSupervisor } from "../supervisor";
-import { WorkspaceTerminalSession } from "../terminal";
 import type { WorkspaceCapabilityGrantV1 } from "../types";
 
 function isWritableStream(obj: unknown): obj is { write: (d: string | Uint8Array) => void } {
@@ -457,13 +456,10 @@ export class RawTerminalAgentAdapter implements AgentSessionAdapter {
 	readonly sessionId: string;
 	readonly terminalId: string;
 	readonly protocol = "terminal" as const;
-	readonly #profile: WorkspaceAgentProfileV1;
 	readonly #client: WorkspaceClient;
-	readonly #supervisor?: WorkspaceSupervisor;
 	readonly #onData?: (data: string) => void;
 	readonly #onStatusChange?: (sessionId: string, status: WorkspaceSessionV1["status"]) => void;
 
-	#terminalSession?: WorkspaceTerminalSession;
 	#status: WorkspaceSessionV1["status"] = "opening";
 	#capabilities: WorkspaceCapabilityGrantV1[] = [];
 	#unsubscribe?: () => void;
@@ -472,9 +468,7 @@ export class RawTerminalAgentAdapter implements AgentSessionAdapter {
 	constructor(options: AgentSessionAdapterOptions) {
 		this.sessionId = options.sessionId;
 		this.terminalId = options.terminalId ?? `term-${options.sessionId}`;
-		this.#profile = options.profile;
 		this.#client = options.client;
-		this.#supervisor = options.supervisor;
 		this.#onData = options.onData;
 		this.#onStatusChange = options.onStatusChange;
 
@@ -499,35 +493,16 @@ export class RawTerminalAgentAdapter implements AgentSessionAdapter {
 	async start(): Promise<void> {
 		if (this.#isClosed) throw new Error("Terminal adapter is closed");
 
-		// If configured with an executable or PTY, instantiate the terminal session
-		if (this.#profile.exec || this.#profile.args) {
-			const session = new WorkspaceTerminalSession({
-				id: this.terminalId,
-				shell: this.#profile.exec,
-				args: this.#profile.args,
-				cwd: this.#profile.cwd,
-				supervisor: this.#supervisor,
-				onData: (_id, chunk) => {
-					this.#onData?.(chunk.data);
-				},
-				onExit: () => {
-					void this.stop();
-				},
-			});
-			this.#terminalSession = session;
-			await session.start();
-		}
-
-		// Subscribe to real runtime event stream for terminal updates
+		// The runtime owns terminal creation and PTY lifecycle. This adapter only
+		// subscribes to the projected stream and submits input commands.
 		this.#unsubscribe = this.#client.onEvent(event => {
 			if (event.type === "terminal.changed") {
-				const p = event.payload as Record<string, unknown>;
-				if (p.id === this.terminalId && typeof p.data === "string") {
-					this.#onData?.(p.data);
+				const payload = event.payload as Record<string, unknown>;
+				if (payload.id === this.terminalId && typeof payload.data === "string") {
+					this.#onData?.(payload.data);
 				}
 			}
 		});
-
 		this.#status = "active";
 		this.#onStatusChange?.(this.sessionId, "active");
 	}
@@ -535,10 +510,6 @@ export class RawTerminalAgentAdapter implements AgentSessionAdapter {
 	async sendMessage(message: string): Promise<void> {
 		if (this.#status !== "active" || this.#isClosed) {
 			throw new Error("Terminal adapter is not active");
-		}
-
-		if (this.#terminalSession) {
-			this.#terminalSession.write(message);
 		}
 
 		const doc = this.#client.document;
@@ -563,11 +534,6 @@ export class RawTerminalAgentAdapter implements AgentSessionAdapter {
 	async stop(): Promise<void> {
 		if (this.#isClosed) return;
 		this.#isClosed = true;
-
-		if (this.#terminalSession) {
-			await this.#terminalSession.close();
-			this.#terminalSession = undefined;
-		}
 
 		if (this.#unsubscribe) {
 			this.#unsubscribe();

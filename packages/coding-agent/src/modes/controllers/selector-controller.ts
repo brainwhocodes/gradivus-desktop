@@ -607,7 +607,7 @@ export class SelectorController {
 				this.ctx.ui.resetDisplay();
 				break;
 			case "omitThinking":
-				this.ctx.session.agent.hideThinkingSummary = value as boolean;
+				this.ctx.session.setOmitThinking(value as boolean);
 				break;
 			case "display.cacheMissMarker":
 				// Rebuild re-runs the usage-based detection under the new setting so
@@ -674,33 +674,33 @@ export class SelectorController {
 				break;
 			}
 			case "temperature": {
-				const temp = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.temperature = temp >= 0 ? temp : undefined;
+				const temperature = typeof value === "number" ? value : Number(value);
+				this.ctx.session.setSamplingParameters({ temperature });
 				break;
 			}
 			case "topP": {
 				const topP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.topP = topP >= 0 ? topP : undefined;
+				this.ctx.session.setSamplingParameters({ topP });
 				break;
 			}
 			case "topK": {
 				const topK = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.topK = topK >= 0 ? topK : undefined;
+				this.ctx.session.setSamplingParameters({ topK });
 				break;
 			}
 			case "minP": {
 				const minP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.minP = minP >= 0 ? minP : undefined;
+				this.ctx.session.setSamplingParameters({ minP });
 				break;
 			}
 			case "presencePenalty": {
 				const presencePenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.presencePenalty = presencePenalty >= 0 ? presencePenalty : undefined;
+				this.ctx.session.setSamplingParameters({ presencePenalty });
 				break;
 			}
 			case "repetitionPenalty": {
 				const repetitionPenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.agent.repetitionPenalty = repetitionPenalty >= 0 ? repetitionPenalty : undefined;
+				this.ctx.session.setSamplingParameters({ repetitionPenalty });
 				break;
 			}
 			case "git.enabled":

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { getTabsMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { connectOverCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { chromiumAvailable } from "./chromium-probe";
@@ -40,6 +40,50 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 			expect(result.content).toEqual([{ type: "text", text: "42" }]);
 		} finally {
 			await tool.execute("close", { action: "close", name, kill: true });
+		}
+	}, 30_000);
+	it("returns a same-tab nested browser error through the worker bridge without hanging", async () => {
+		let browserTool!: BrowserTool;
+		const session = {
+			...makeSession(),
+			getToolByName: (name: string) => (name === "browser" ? browserTool : undefined),
+		} as ToolSession;
+		browserTool = new BrowserTool(session);
+		const name = `worker-recursion-${process.pid}`;
+
+		try {
+			await browserTool.execute("open", {
+				action: "open",
+				name,
+				url: "data:text/html,<h1>ready</h1>",
+			});
+
+			const result = await browserTool.execute("run", {
+				action: "run",
+				name,
+				timeout: 1,
+				code: `
+					try {
+						await tool.browser({
+							action: "run",
+							name: ${JSON.stringify(name)},
+							code: "return 42;",
+						});
+						return "nested call unexpectedly succeeded";
+					} catch (error) {
+						return error instanceof Error ? error.message : String(error);
+					}
+				`,
+			});
+
+			expect(result.content).toEqual([
+				{
+					type: "text",
+					text: `Browser deadlock prevented: browser "run" on active tab ${JSON.stringify(name)} cannot be queued from inside its run. Target another tab or return first.`,
+				},
+			]);
+		} finally {
+			await browserTool.execute("close", { action: "close", name, kill: true });
 		}
 	}, 30_000);
 
@@ -273,7 +317,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				name,
 				url: "data:text/html,<h1>ready</h1>",
 			});
-			const tabSession = getTabsMapForTest().get(name);
+			const tabSession = getTab(name);
 			if (tabSession?.backend !== "worker") throw new Error("Worker tab was not created");
 			expect(tabSession.worker.mode).toBe("worker");
 			const result = await tool.execute("run", {
@@ -562,7 +606,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 
 		try {
 			await tool.execute("open", { action: "open", name, url });
-			const tabSession = getTabsMapForTest().get(name);
+			const tabSession = getTab(name);
 			if (tabSession?.backend !== "worker") throw new Error("Worker tab was not created");
 			const browser = await connectOverCdp(tabSession.browser.cdpEndpoint);
 			const context = browser.contexts()[0];

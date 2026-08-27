@@ -1,0 +1,341 @@
+// WorkspaceShell template: window chrome, tab strip, and stage skeleton.
+
+.workspace-app {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	grid-template-rows: 36px 44px minmax(0, 1fr);
+	width: 100vw;
+	height: 100vh;
+	min-width: 0;
+	min-height: 0;
+	background: var(--shell);
+	color: var(--foreground);
+	overflow: hidden;
+}
+
+// ---------------------------------------------------------------------------
+// Shell Titlebar (Window Drag & Window Controls)
+// ---------------------------------------------------------------------------
+
+.shell-titlebar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	height: 36px;
+	min-height: 36px;
+	border-bottom: 1px solid var(--line);
+	background: var(--shell);
+	user-select: none;
+	padding: 0 0 0 12px;
+	-webkit-app-region: drag;
+}
+
+.window-drag {
+	-webkit-app-region: drag;
+}
+
+.shell-brand {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	min-width: 0;
+	-webkit-app-region: drag;
+
+	strong {
+		font-family: var(--font-display);
+		font-size: 12.5px;
+		font-weight: 700;
+		color: var(--foreground-strong);
+		letter-spacing: -0.01em;
+	}
+
+	span {
+		color: var(--foreground-muted);
+		font-size: 12px;
+		font-weight: 500;
+	}
+}
+
+.shell-actions {
+	display: flex;
+	align-items: stretch;
+	height: 100%;
+	-webkit-app-region: no-drag;
+}
+
+.application-settings-button {
+	align-self: center;
+	margin-right: 8px;
+	padding: 5px 9px;
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	background: transparent;
+	color: var(--foreground-muted);
+	font-family: var(--font-sans);
+	font-size: 14px;
+	font-weight: 680;
+	cursor: pointer;
+	transition:
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard),
+		color 140ms var(--ease-standard);
+
+	&:hover {
+		border-color: var(--line);
+		background: var(--shell-hover);
+		color: var(--foreground-strong);
+	}
+
+	&[aria-pressed="true"] {
+		border-color: var(--accent-boundary);
+		background: var(--selection-surface);
+		color: var(--selection-foreground);
+	}
+}
+
+.window-controls {
+	display: flex;
+	align-items: stretch;
+	height: 100%;
+	-webkit-app-region: no-drag;
+
+	button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 44px;
+		height: 100%;
+		border: 0;
+		border-left: 1px solid var(--line-soft);
+		background: transparent;
+		color: var(--foreground-muted);
+		cursor: pointer;
+		transition:
+			background-color 140ms var(--ease-standard),
+			color 140ms var(--ease-standard);
+
+		&:hover {
+			background: var(--shell-hover);
+			color: var(--foreground-strong);
+		}
+
+		&.close-window:hover {
+			background: var(--danger);
+			color: var(--danger-foreground);
+		}
+
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tab Strip (Workspace Tabs + New Browser Button)
+// ---------------------------------------------------------------------------
+
+.tab-strip {
+	display: flex;
+	align-items: flex-end;
+	gap: 6px;
+	padding: 0 10px 0;
+	border-bottom: 1px solid var(--line);
+	background: var(--shell-raised);
+	height: 44px;
+	min-height: 44px;
+	min-width: 0;
+	box-sizing: border-box;
+}
+
+.workspace-tabs {
+	display: flex;
+	align-items: flex-end;
+	gap: 4px;
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 100%;
+	overflow-x: auto;
+	scrollbar-width: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
+}
+
+.workspace-tab {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: 240px;
+	min-width: 120px;
+	height: 38px;
+	padding: 0 12px;
+	border: 1px solid transparent;
+	border-bottom: 0;
+	border-radius: 8px 8px 0 0;
+	background: transparent;
+	color: var(--foreground-muted);
+	font-family: var(--font-sans);
+	font-size: 12.5px;
+	font-weight: 600;
+	cursor: pointer;
+	user-select: none;
+	transition:
+		color 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard);
+
+	.tab-main-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1 1 auto;
+		min-width: 0;
+		height: 100%;
+		padding: 0;
+		margin: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.tab-title {
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	&:hover:not(.is-active) {
+		color: var(--foreground);
+		background: var(--shell-hover);
+	}
+
+	&.is-active {
+		color: var(--selection-foreground);
+		background: var(--selection-surface);
+		border-color: var(--accent-boundary);
+		font-weight: 680;
+
+		&::after {
+			position: absolute;
+			left: 0;
+			right: 0;
+			bottom: -1px;
+			height: 1px;
+			background: var(--selection-surface);
+			content: "";
+		}
+	}
+}
+
+.chat-tab-button {
+	min-width: 150px;
+}
+
+.chat-glyph {
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1;
+}
+
+.runtime-pill {
+	display: inline-flex;
+	align-items: center;
+	margin-left: auto;
+	padding: 2px 6px;
+	border-radius: 999px;
+	background: var(--shell-hover);
+	color: var(--foreground-muted);
+	font-family: var(--font-mono);
+	font-size: 12px;
+	font-weight: 750;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+.tab-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	margin-left: auto;
+	padding: 0;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	transition:
+		color 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard);
+
+	&:hover {
+		color: var(--danger-foreground);
+		background: var(--danger);
+	}
+}
+
+.new-browser {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 32px;
+	width: 32px;
+	height: 32px;
+	margin-bottom: 4px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	background: transparent;
+	color: var(--foreground-muted);
+	cursor: pointer;
+	transition:
+		color 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard);
+
+	&:hover:not(:disabled) {
+		color: var(--foreground-strong);
+		background: var(--shell-hover);
+		border-color: var(--line-soft);
+	}
+
+	&:disabled {
+		color: var(--foreground-disabled);
+		border-color: var(--line-soft);
+		cursor: default;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Stage Skeleton
+// ---------------------------------------------------------------------------
+
+.workspace-stage {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	background: var(--chat-canvas);
+}
+
+@media (max-width: 980px) {
+	.shell-brand span,
+	.runtime-pill {
+		display: none;
+	}
+
+	.workspace-tab {
+		min-width: 96px;
+	}
+
+	.chat-tab-button {
+		min-width: 120px;
+	}
+}

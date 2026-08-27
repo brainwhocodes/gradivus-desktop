@@ -41,6 +41,7 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcAgentHub } from "./rpc-agent-hub";
 import { getRpcFileDiff } from "./rpc-file-diff";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { getRpcOpenRouterModelRouting, setRpcOpenRouterProviderEnabled } from "./rpc-openrouter-routing";
@@ -60,6 +61,7 @@ import type {
 	RpcHostUriResult,
 	RpcOAuthAccounts,
 	RpcOAuthProvider,
+	RpcPromptResultFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -146,24 +148,31 @@ export async function tryRunRpcSkillCommand(
 	return { agentInvoked: true };
 }
 
-export function reportLocalOnlyPromptResult(input: {
+export function reportPromptResult(input: {
 	id: string | undefined;
 	prompt: Promise<boolean>;
 	output: (obj: object) => void;
-	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
 }): void {
 	void input.prompt
 		.then(async agentInvoked => {
-			if (agentInvoked) return;
 			await input.waitForExtensionAgentMessageTasks?.();
-			if (!input.hasExtensionAgentMessageTask?.()) {
-				input.output({ type: "prompt_result", id: input.id, agentInvoked: false });
-			}
+			const invoked = agentInvoked || Boolean(input.hasExtensionAgentMessageTask?.());
+			input.output({ type: "prompt_result", id: input.id, agentInvoked: invoked } satisfies RpcPromptResultFrame);
 		})
 		.catch(error => {
-			input.onError(error instanceof Error ? error : new Error(String(error)));
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			const code = "code" in normalized && typeof normalized.code === "string" ? normalized.code : undefined;
+			input.output({
+				type: "prompt_result",
+				id: input.id,
+				agentInvoked: false,
+				error: {
+					message: normalized.message,
+					...(code === undefined ? {} : { code }),
+				},
+			} satisfies RpcPromptResultFrame);
 		});
 }
 
@@ -226,8 +235,7 @@ export class RpcExtensionUserMessageTracker {
 		try {
 			prompt = startPrompt();
 		} catch (error) {
-			this.#activePromptScopes.delete(scope);
-			throw error;
+			prompt = Promise.reject(error);
 		}
 		return {
 			prompt: prompt.finally(() => {
@@ -239,19 +247,17 @@ export class RpcExtensionUserMessageTracker {
 	}
 }
 
-export function watchAndReportLocalOnlyPromptResult(input: {
+export function watchAndReportPromptResult(input: {
 	id: string | undefined;
 	startPrompt: () => Promise<boolean>;
 	output: (obj: object) => void;
-	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 }): void {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
-	reportLocalOnlyPromptResult({
+	reportPromptResult({
 		id: input.id,
 		prompt: trackedPrompt.prompt,
 		output: input.output,
-		onError: input.onError,
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
 	});
@@ -1057,6 +1063,12 @@ export async function runRpcMode(
 			// Custom editor components not supported in RPC mode
 		}
 	}
+	const agentHub = new RpcAgentHub({
+		output,
+		eventBus,
+		subagentRegistry,
+	});
+	await agentHub.initialize(session.sessionFile);
 
 	// A single shared UI context routes every response push to the correct
 	// waiting promise regardless of which code path created the request.
@@ -1115,7 +1127,8 @@ export async function runRpcMode(
 			case "prompt": {
 				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (skillResult) {
-					return success(id, "prompt", skillResult);
+					output({ type: "prompt_result", id, agentInvoked: true } satisfies RpcPromptResultFrame);
+					return success(id, "prompt");
 				}
 				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
 					session,
@@ -1129,27 +1142,31 @@ export async function runRpcMode(
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
 					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						output({
+							type: "config_update",
+							model: session.model,
+							thinkingLevel: session.thinkingLevel,
+							planMode: session.getPlanModeState(),
+						});
 					},
 				});
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {
-						watchAndReportLocalOnlyPromptResult({
+						watchAndReportPromptResult({
 							id,
 							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
 							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
 						});
 						return success(id, "prompt");
 					}
-					return success(id, "prompt", { agentInvoked: false });
+					output({ type: "prompt_result", id, agentInvoked: false } satisfies RpcPromptResultFrame);
+					return success(id, "prompt");
 				}
 
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				watchAndReportLocalOnlyPromptResult({
+				// Don't await - events will stream. The prompt_result push is the
+				// single settlement notification for both successful and failed prompts.
+				watchAndReportPromptResult({
 					id,
 					startPrompt: () =>
 						session.prompt(command.message, {
@@ -1157,7 +1174,6 @@ export async function runRpcMode(
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
 					extensionUserMessageTracker,
 				});
 				return success(id, "prompt");
@@ -1180,9 +1196,12 @@ export async function runRpcMode(
 
 			case "abort_and_prompt": {
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
+				watchAndReportPromptResult({
+					id,
+					startPrompt: () => session.prompt(command.message, { images: command.images }),
+					output,
+					extensionUserMessageTracker,
+				});
 				return success(id, "abort_and_prompt");
 			}
 
@@ -1227,6 +1246,7 @@ export async function runRpcMode(
 						examples: tool.examples,
 					})),
 					contextUsage: session.getContextUsage(),
+					planMode: session.getPlanModeState(),
 					runtime: {
 						pid: process.pid,
 						uptimeMs: process.uptime() * 1_000,
@@ -1252,6 +1272,28 @@ export async function runRpcMode(
 					enabled: session.isFastModeEnabled(),
 					active: session.isFastModeActive(),
 				});
+			}
+			case "set_plan_mode": {
+				if (command.enabled) {
+					const planFilePath = command.planFilePath ?? "local://PLAN.md";
+					const previousTools = session.getEnabledToolNames();
+					const planAugmentations: string[] = [];
+					if (session.hasBuiltInTool("write")) {
+						planAugmentations.push("write");
+					}
+					const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+					await session.setActiveToolsByName(uniquePlanTools);
+					session.setPlanModeState({
+						enabled: true,
+						planFilePath,
+						workflow: command.workflow ?? "parallel",
+					});
+					session.setPlanProposalHandler?.(title => session.preparePlanForReview(title));
+				} else {
+					session.setPlanModeState(undefined);
+				}
+				void emitAvailableCommandsUpdate();
+				return success(id, "set_plan_mode", { planMode: session.getPlanModeState() });
 			}
 
 			case "get_settings": {
@@ -1323,6 +1365,46 @@ export async function runRpcMode(
 					return success(id, "get_subagent_messages", transcript);
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "get_agent_hub": {
+				return success(id, "get_agent_hub", agentHub.getSnapshot());
+			}
+
+			case "get_agent_hub_messages": {
+				try {
+					return success(
+						id,
+						"get_agent_hub_messages",
+						await agentHub.getMessages(command.agentId, command.fromByte),
+					);
+				} catch (err) {
+					return error(id, "get_agent_hub_messages", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "agent_hub_message": {
+				try {
+					return success(id, "agent_hub_message", await agentHub.message(command.agentId, command.message));
+				} catch (err) {
+					return error(id, "agent_hub_message", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "agent_hub_kill": {
+				try {
+					return success(id, "agent_hub_kill", await agentHub.kill(command.agentId));
+				} catch (err) {
+					return error(id, "agent_hub_kill", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "agent_hub_revive": {
+				try {
+					return success(id, "agent_hub_revive", await agentHub.revive(command.agentId));
+				} catch (err) {
+					return error(id, "agent_hub_revive", err instanceof Error ? err.message : String(err));
 				}
 			}
 
@@ -1701,7 +1783,6 @@ export async function runRpcMode(
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
-	// process while a background-dispatched bash still owes the client its
 	// response. The coordinator drains tracked tasks before exiting and
 	// re-checks the request as each task settles.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
@@ -1738,6 +1819,7 @@ export async function runRpcMode(
 			pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 			hostToolBridge.close("RPC client disconnected before host tool execution completed");
 			hostUriBridge.clear("RPC client disconnected before host URI request completed");
+			agentHub.dispose();
 		},
 	});
 	await shutdownCoordinator.drain();

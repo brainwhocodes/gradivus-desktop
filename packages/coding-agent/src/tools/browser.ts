@@ -7,6 +7,7 @@ import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { truncateForPrompt } from "./approval";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
+import { resolveBrowserTabName } from "./browser/ownership";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -20,8 +21,10 @@ import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
 import {
 	type AcquireTabResult,
 	acquireTab,
+	type BrowserTabInventory,
 	dropHeadlessTabs,
 	getTab,
+	getTabsInventory,
 	releaseAllTabs,
 	releaseTab,
 	runInTab,
@@ -43,21 +46,19 @@ export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } fro
 export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
-const DEFAULT_TAB_NAME = "main";
-
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
 	"relay?": type("boolean").describe(
-		"drive the user's external Chrome tabs via the omp browser relay; not Branchlight panes",
+		"drive the user's external Chrome tabs via the omp browser relay; not Gradivus panes",
 	),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe("substring to pick a window"),
 });
 
 const browserSchema = type({
-	action: type("'open' | 'close' | 'run'").describe("operation"),
-	"name?": type("string").describe("tab id (default 'main')"),
+	action: type("'open' | 'close' | 'run' | 'list'").describe("operation"),
+	"name?": type("string").describe("explicit shared tab name (omitted uses the current agent's default tab)"),
 	"url?": type("string").describe("url to open"),
 	"app?": appSchema,
 	"viewport?": {
@@ -87,6 +88,7 @@ export interface BrowserToolDetails {
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	observation?: Observation;
 	screenshots?: ScreenshotResult[];
+	inventory?: readonly BrowserTabInventory[];
 	result?: string;
 	meta?: OutputMeta;
 }
@@ -118,7 +120,7 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 	if (inheritedCdpUrl) {
 		return { kind: "connected", cdpUrl: inheritedCdpUrl.replace(/\/+$/, "") };
 	}
-	if (process.env.BRANCHLIGHT_TERMINAL === "1") {
+	if (process.env.GRADIVUS_TERMINAL === "1") {
 		return { kind: "connected", cdpUrl: "http://127.0.0.1:9222" };
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
@@ -153,7 +155,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<BrowserParams>;
 		const lines = [`Action: ${typeof params.action === "string" ? params.action : "(missing)"}`];
-		const tabName = typeof params.name === "string" ? params.name : DEFAULT_TAB_NAME;
+		const tabName = resolveBrowserTabName(typeof params.name === "string" ? params.name : undefined, this.session);
 		lines.push(`Tab: ${truncateForPrompt(tabName)}`);
 		if (typeof params.url === "string" && params.url.length > 0) {
 			lines.push(`URL: ${truncateForPrompt(params.url)}`);
@@ -243,7 +245,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			throwIfAborted(signal);
 			const timeoutSeconds = clampTimeout("browser", params.timeout, this.session.settings.get("tools.maxTimeout"));
 			const timeoutMs = timeoutSeconds * 1000;
-			const name = params.name ?? DEFAULT_TAB_NAME;
+			const name = resolveBrowserTabName(params.name, this.session);
 			const details: BrowserToolDetails = { action: params.action, name };
 
 			switch (params.action) {
@@ -253,6 +255,8 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 					return await this.#close(name, params, details, timeoutMs, signal);
 				case "run":
 					return await this.#run(name, params, details, timeoutMs, signal);
+				case "list":
+					return await this.#list(details, signal);
 				default:
 					throw new ToolError(`Unsupported action: ${(params as BrowserParams).action}`);
 			}
@@ -263,6 +267,19 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			}
 			throw error;
 		}
+	}
+	async #list(details: BrowserToolDetails, signal?: AbortSignal): Promise<AgentToolResult<BrowserToolDetails>> {
+		const inventory = await untilAborted(signal, async () => getTabsInventory());
+		details.inventory = inventory;
+		const lines = inventory.length
+			? inventory.map(tab => {
+					const ownerText = tab.owners.length ? ` owners=${tab.owners.join(",")}` : "";
+					return `${tab.name} [${tab.state}] ${tab.browser} ${tab.url}${ownerText} active=${tab.activeRunCount} queued=${tab.queuedRunCount}`;
+				})
+			: ["No managed browser tabs"];
+		const result = lines.join("\n");
+		details.result = result;
+		return toolResult(details).text(result).done();
 	}
 
 	async #open(
@@ -332,7 +349,8 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 						timeoutMs,
 						dialogs: params.dialogs,
 						signal: openSignal,
-						ownerSessionId: this.session.getSessionId?.() ?? undefined,
+						ownerSessionId: this.session.getSessionId?.() ?? this.session.getAgentId?.() ?? undefined,
+						ownerAgentLabel: this.session.getAgentId?.() ?? "anonymous",
 					}),
 				);
 			} catch (error) {

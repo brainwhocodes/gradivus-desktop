@@ -42,6 +42,7 @@ import {
 	normalizeCreateContent,
 	parseDiffHunks,
 } from "../diff";
+import { withMutation } from "../mutation";
 import {
 	adjustIndentation,
 	convertLeadingTabsToSpaces,
@@ -103,6 +104,7 @@ export interface ApplyPatchOptions {
 	fuzzyThreshold?: number;
 	allowFuzzy?: boolean;
 	fs?: FileSystem;
+	signal?: AbortSignal;
 	/**
 	 * Permit `op: "create"` to replace an existing file (full-file overwrite).
 	 * The JSON `patch` edit mode sanctions create-as-overwrite for major
@@ -1507,9 +1509,39 @@ export async function applyPatch(input: PatchInput, options: ApplyPatchOptions):
 
 /**
  * Apply a normalized patch operation to the filesystem.
- * @internal
  */
 async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOptions): Promise<ApplyPatchResult> {
+	const {
+		cwd,
+		dryRun = false,
+		fs = defaultFileSystem,
+		fuzzyThreshold = DEFAULT_FUZZY_THRESHOLD,
+		allowFuzzy = true,
+		allowCreateOverwrite = false,
+		signal,
+	} = options;
+	if (dryRun) {
+		return applyNormalizedPatchUnlocked(input, {
+			...options,
+			cwd,
+			fs,
+			fuzzyThreshold,
+			allowFuzzy,
+			allowCreateOverwrite,
+		});
+	}
+	const source = resolveToCwd(input.path, cwd);
+	const destination = input.rename ? resolveToCwd(input.rename, cwd) : undefined;
+	const paths = destination === undefined ? [source] : [source, destination];
+	return withMutation(
+		paths,
+		() =>
+			applyNormalizedPatchUnlocked(input, { ...options, cwd, fs, fuzzyThreshold, allowFuzzy, allowCreateOverwrite }),
+		signal,
+	);
+}
+
+async function applyNormalizedPatchUnlocked(input: PatchInput, options: ApplyPatchOptions): Promise<ApplyPatchResult> {
 	const {
 		cwd,
 		dryRun = false,
@@ -1877,6 +1909,7 @@ export async function executePatchSingle(
 		fuzzyThreshold,
 		allowFuzzy,
 		allowCreateOverwrite,
+		signal,
 	});
 
 	// Post-write verification: only meaningful for in-place updates where the

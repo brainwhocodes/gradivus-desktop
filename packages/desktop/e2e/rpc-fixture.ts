@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -7,12 +8,434 @@ import {
   writeOmpGrpcBootstrapFile,
 } from "@oh-my-pi/pi-grpc";
 
-const performanceFixture = process.env.BRANCHLIGHT_PERF_FIXTURE === "1";
+type AttachmentKind = "file" | "prompt" | "image";
+type AttachmentRoute = "prompt" | "steer" | "follow_up";
+
+type ParsedEnvelope = {
+  kind: AttachmentKind;
+  name?: string;
+  path?: string;
+};
+
+type CaptureReference = {
+  kind: "file" | "prompt";
+  path: string;
+  absolute: boolean;
+  exists: boolean;
+  bytes: number;
+  sha256: string;
+};
+
+type CaptureImage = {
+  mimeType: string;
+  bytes: number;
+  sha256: string;
+  base64Valid: boolean;
+};
+
+type AttachmentAnalysis = {
+  route: AttachmentRoute;
+  message: string;
+  baseText: string;
+  envelopes: ParsedEnvelope[];
+  references: CaptureReference[];
+  images: CaptureImage[];
+  report: string;
+};
+
+const attachmentCaptureFile = process.env.GRADIVUS_ATTACHMENT_CAPTURE_FILE;
+let attachmentCaptureSequence = 0;
+let rejectNextPrompt = process.env.GRADIVUS_REJECT_NEXT_PROMPT === "immediate"
+  || process.env.GRADIVUS_REJECT_NEXT_PROMPT === "delayed"
+    ? process.env.GRADIVUS_REJECT_NEXT_PROMPT
+    : undefined;
+let rejectNextSteer = process.env.GRADIVUS_REJECT_NEXT_STEER === "1";
+let rejectNextFollowUp = process.env.GRADIVUS_REJECT_NEXT_FOLLOW_UP === "1";
+
+function decodeMention(value: string): string {
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  return value.slice(1, -1).replace(/\\'/g, "'");
+}
+
+function parseEnvelopeBlock(block: string): ParsedEnvelope | undefined {
+  const fullPrompt = block.match(/^Full prompt:\s+(@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))\. Read this file as the complete user request before responding\.$/);
+  if (fullPrompt) return { kind: "prompt", path: decodeMention(fullPrompt[1].slice(1)) };
+  const file = block.match(/^File\s+("(?:[^"\\]|\\.)*"):\s+(@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))\. Read this attachment as needed\.$/);
+  if (file) {
+    let name = file[1];
+    try { name = JSON.parse(file[1]); } catch {}
+    return { kind: "file", name, path: decodeMention(file[2].slice(1)) };
+  }
+  const image = block.match(/^Image\s+("(?:[^"\\]|\\.)*") is attached to this message\.$/);
+  if (image) {
+    let name = image[1];
+    try { name = JSON.parse(image[1]); } catch {}
+    return { kind: "image", name };
+  }
+  return undefined;
+}
+
+function parseAttachmentMessage(message: string): { baseText: string; envelopes: ParsedEnvelope[] } {
+  const blocks = message.split(/\n\n/);
+  const envelopes: ParsedEnvelope[] = [];
+  const baseBlocks: string[] = [];
+  for (const block of blocks) {
+    const envelope = parseEnvelopeBlock(block);
+    if (envelope) envelopes.push(envelope);
+    else baseBlocks.push(block);
+  }
+  return { baseText: baseBlocks.join("\n\n"), envelopes };
+}
+
+function hashBytes(bytes: Uint8Array): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function referenceMetadata(kind: "file" | "prompt", receivedPath: string): CaptureReference {
+  const absolute = path.isAbsolute(receivedPath);
+  const reference: CaptureReference = {
+    kind,
+    path: receivedPath,
+    absolute,
+    exists: false,
+    bytes: 0,
+    sha256: "",
+  };
+  try {
+    const bytes = fs.readFileSync(receivedPath);
+    reference.exists = true;
+    reference.bytes = bytes.byteLength;
+    reference.sha256 = hashBytes(bytes);
+  } catch {}
+  return reference;
+}
+
+function imageMetadata(image: unknown): CaptureImage | undefined {
+  if (!image || typeof image !== "object") return undefined;
+  const value = image as { type?: unknown; data?: unknown; mimeType?: unknown };
+  if (value.type !== "image" || typeof value.data !== "string") return undefined;
+  const data = value.data;
+  const base64Valid = data.length > 0
+    && data.length % 4 === 0
+    && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+    && Buffer.from(data, "base64").toString("base64") === data;
+  const bytes = base64Valid ? Buffer.from(data, "base64") : Buffer.alloc(0);
+  return {
+    mimeType: typeof value.mimeType === "string" ? value.mimeType : "",
+    bytes: bytes.byteLength,
+    sha256: hashBytes(bytes),
+    base64Valid,
+  };
+}
+
+function analyzeAttachmentCommand(command: { message?: unknown; images?: unknown[] }, route: AttachmentRoute): AttachmentAnalysis {
+  const message = typeof command.message === "string" ? command.message : "";
+  const parsed = parseAttachmentMessage(message);
+  const references = parsed.envelopes
+    .filter((envelope): envelope is ParsedEnvelope & { kind: "file" | "prompt"; path: string } =>
+      (envelope.kind === "file" || envelope.kind === "prompt") && typeof envelope.path === "string")
+    .map(envelope => referenceMetadata(envelope.kind, envelope.path));
+  const images = Array.isArray(command.images)
+    ? command.images.map(imageMetadata).filter((image): image is CaptureImage => Boolean(image))
+    : [];
+  const readable = references.every(reference => reference.exists) && images.every(image => image.base64Valid);
+  const fileCount = parsed.envelopes.filter(envelope => envelope.kind === "file").length;
+  const promptCount = parsed.envelopes.filter(envelope => envelope.kind === "prompt").length;
+  const report = fileCount + promptCount + images.length > 0
+    ? `Attachment report: route=${route}; files=${fileCount}; prompts=${promptCount}; images=${images.length}; readable=${readable}`
+    : "";
+  return { route, message, baseText: parsed.baseText, envelopes: parsed.envelopes, references, images, report };
+}
+
+function captureCommand(command: { id?: unknown; message?: unknown; images?: unknown[] }, route: AttachmentRoute): AttachmentAnalysis {
+  const analysis = analyzeAttachmentCommand(command, route);
+  attachmentAnalyses.set(command, analysis);
+  if (attachmentCaptureFile) {
+    const record = {
+      sequence: ++attachmentCaptureSequence,
+      route,
+      requestId: typeof command.id === "string" ? command.id : String(command.id ?? ""),
+      messageBytes: Buffer.byteLength(analysis.message, "utf8"),
+      baseTextBytes: Buffer.byteLength(analysis.baseText, "utf8"),
+      envelopes: analysis.envelopes.map(({ kind, name }) => name === undefined ? { kind } : { kind, name }),
+      references: analysis.references,
+      images: analysis.images,
+    };
+    fs.appendFileSync(attachmentCaptureFile, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "a" });
+  }
+  return analysis;
+}
+const attachmentAnalyses = new WeakMap<object, AttachmentAnalysis>();
+
+const performanceFixture = process.env.GRADIVUS_PERF_FIXTURE === "1";
+const timelineFixture = process.env.GRADIVUS_TIMELINE_FIXTURE === "1";
+const settingsResponseDelay = Math.max(0, Number(process.env.GRADIVUS_SETTINGS_RESPONSE_DELAY ?? "0") || 0);
+const extensionDelayMs = Math.max(0, Number(process.env.GRADIVUS_EXTENSION_DELAY_MS ?? "0") || 0);
+let settingsRequestCount = 0;
+const specialMessagesFixture = process.env.GRADIVUS_SPECIAL_MESSAGES === "1";
+const specialMessages = specialMessagesFixture
+  ? [
+      {
+        id: "special-welcome",
+        role: "assistant",
+        content: [{ type: "text", text: "Semantic transcript fixture ready." }],
+      },
+      {
+        id: "special-system-envelope",
+        role: "custom",
+        customType: "system-notice",
+        display: true,
+        attribution: "fixture-runtime",
+        content: `<system-notice title="System update">The semantic transcript fixture is active.
+This system body is deliberately long enough to exercise lazy expansion.
+It remains safe and readable at narrow widths.</system-notice>`,
+      },
+      {
+        id: "special-synthetic-reminder",
+        role: "user",
+        synthetic: true,
+        content: `<system-reminder label="Fixture reminder">Synthetic context is collapsed by default.
+Expand this reminder to inspect the bounded body.
+The transcript still contains the full text exactly once.</system-reminder>`,
+      },
+      {
+        id: "special-irc-incoming",
+        role: "custom",
+        customType: "irc:incoming",
+        display: true,
+        content: "<irc>MODEL_IRC_REPLY_INSTRUCTION_SENTINEL</irc>",
+        details: {
+          id: "fixture-irc-history-incoming",
+          from: "Mira",
+          message: "Please review the latest integration notes.",
+        },
+      },
+      {
+        id: "special-irc-autoreply",
+        role: "custom",
+        customType: "irc:autoreply",
+        display: true,
+        content: "<irc>MODEL_IRC_AUTOREPLY_INSTRUCTION_SENTINEL</irc>",
+        details: {
+          id: "fixture-irc-history-autoreply",
+          to: "Mira",
+          body: "The integration notes are ready for review.",
+          replyTo: "fixture-irc-history-incoming",
+        },
+      },
+      {
+        id: "special-irc-relay",
+        role: "custom",
+        customType: "irc:relay",
+        display: true,
+        content: "<irc>MODEL_IRC_RELAY_INSTRUCTION_SENTINEL</irc>",
+        details: {
+          id: "fixture-irc-history-relay",
+          from: "Mira",
+          to: "Noah",
+          body: "Noah, the review is queued.",
+        },
+      },
+      {
+        id: "special-advisor",
+        role: "custom",
+        customType: "advisor",
+        display: true,
+        content: "Advisor notes",
+        details: {
+          notes: [
+            { advisor: "Fixture Advisor", severity: "blocker", note: "The deployment token must be rotated before release." },
+            { advisor: "Fixture Advisor", severity: "concern", note: "The migration should be rehearsed on a clean database." },
+            { advisor: "Fixture Advisor", severity: "nit", note: "Rename the temporary fixture branch before merging." },
+            { advisor: "Fixture Advisor", severity: "nit", note: "The fourth note is intentionally behind the details disclosure." },
+          ],
+        },
+      },
+      {
+        id: "special-async-result",
+        role: "custom",
+        customType: "async-result",
+        display: true,
+        content: "Background jobs finished.",
+        details: {
+          jobs: [
+            { jobId: "job-lint", label: "Lint workspace", type: "lint", durationMs: 182 },
+            { jobId: "job-tests", label: "Run focused tests", type: "test", durationMs: 924 },
+          ],
+        },
+      },
+      {
+        id: "special-late-diagnostic",
+        role: "custom",
+        customType: "lsp-late-diagnostic",
+        display: true,
+        content: "Late diagnostics are available.",
+        details: {
+          files: [
+            { path: "src/routes.ts", summary: "Unused route parameter", errored: false },
+            { path: "src/auth.ts", summary: "Provider timeout path needs coverage", errored: true },
+          ],
+        },
+      },
+      {
+        id: "special-background-tangent",
+        role: "custom",
+        customType: "background-tan-dispatch",
+        display: true,
+        content: "Background tangent dispatched.",
+        details: { jobId: "tangent-review", work: "Review the changed API boundary and report only actionable findings." },
+      },
+      {
+        id: "special-launch-completion",
+        role: "custom",
+        customType: "launch-completion",
+        display: true,
+        content: "Local processes completed.",
+        details: {
+          daemons: [
+            { name: "web", state: "running" },
+            { name: "worker", state: "exited", exitCode: 0 },
+          ],
+        },
+      },
+      {
+        id: "special-collab-prompt",
+        role: "custom",
+        customType: "collab-prompt",
+        display: true,
+        attribution: "fixture-collaborator",
+        content: "Please inspect the fixture's accessibility boundary and return a concise report.",
+        details: { from: "Riley" },
+      },
+      {
+        id: "special-skill-prompt",
+        role: "custom",
+        customType: "skill-prompt",
+        display: true,
+        attribution: "fixture-extension",
+        content: "Apply the semantic transcript review checklist.",
+        details: {
+          name: "semantic-review",
+          path: "skills/transcript/semantic-review.md",
+          args: "--strict --viewport=760",
+          lineCount: 84,
+        },
+      },
+      {
+        id: "special-hook-fallback",
+        role: "hookMessage",
+        customType: "fixture-release-hook",
+        display: true,
+        attribution: "fixture-hook",
+        content: "Hook completed the release audit without exposing its private details.",
+        details: { privatePayload: "FIXTURE_UNKNOWN_DETAILS_MUST_NOT_RENDER" },
+      },
+      {
+        id: "special-handoff",
+        role: "custom",
+        customType: "handoff",
+        display: true,
+        content: `<handoff-context>Carry the API review context into the next turn.
+Preserve the pending migration warning and the verification commands.
+Do not repeat the private handoff metadata.</handoff-context>`,
+      },
+      {
+        id: "special-branch-summary",
+        role: "branchSummary",
+        summary: "Returned from the accessibility review branch with the following context preserved.\nThe branch verified keyboard navigation and narrow viewport wrapping.\nThe branch also recorded a follow-up migration warning.",
+        fromId: "special-collab-prompt",
+        timestamp: 20,
+      },
+      {
+        id: "special-compaction-summary",
+        role: "compactionSummary",
+        summary: Array.from({ length: 12 }, (_, index) => `Compacted context line ${index + 1}: preserve the semantic transcript contract and its verification evidence.`).join("\n"),
+        tokensBefore: 8192,
+        warning: "Fixture compaction warning: expand to inspect the complete summary.",
+        timestamp: 21,
+      },
+      {
+        id: "special-bash-execution",
+        role: "bashExecution",
+        command: "printf 'semantic execution output'",
+        output: Array.from({ length: 12 }, (_, index) => `bash output line ${index + 1}`).join("\n"),
+        exitCode: 0,
+        cancelled: false,
+        truncated: true,
+        excludeFromContext: true,
+        timestamp: 22,
+      },
+      {
+        id: "special-python-execution",
+        role: "pythonExecution",
+        code: "print('semantic execution output')",
+        output: Array.from({ length: 10 }, (_, index) => `python output line ${index + 1}`).join("\n"),
+        exitCode: 0,
+        cancelled: false,
+        truncated: false,
+        timestamp: 23,
+      },
+      {
+        id: "special-file-mention",
+        role: "fileMention",
+        files: [
+          { path: "README.md", lineCount: 42, content: "fixture readme" },
+          { path: "assets/logo.png", skippedReason: "binary" },
+        ],
+        timestamp: 24,
+      },
+      {
+        id: "special-assistant-error",
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Fixture provider failed after the response stream ended.\nExpand this panel to inspect the complete terminal diagnostic.",
+      },
+      {
+        id: "special-assistant-recovered",
+        role: "assistant",
+        content: [{ type: "text", text: "The recovered fixture response is complete." }],
+        retryRecovery: { status: "recovered", note: "Recovered after one provider retry." },
+      },
+      {
+        id: "special-hidden-developer",
+        role: "developer",
+        content: [{ type: "text", text: "FIXTURE_SPECIAL_HIDDEN_DEVELOPER" }],
+      },
+      {
+        id: "special-hidden-custom",
+        role: "custom",
+        customType: "hidden-special-custom",
+        display: false,
+        content: "FIXTURE_SPECIAL_HIDDEN_CUSTOM",
+      },
+      {
+        id: "special-hidden-hook",
+        role: "hookMessage",
+        customType: "hidden-special-hook",
+        display: false,
+        content: "FIXTURE_SPECIAL_HIDDEN_HOOK",
+      },
+    ]
+  : undefined;
 const performanceMessages = performanceFixture
   ? Array.from({ length: 10_000 }, (_, index) => ({
       id: `performance-${index}`,
       role: "assistant",
       content: [{ type: "text", text: `Performance timeline entry ${index}` }],
+    }))
+  : undefined;
+const timelineMessages = timelineFixture
+  ? Array.from({ length: 260 }, (_, index) => ({
+      id: `timeline-history-${index}`,
+      role: "assistant",
+      content: [{ type: "text", text: `Deterministic history entry ${index + 1}` }],
     }))
   : undefined;
 if (performanceMessages) {
@@ -39,6 +462,7 @@ const availableCommands = [
   { name: "logout", description: "Sign out of a provider", source: "builtin" },
   { name: "fixture-review", description: "Review the fixture workspace", source: "skill" },
   { name: "fixture-release", description: "Prepare fixture release notes", source: "custom" },
+  ...(specialMessagesFixture ? [{ name: "fixture-special", description: "Emit semantic transcript and extension notification fixtures", source: "custom" }] : []),
 ];
 const modelOptions = [
   { provider: "fixture", id: "fixture-model", name: "Fixture Model", reasoning: true, input: ["text", "image"], contextWindow: 4096 },
@@ -54,11 +478,11 @@ const disabledOpenRouterProviders = new Set();
 const fixtureOAuthAccounts = [
   {
     credentialId: 101,
-    email: "alex@branchlight.dev",
+    email: "alex@gradivus.dev",
     accountId: "acct-openai-primary",
-    orgId: "org-branchlight",
-    orgName: "Branchlight Labs",
-    projectId: "project-branchlight-desktop",
+    orgId: "org-gradivus",
+    orgName: "Gradivus Labs",
+    projectId: "project-gradivus-desktop",
     active: true,
     lockable: true,
   },
@@ -185,14 +609,31 @@ let agentSettings = [
     apply: "immediate",
   },
 ];
-const historyMessages = performanceMessages ?? [{ id: "fixture-welcome", role: "assistant", content: [{ type: "text", text: "Fixture ready. Choose a Work or Code action." }] }];
+const historyMessages = performanceMessages ?? specialMessages ?? timelineMessages ?? [
+  { id: "fixture-welcome", role: "assistant", content: [{ type: "text", text: "Fixture ready. Choose a Work or Code action." }] },
+  {
+    id: "fixture-hidden-developer",
+    role: "developer",
+    content: [{ type: "text", text: "FIXTURE_HIDDEN_DEVELOPER_REMINDER" }],
+  },
+  {
+    id: "fixture-hidden-custom",
+    role: "custom",
+    content: [{ type: "text", text: "FIXTURE_HIDDEN_CUSTOM_MESSAGE" }],
+  },
+  {
+    id: "fixture-hidden-hook",
+    role: "hookMessage",
+    content: [{ type: "text", text: "FIXTURE_HIDDEN_HOOK_MESSAGE" }],
+  },
+];
 const args = process.argv.slice(2);
 const cwdIndex = args.indexOf("--cwd");
 const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : process.cwd();
 const resumeIndex = args.indexOf("--resume");
-const sessionFile = resumeIndex >= 0 ? args[resumeIndex + 1] : path.join(cwd, ".branchlight-fixture.jsonl");
+const sessionFile = resumeIndex >= 0 ? args[resumeIndex + 1] : path.join(cwd, ".gradivus-fixture.jsonl");
 const sessionId = "fixture-session-0001";
-const authStateFile = process.env.BRANCHLIGHT_AUTH_FILE;
+const authStateFile = process.env.GRADIVUS_AUTH_FILE;
 let authenticated = false;
 let storedOAuthAccounts: typeof fixtureOAuthAccounts = [];
 let lockedOAuthCredentialId: number | undefined;
@@ -226,6 +667,9 @@ if (authStateFile) {
 }
 let pendingAuth;
 let pendingAgentPrompt;
+let heldPrompt;
+let delayedSelectPrompt;
+let answerSequence = 0;
 let model = modelOptions[0];
 let thinkingLevel = "medium";
 let fastModeEnabled = false;
@@ -234,6 +678,43 @@ let followUpMode = "all";
 let interruptMode = "immediate";
 let autoCompactionEnabled = true;
 let autoRetryEnabled = true;
+const fixtureAgentCreatedAt = Date.now();
+let fixtureAgents = [
+  {
+    id: "fixture-agent",
+    displayName: "Fixture Verifier",
+    kind: "sub",
+    status: "parked",
+    activity: "Waiting for a focused task",
+    createdAt: fixtureAgentCreatedAt,
+    lastActivity: fixtureAgentCreatedAt,
+    transcriptAvailable: true,
+    readOnly: false,
+    agent: "Verifier",
+    resolvedModel: "fixture-model",
+    metrics: { tokens: 42, requests: 1, tools: 2, cost: 0.0042, durationMs: 840, contextTokens: 128, contextWindow: 4096 },
+    progress: { lastIntent: "Verify the fixture boundary", recentOutput: ["verified"], resolvedModel: "fixture-model", tokens: 42 },
+  },
+  {
+    id: "fixture-advisor",
+    displayName: "Fixture Advisor",
+    kind: "advisor",
+    status: "idle",
+    activity: "Transcript-only advisor",
+    createdAt: fixtureAgentCreatedAt,
+    lastActivity: fixtureAgentCreatedAt,
+    transcriptAvailable: true,
+    readOnly: true,
+    agent: "Advisor",
+    resolvedModel: "fixture-model",
+    metrics: { tokens: 18, requests: 1, tools: 0, cost: 0.0018, durationMs: 220 },
+    progress: undefined,
+  },
+];
+
+function fixtureAgentHubSnapshot() {
+  return { agents: fixtureAgents.map(agent => ({ ...agent, metrics: { ...agent.metrics }, progress: agent.progress ? { ...agent.progress } : undefined })) };
+}
 
 function persistOAuthState() {
   if (!authStateFile || !authenticated) return;
@@ -301,45 +782,167 @@ function send(value) {
   sendQueue = sendQueue.then(() => connection.send(frame));
 }
 
+function sendAgentHubUpdate() {
+  send({ type: "agent_hub_update", ...fixtureAgentHubSnapshot() });
+}
+
 setTimeout(() => send({ type: "available_commands_update", commands: availableCommands }), 10);
 
 function handleFrame(frame) {
-  const command = frame.kind === "command"
-    ? { id: frame.command.id, type: frame.command.command, ...frame.command.payload }
-    : { type: frame.type, ...frame.payload };
-  const response = (data, success = true, responseId = command.id, responseCommand = command.type) => send({
+  if (frame.kind === "ready" || frame.kind === "response") return;
+  const raw = frame.kind === "command"
+    ? frame.command
+    : frame.type === "request"
+      ? frame
+      : frame.kind === "request"
+        ? frame.payload
+        : frame;
+  if (!raw || (!raw.command && !raw.type && !raw.id)) return;
+  const command = {
+    ...raw,
+    ...(raw?.payload ?? {}),
+    type: raw?.command ?? raw?.type,
+  };
+  const response = (data, success = true, id = command.id, commandName = command.type, error) => send({
     type: "response",
-    id: responseId,
-    command: responseCommand,
-    success,
-    ...(success ? { data } : { error: "fixture command failed" }),
+    id,
+    command: commandName,
+    success: Boolean(success),
+    ...(success ? { data } : { error: error ?? "fixture command failed" }),
   });
-  const emitPromptResult = promptCommand => {
-    const generatedImage = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-    const answerId = `fixture-answer-${Date.now()}`;
-    response({ agentInvoked: true }, true, promptCommand.id, "prompt");
-    send({ type: "agent_start" });
-    send({ type: "message_start", message: { id: `user-${Date.now()}`, role: "user", content: promptCommand.message } });
-    send({ type: "message_start", message: { id: answerId, role: "assistant", content: [] } });
-    send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary." }] } });
-    send({ type: "tool_execution_start", toolCallId: "fixture-write", toolName: "write", args: { path: "result.txt" } });
-    send({ type: "tool_execution_end", toolCallId: "fixture-write", result: "BRANCHLIGHT_READY", isError: false });
-    send({ type: "tool_execution_start", toolCallId: "fixture-edit", toolName: "edit", args: { input: "*** Begin Patch\n[src/review.ts#A1B2]\nPUT 1.=1:\n+reviewed\n*** End Patch" } });
-    send({ type: "tool_execution_end", toolCallId: "fixture-edit", result: "Done!", isError: false });
-    send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary.\nValidating the projected result." }] } });
-    send({ type: "tool_execution_start", toolCallId: "fixture-image", toolName: "generate_image", args: { subject: "fixture image" } });
-    send({ type: "tool_execution_update", toolCallId: "fixture-image", partialResult: { content: [{ type: "text", text: "Generating image…" }], details: { images: [] } } });
+  const promptResult = (promptCommand, agentInvoked, error) => send({
+    type: "prompt_result",
+    id: promptCommand.id,
+    agentInvoked,
+    ...(error ? { error } : {}),
+  });
+  const finishAgent = (
+    promptCommand,
+    finalText = "Fixture completed the requested work.",
+    delay = 120,
+    resultCommand = promptCommand,
+  ) => {
+    const answerId = `fixture-answer-${++answerSequence}`;
+    const userId = `fixture-user-${answerSequence}`;
+    const report = attachmentAnalyses.get(promptCommand)?.report ?? "";
     setTimeout(() => {
-      send({
-        type: "tool_execution_end",
-        toolCallId: "fixture-image",
-        result: { content: [{ type: "text", text: "Generated image." }], details: { images: [{ data: generatedImage, mimeType: "image/png" }] } },
-        isError: false,
-      });
-      send({ type: "message_end", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary.\nValidating the projected result." }, { type: "text", text: "Fixture completed the requested work." }] } });
-      send({ type: "agent_end", isTerminal: false, messages: [] });
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: userId, role: "user", content: promptCommand.message } });
+      send({ type: "todo_reminder", todos: [{ content: "Fixture progress", status: "completed" }] });
+      send({ type: "message_start", message: { id: answerId, role: "assistant", content: [] } });
+      send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary." }] } });
+      send({ type: "tool_execution_start", toolCallId: `fixture-write-${answerSequence}`, toolName: "write", args: { path: "result.txt", content: "Fixture result\nGRADIVUS_READY" } });
+      send({ type: "tool_execution_end", toolCallId: `fixture-write-${answerSequence}`, result: "GRADIVUS_READY", isError: false });
+      send({ type: "message_end", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Validated the projected result." }, { type: "text", text: report ? `${finalText}\n\n${report}` : finalText }] } });
       send({ type: "agent_end", isTerminal: true, messages: [] });
-    }, 400);
+      promptResult(resultCommand, true);
+    }, delay);
+  };
+  const finishTimelineWave = (promptCommand) => {
+    const sequence = ++answerSequence;
+    const answerId = `fixture-wave-answer-${sequence}`;
+    const userId = `fixture-wave-user-${sequence}`;
+    const readId = `fixture-wave-read-${sequence}`;
+    const writeId = `fixture-wave-write-${sequence}`;
+    const editId = `fixture-wave-edit-${sequence}`;
+    setTimeout(() => {
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: userId, role: "user", content: promptCommand.message } });
+      send({ type: "tool_execution_start", toolCallId: readId, toolName: "read", args: { path: "notes.txt:1-4", count: 4 } });
+    }, 40);
+    setTimeout(() => send({
+      type: "tool_execution_update",
+      toolCallId: readId,
+      partialResult: { details: { displayContent: { text: "alpha\nbeta\ngamma\ndelta", lineNumbers: [1, 2, 3, 4] } } },
+    }), 140);
+    setTimeout(() => send({
+      type: "tool_execution_end",
+      toolCallId: readId,
+      result: { details: { displayContent: { text: "alpha\nbeta\ngamma\ndelta", lineNumbers: [1, 2, 3, 4] } } },
+      isError: false,
+    }), 240);
+    setTimeout(() => send({
+      type: "tool_execution_start",
+      toolCallId: writeId,
+      toolName: "write",
+      args: { path: "activity.txt", content: "written line one\nwritten line two" },
+    }), 320);
+    setTimeout(() => send({ type: "tool_execution_end", toolCallId: writeId, result: "activity.txt written", isError: false }), 420);
+    setTimeout(() => send({
+      type: "tool_execution_start",
+      toolCallId: editId,
+      toolName: "edit",
+      args: { input: "[notes.txt#ABCD]\n@@\n-alpha\n+alpha updated" },
+    }), 500);
+    setTimeout(() => send({
+      type: "tool_execution_end",
+      toolCallId: editId,
+      result: "notes.txt edited",
+      isError: false,
+    }), 600);
+    setTimeout(() => {
+      send({ type: "message_start", message: { id: answerId, role: "assistant", content: [] } });
+      send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the activity stream." }] } });
+    }, 680);
+    setTimeout(() => send({
+      type: "message_update",
+      message: { id: answerId, role: "assistant", content: [{ type: "text", text: "Wave assistant update." }] },
+    }), 780);
+    setTimeout(() => {
+      const report = attachmentAnalyses.get(promptCommand)?.report;
+      send({ type: "message_end", message: { id: answerId, role: "assistant", content: [{ type: "text", text: report ? `Wave assistant complete ${sequence}.\n\n${report}` : `Wave assistant complete ${sequence}.` }] } });
+      send({ type: "agent_end", isTerminal: true, messages: [] });
+      promptResult(promptCommand, true);
+    }, 880);
+  };
+  const finishSpecialMessages = (promptCommand) => {
+    const liveIrc = {
+      role: "custom",
+      customType: "irc:incoming",
+      display: true,
+      content: "<irc>LIVE_MODEL_IRC_INSTRUCTION_SENTINEL</irc>",
+      details: {
+        id: "fixture-irc-live-001",
+        from: "Avery",
+        message: "Live IRC message routed through one stable timeline card.",
+      },
+    };
+    response({ accepted: true });
+    send({
+      type: "extension_ui_request",
+      id: "fixture-special-info",
+      method: "notify",
+      title: "Fixture semantic transcript",
+      message: "Semantic transcript fixture is ready.",
+      notifyType: "info",
+    });
+    setTimeout(() => send({
+      type: "notice",
+      level: "warning",
+      source: "fixture-special",
+      message: "A semantic transcript warning is visible for verification.",
+    }), 40);
+    setTimeout(() => send({
+      type: "extension_ui_request",
+      id: "fixture-special-warning",
+      method: "notify",
+      title: "Fixture warning",
+      message: "Dismiss this warning toast to continue the fixture journey.",
+      notifyType: "warning",
+    }), 100);
+    setTimeout(() => send({ type: "irc_message", message: liveIrc }), 140);
+    setTimeout(() => send({ type: "message_start", message: liveIrc }), 190);
+    setTimeout(() => {
+      const report = attachmentAnalyses.get(promptCommand)?.report;
+      send({ type: "command_output", text: report ? `Fixture semantic command output complete.\n${report}` : "Fixture semantic command output complete." });
+      promptResult(promptCommand, false);
+    }, 300);
+  };
+  const finishHeld = (actualCommand, finalText = "Held turn completed after steering.") => {
+    if (!heldPrompt) return;
+    const resultCommand = heldPrompt;
+    heldPrompt = undefined;
+    finishAgent(actualCommand, finalText, 60, resultCommand);
   };
 
   if (command.type === "get_state") return response({
@@ -347,7 +950,7 @@ function handleFrame(frame) {
     sessionFile,
     model,
     thinkingLevel,
-    isStreaming: false,
+    isStreaming: Boolean(heldPrompt),
     isCompacting: false,
     steeringMode,
     followUpMode,
@@ -388,13 +991,9 @@ function handleFrame(frame) {
   if (command.type === "get_oauth_accounts") return response(oauthAccountsResponse());
   if (command.type === "set_oauth_account_lock") {
     if (command.providerId !== "openai-codex") return response(undefined, false);
-    if (command.credentialId === undefined) {
-      lockedOAuthCredentialId = undefined;
-    } else if (storedOAuthAccounts.some(account => account.credentialId === command.credentialId)) {
-      lockedOAuthCredentialId = command.credentialId;
-    } else {
-      return response(undefined, false);
-    }
+    if (command.credentialId === undefined) lockedOAuthCredentialId = undefined;
+    else if (storedOAuthAccounts.some(account => account.credentialId === command.credentialId)) lockedOAuthCredentialId = command.credentialId;
+    else return response(undefined, false);
     persistOAuthState();
     return response(oauthAccountsResponse());
   }
@@ -415,7 +1014,15 @@ function handleFrame(frame) {
     persistOAuthState();
     return response(oauthAccountsResponse());
   }
-  if (command.type === "get_settings") return response({ settings: agentSettings });
+  if (command.type === "get_settings") {
+    const data = { settings: agentSettings };
+    const requestNumber = ++settingsRequestCount;
+    if (settingsResponseDelay > 0 && requestNumber > 1) {
+      setTimeout(() => response(data), settingsResponseDelay);
+      return;
+    }
+    return response(data);
+  }
   if (command.type === "set_setting") {
     const index = agentSettings.findIndex(setting => setting.path === command.path);
     if (index < 0) return response(undefined, false);
@@ -430,14 +1037,9 @@ function handleFrame(frame) {
   }
   if (command.type === "extension_ui_response" && pendingAuth?.promptId === command.id) {
     authenticated = typeof command.value === "string" && command.value.length > 0;
-    if (authenticated) {
-      storedOAuthAccounts = fixtureOAuthAccounts.map(account => ({ ...account }));
-      lockedOAuthCredentialId = undefined;
-      persistOAuthState();
-    } else {
-      storedOAuthAccounts = [];
-      lockedOAuthCredentialId = undefined;
-    }
+    storedOAuthAccounts = authenticated ? fixtureOAuthAccounts.map(account => ({ ...account })) : [];
+    lockedOAuthCredentialId = undefined;
+    if (authenticated) persistOAuthState();
     response({ providerId: "openai-codex" }, true, pendingAuth.command.id, "login");
     pendingAuth = undefined;
     return;
@@ -445,7 +1047,15 @@ function handleFrame(frame) {
   if (command.type === "extension_ui_response" && pendingAgentPrompt?.promptId === command.id) {
     const promptCommand = pendingAgentPrompt.command;
     pendingAgentPrompt = undefined;
-    emitPromptResult(promptCommand);
+    response({ accepted: true }, true, promptCommand.id, "prompt");
+    finishAgent(promptCommand);
+    return;
+  }
+  if (command.type === "extension_ui_response" && delayedSelectPrompt && command.id === "fixture-delayed-select") {
+    const promptCommand = delayedSelectPrompt;
+    delayedSelectPrompt = undefined;
+    const chosen = typeof command.value === "string" ? command.value : "";
+    finishAgent(promptCommand, `Fixture continued after the replayed choice: ${chosen}.`, 120);
     return;
   }
   if (command.type === "logout" && command.providerId === "openai-codex") {
@@ -453,9 +1063,7 @@ function handleFrame(frame) {
     storedOAuthAccounts = [];
     lockedOAuthCredentialId = undefined;
     if (authStateFile) {
-      try {
-        fs.unlinkSync(authStateFile);
-      } catch {}
+      try { fs.unlinkSync(authStateFile); } catch {}
     }
     return response({ providerId: "openai-codex" });
   }
@@ -481,6 +1089,44 @@ function handleFrame(frame) {
     return response({ messages, totalMessages: historyMessages.length, ...(nextOffset < historyMessages.length ? { nextCursor: String(nextOffset) } : {}) });
   }
   if (command.type === "get_messages") return response({ messages: historyMessages });
+  if (command.type === "get_agent_hub") return response(fixtureAgentHubSnapshot());
+  if (command.type === "get_agent_hub_messages") {
+    const requestedFromByte = Number.isFinite(Number(command.fromByte)) ? Number(command.fromByte) : 0;
+    const reset = requestedFromByte > 64;
+    const fromByte = reset ? 0 : requestedFromByte;
+    const messages = fromByte === 0 ? [{ role: "assistant", content: [{ type: "text", text: "Fixture collaborator transcript." }] }] : [];
+    return response({ fromByte, nextByte: 64, reset, entries: [], messages });
+  }
+  if (command.type === "agent_hub_message") {
+    const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
+    if (!agent || agent.kind === "advisor" || agent.readOnly || agent.status === "aborted" || typeof command.message !== "string" || !command.message.trim()) return response(undefined, false);
+    agent.status = "idle";
+    agent.activity = `Received: ${command.message.trim()}`;
+    agent.lastActivity = Date.now();
+    response({ agentId: agent.id });
+    sendAgentHubUpdate();
+    return;
+  }
+  if (command.type === "agent_hub_kill") {
+    const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
+    if (!agent || agent.kind === "advisor" || agent.readOnly || agent.status === "aborted") return response(undefined, false);
+    agent.status = "aborted";
+    agent.activity = "Aborted by the desktop";
+    agent.lastActivity = Date.now();
+    response({ agentId: agent.id });
+    sendAgentHubUpdate();
+    return;
+  }
+  if (command.type === "agent_hub_revive") {
+    const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
+    if (!agent || agent.kind === "advisor" || agent.readOnly || agent.status !== "parked") return response(undefined, false);
+    agent.status = "idle";
+    agent.activity = "Revived and ready";
+    agent.lastActivity = Date.now();
+    response({ agentId: agent.id });
+    sendAgentHubUpdate();
+    return;
+  }
   if (command.type === "get_subagents") return response({ subagents: [{ id: "fixture-agent", agent: "Verifier", status: "completed", task: "Verify the fixture boundary", progress: { resolvedModel: "fixture-model", tokens: 42, recentOutput: ["verified"] } }] });
   if (command.type === "set_subagent_subscription") return response({ level: command.level });
   if (command.type === "get_subagent_messages") return response({ reset: command.fromByte > 8, nextByte: 16, messages: [{ role: "assistant", content: [{ type: "text", text: "Fixture collaborator transcript." }] }] });
@@ -488,51 +1134,108 @@ function handleFrame(frame) {
     model = modelOptions.find(candidate => candidate.provider === command.provider && candidate.id === command.modelId) ?? model;
     return response(model);
   }
-  if (command.type === "set_thinking_level") {
-    thinkingLevel = command.level;
-    return response();
-  }
-  if (command.type === "set_fast_mode") {
-    fastModeEnabled = command.enabled;
-    return response({ enabled: fastModeEnabled, active: fastModeEnabled });
-  }
-  if (command.type === "set_steering_mode") {
-    steeringMode = command.mode;
-    return response();
-  }
-  if (command.type === "set_follow_up_mode") {
-    followUpMode = command.mode;
-    return response();
-  }
-  if (command.type === "set_interrupt_mode") {
-    interruptMode = command.mode;
-    return response();
-  }
-  if (command.type === "set_auto_compaction") {
-    autoCompactionEnabled = command.enabled;
-    return response();
-  }
-  if (command.type === "set_auto_retry") {
-    autoRetryEnabled = command.enabled;
-    return response();
-  }
-  if (command.type === "set_session_name" || command.type === "steer" || command.type === "follow_up" || command.type === "abort") return response({ accepted: true });
-  if (command.type === "prompt" && command.message === "/status") {
-    response({ agentInvoked: false });
-    send({ type: "command_output", text: "Fixture status: ready" });
+  if (command.type === "set_thinking_level") { thinkingLevel = command.level; return response(); }
+  if (command.type === "set_fast_mode") { fastModeEnabled = command.enabled; return response({ enabled: fastModeEnabled, active: fastModeEnabled }); }
+  if (command.type === "set_steering_mode") { steeringMode = command.mode; return response(); }
+  if (command.type === "set_follow_up_mode") { followUpMode = command.mode; return response(); }
+  if (command.type === "set_interrupt_mode") { interruptMode = command.mode; return response(); }
+  if (command.type === "set_auto_compaction") { autoCompactionEnabled = command.enabled; return response(); }
+  if (command.type === "set_auto_retry") { autoRetryEnabled = command.enabled; return response(); }
+  if (command.type === "set_session_name") return response({ accepted: true });
+  if (command.type === "steer") {
+    captureCommand(command, "steer");
+    if (rejectNextSteer) {
+      rejectNextSteer = false;
+      response(undefined, false, command.id, "steer", "Fixture steer delivery failed.");
+      return;
+    }
+    response({ accepted: true });
+    if (heldPrompt) finishHeld(command);
     return;
   }
-  if (command.type === "prompt" && command.message === "seed scroll fixture") {
-    response({ agentInvoked: false });
-    for (let index = 1; index <= 18; index += 1) {
-      send({ type: "command_output", text: `Scroll fixture entry ${index}` });
+  if (command.type === "follow_up") {
+    captureCommand(command, "follow_up");
+    if (rejectNextFollowUp) {
+      rejectNextFollowUp = false;
+      response(undefined, false, command.id, "follow_up", "Fixture follow-up delivery failed.");
+      return;
+    }
+    response({ accepted: true });
+    if (heldPrompt) {
+      const resultCommand = heldPrompt;
+      heldPrompt = undefined;
+      finishAgent(command, "Follow-up completed after the active turn.", 120, resultCommand);
+    } else {
+      finishAgent(command, "Follow-up completed.", 120);
     }
     return;
   }
   if (command.type === "prompt") {
-    const promptId = `fixture-agent-prompt-${Date.now()}`;
-    pendingAgentPrompt = { command, promptId };
-    send({ type: "extension_ui_request", id: promptId, method: "input", title: "Administrator password", placeholder: "fixture-sudo", sensitive: true });
+    const analysis = captureCommand(command, "prompt");
+    if (analysis.baseText.trim() === "/status") {
+      response({ agentInvoked: false });
+      promptResult(command, false);
+      send({ type: "command_output", text: analysis.report ? `Fixture status: ready\n${analysis.report}` : "Fixture status: ready" });
+      return;
+    }
+    if (specialMessagesFixture && /\/fixture-special|semantic transcript/i.test(analysis.baseText)) {
+      finishSpecialMessages(command);
+      return;
+    }
+    if (/queue delivery failed|fail queue|failure/i.test(analysis.baseText)) {
+      response(undefined, false, command.id, "prompt", "Fixture queue delivery failed.");
+      setTimeout(() => promptResult(command, false, { message: "Fixture queue delivery failed.", code: "QUEUE_DELIVERY_FAILED" }), 100);
+      return;
+    }
+    if (rejectNextPrompt === "immediate") {
+      rejectNextPrompt = undefined;
+      response(undefined, false, command.id, "prompt", "Fixture prompt delivery failed.");
+      return;
+    }
+    if (rejectNextPrompt === "delayed") {
+      rejectNextPrompt = undefined;
+      response({ accepted: true });
+      setTimeout(() => promptResult(command, false, { message: "Fixture prompt delivery failed.", code: "PROMPT_DELIVERY_FAILED" }), 700);
+      return;
+    }
+    response({ accepted: true });
+    if (/timeline wave|activity wave/i.test(analysis.baseText)) {
+      finishTimelineWave(command);
+      return;
+    }
+    if (/locked account|provider error/i.test(analysis.baseText)) {
+      setTimeout(() => promptResult(command, false, { message: "The selected OpenAI Codex account is locked.", code: "AUTH_ACCOUNT_LOCKED" }), 100);
+      return;
+    }
+    if (/hold current turn|delayed turn/i.test(analysis.baseText)) {
+      heldPrompt = command;
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: `fixture-hold-${++answerSequence}`, role: "user", content: command.message } });
+      return;
+    }
+    if (/delayed error/i.test(analysis.baseText)) {
+      setTimeout(() => promptResult(command, false, { message: "Fixture provider rejected the request.", code: "PROVIDER_UNAVAILABLE" }), 180);
+      return;
+    }
+    if (/background delayed/i.test(analysis.baseText)) {
+      finishAgent(command, "Background session completed.", 420);
+      return;
+    }
+    if (/delayed select/i.test(analysis.baseText)) {
+      delayedSelectPrompt = command;
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: `fixture-hold-${++answerSequence}`, role: "user", content: command.message } });
+      setTimeout(() => send({
+        type: "extension_ui_request",
+        id: "fixture-delayed-select",
+        method: "select",
+        title: "Delayed fixture choice",
+        message: "Pick the continuation for this turn.",
+        options: ["Continue turn", "Abort turn"],
+      }), extensionDelayMs);
+      return;
+    }
+    finishAgent(command);
     return;
   }
   if (command.type === "prompt_result") return response({ agentInvoked: false });

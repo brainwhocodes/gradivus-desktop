@@ -27,16 +27,67 @@ const READY_TIMEOUT_MS = 15_000;
 const PROBE_TIMEOUT_MS = 1_500;
 /** probe→describe→start rounds; bounds cross-process races and wedged-relay replacement. */
 const ENSURE_ATTEMPTS = 3;
-
 /** True when the relay HTTP server answers /json/version at all (200 = extension connected, 503 = waiting for it). */
 export async function probeRelayServer(cdpUrl: string): Promise<boolean> {
+	const result = Promise.withResolvers<boolean>();
+	let settled = false;
+	let socket: Bun.Socket | undefined;
+	let response = "";
+	const finish = (reachable: boolean): void => {
+		if (settled) return;
+		settled = true;
+		result.resolve(reachable);
+	};
+	const timer = setTimeout(() => {
+		socket?.terminate();
+		finish(false);
+	}, PROBE_TIMEOUT_MS);
+
 	try {
-		const res = await fetch(`${cdpUrl}/json/version`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-		await res.body?.cancel();
-		return res.ok || res.status === 503;
+		const endpoint = new URL(`${cdpUrl}/json/version`);
+		if (endpoint.protocol !== "http:") {
+			clearTimeout(timer);
+			finish(false);
+			return await result.promise;
+		}
+		const hostname = endpoint.hostname.replace(/^\[|\]$/gu, "");
+		void Bun.connect({
+			hostname,
+			port: Number(endpoint.port || 80),
+			socket: {
+				open(connected) {
+					socket = connected;
+					connected.write(
+						`GET ${endpoint.pathname || "/"}${endpoint.search} HTTP/1.1\r\nHost: ${endpoint.host}\r\nConnection: close\r\n\r\n`,
+					);
+				},
+				data(connected, data) {
+					response += new TextDecoder().decode(data);
+					const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s|\r?\n)/u.exec(response)?.[1];
+					if (status) {
+						clearTimeout(timer);
+						finish(status === "200" || status === "503");
+						connected.end();
+					}
+				},
+				error() {
+					clearTimeout(timer);
+					finish(false);
+				},
+				close() {
+					clearTimeout(timer);
+					finish(false);
+				},
+			},
+		}).catch(() => {
+			clearTimeout(timer);
+			finish(false);
+		});
 	} catch {
-		return false;
+		clearTimeout(timer);
+		finish(false);
 	}
+	return await result.promise;
 }
 
 /** Auto-start is only safe for endpoints this machine can own. */

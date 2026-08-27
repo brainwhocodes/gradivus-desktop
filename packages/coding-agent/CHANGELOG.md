@@ -12,25 +12,35 @@
 - Added provider exclusions for native image generation so hosts can prevent unsupported providers from being selected as fallbacks or per-request overrides.
 - Added bounded working-tree file diffs and lazy OpenRouter upstream discovery to the RPC protocol for desktop and other external hosts.
 - Added persisted per-model OpenRouter provider exclusions, applied consistently to primary, advisor, handoff, and side-channel requests.
-- Added the repository-aware argument-free `omp` launcher for Branchlight.
+- Added the repository-aware argument-free `omp` launcher for Gradivus.
 - Added persisted per-provider OAuth account routing locks with optional sibling failover across agent, SDK, task, commit, cleanse, model, benchmark, and web-search startup paths.
 - Added an OAuth account manager to Providers settings for choosing, adding, and removing stored accounts and configuring failover.
 - Added configured and active OAuth account routing details to interactive and headless `/usage` reports.
 - Added process uptime and memory metrics to RPC state so supervisors can monitor resident agent runtimes.
+- Added scoped Agent Hub RPC commands (`get_agent_hub`, transcript reads, messaging, kill, and revive) plus full `agent_hub_update` snapshots for retained subagents and bounded active progress.
+- Added a credential-safe RPC settings catalog covering expanded OMP defaults with truthful immediate and next-session apply timing.
 
 ### Changed
 
 - Changed ChatGPT/Codex subscription image generation to use the Codex Responses API's native `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`; custom proxies keep their hosted Responses base URL.
 - Changed image generation to emit an immediate progress update while the provider is still generating the image.
-- Changed Branchlight browser automation to fail closed until an authenticated pane-scoped runtime broker is available; explicit non-Branchlight connected, spawned, relay, and cmux backends remain unchanged.
+- Changed Gradivus browser automation to fail closed until an authenticated pane-scoped runtime broker is available; explicit non-Gradivus connected, spawned, relay, and cmux backends remain unchanged.
 - Replaced the browser tool's Puppeteer CDP runtime with Playwright 1.62.1 while preserving the public browser actions, selectors, navigation waits, shared-browser ownership, and relay behavior.
+- Changed RPC prompts to acknowledge submission separately from asynchronous prompt completion so hosts can correlate local-only, agent-invoked, and failed turns without reusing response IDs.
+- Changed browser resource management to expose bounded inventories, scoped defaults, retained per-session leases, and FIFO same-tab runs with cancellation, timeout, and recursion guards.
+
 ### Fixed
+- Fixed RPC settings effect failures to roll back the validated value and its live session side effect instead of leaving a partially applied preference.
 
 - Fixed structured element selection delivery to serialize object DOM snapshots without `[object Object]` formatting and ensure single-shot event subscription per session.
-- Fixed Branchlight terminal startup so utility commands do not attach phantom agents, while real OMP sessions attach and detach through the runtime-scoped terminal lease.
+- Fixed Gradivus terminal startup so utility commands do not attach phantom agents, while real OMP sessions attach and detach through the runtime-scoped terminal lease.
 
+- Fixed prompt failures such as unavailable OAuth account locks, invalid models, missing credentials, and busy agents being reported as typed RPC prompt results instead of late duplicate responses.
 - Fixed explicit image-generation requests, including requests in resumed conversations, choosing programmatic SVG or browser screenshot fallbacks instead of the native image generator.
 - Fixed interactive `/usage` reports averaging locked OAuth accounts with sibling accounts instead of showing each account's usage independently.
+- Fixed first-party file, patch, AST, conflict/archive, and LSP mutations to share one process-local coordinator so overlapping edits serialize or fail without stale partial writes.
+- Fixed browser session disposal to cancel transient queued and active runs, settle their use tokens, and tear down unowned tabs after the final run completes.
+- Fixed Agent Hub hydration and lifecycle projection so parked, idle, and aborted rows remain visible, advisors stay read-only, and killed sessions remain as tombstoned history.
 
 ### Added
 

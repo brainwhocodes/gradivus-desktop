@@ -194,16 +194,16 @@ export class RpcProcess {
 			this.#setState("starting");
 			this.#assertActive(generation, controller);
 			this.#stderr = "";
-			const fixture = process.env.BRANCHLIGHT_RPC_FIXTURE;
+			const fixture = process.env.GRADIVUS_RPC_FIXTURE;
 			const executable = this.#dependencies.ompExecutablePath();
 			const configPath = this.#dependencies.rpcConfigPath();
 			const args = fixture
 				? [fixture, "--mode", "rpc", "--cwd", this.#options.cwd]
 				: ["--mode", "rpc", "--cwd", this.#options.cwd, "--config", configPath];
 			if (sessionFile) args.push("--resume", sessionFile);
-			const command = fixture ? (process.env.BRANCHLIGHT_NODE ?? "node") : executable;
+			const command = fixture ? (process.env.GRADIVUS_NODE ?? "node") : executable;
 			const token = this.#dependencies.generateToken();
-			const bootstrapTemp = await this.#dependencies.createTempDir("@branchlight-grpc-");
+			const bootstrapTemp = await this.#dependencies.createTempDir("@gradivus-grpc-");
 			this.#bootstrapTemp = bootstrapTemp;
 			this.#assertActive(generation, controller);
 			const readyFile = bootstrapTemp.join("bootstrap.json");
@@ -225,44 +225,83 @@ export class RpcProcess {
 				if (!this.#isActive(generation, controller)) return;
 				this.#stderr = `${this.#stderr}${String(chunk)}`.slice(-16 * 1024);
 			});
+			const startupFailure = waitForStartupFailure(child);
 			child.once("exit", (code, signal) => {
 				if (!this.#isActive(generation, controller)) return;
 				if (this.#state === "starting" || this.#state === "stopping" || this.#state === "stopped") return;
-				this.#setState("error", `OMP exited (${code ?? signal ?? "unknown"})`);
+				this.#setState("error", formatOmpExitError(code, signal).message);
 				if (!this.#isActive(generation, controller)) return;
 				void this.#disposeProcess(0);
 			});
-			const bootstrap = await Promise.race([
+			const bootstrap = await raceStartup(
 				this.#dependencies.waitForBootstrap(readyFile, { timeoutMs: 15_000, signal: controller.signal }),
-				waitForStartupFailure(child),
-			]);
+				startupFailure,
+				controller.signal,
+			);
 			this.#assertActive(generation, controller);
 			if (bootstrap.token !== token) throw new Error("OMP gRPC bootstrap token mismatch");
-			const connection = await this.#dependencies.connect(bootstrap);
-			const client = this.#dependencies.createClient(connection);
-			this.#client = client;
-			this.#assertActive(generation, controller);
-			client.onEvent(event => {
-				if (!this.#isActive(generation, controller)) return;
-				const frame = event as Record<string, unknown>;
-				if (frame.type === "agent_start") this.#setState("running");
-				else if (frame.type === "agent_end" && frame.isTerminal !== false) this.#setState("ready");
-				else if (frame.type === "rpc_error") {
-					this.#setState("error", typeof frame.message === "string" ? frame.message : "OMP gRPC failed");
-					if (!this.#isActive(generation, controller)) return;
-					void this.#disposeProcess(0);
+			const rawConnection = Promise.resolve(this.#dependencies.connect(bootstrap));
+			let connection: OmpGrpcClientConnection | undefined;
+			let connectionTransferred = false;
+			let lateConnectionCleanupAttached = false;
+			let connectionClosed = false;
+			const closeConnectionOnce = (candidate: OmpGrpcClientConnection): void => {
+				if (connectionClosed) return;
+				connectionClosed = true;
+				void Promise.resolve()
+					.then(() => candidate.close())
+					.catch(() => {});
+			};
+			const attachLateConnectionCleanup = (): void => {
+				if (lateConnectionCleanupAttached) return;
+				lateConnectionCleanupAttached = true;
+				void rawConnection.then(
+					candidate => {
+						if (!connectionTransferred) closeConnectionOnce(candidate);
+					},
+					() => {},
+				);
+			};
+			try {
+				connection = await raceStartup(rawConnection, startupFailure, controller.signal);
+				this.#assertActive(generation, controller);
+				const client = this.#dependencies.createClient(connection);
+				this.#assertActive(generation, controller);
+				this.#client = client;
+				if (!this.#isActive(generation, controller)) {
+					this.#client = undefined;
+					throw new StartupAbortedError();
 				}
-				if (!this.#isActive(generation, controller)) return;
-				this.#options.onEvent(event);
-			});
-			client.onExtension(request => {
-				if (this.#isActive(generation, controller)) this.#options.onExtension(request);
-			});
-			await abortable(client.start(), controller.signal);
-			this.#assertActive(generation, controller);
-			this.#setState("ready");
-			this.#assertActive(generation, controller);
-			return client;
+				connectionTransferred = true;
+				client.onEvent(event => {
+					if (!this.#isActive(generation, controller)) return;
+					const frame = event as Record<string, unknown>;
+					if (frame.type === "agent_start") this.#setState("running");
+					else if (frame.type === "agent_end" && frame.isTerminal !== false) this.#setState("ready");
+					else if (frame.type === "rpc_error") {
+						this.#setState("error", typeof frame.message === "string" ? frame.message : "OMP gRPC failed");
+						if (!this.#isActive(generation, controller)) return;
+						void this.#disposeProcess(0);
+					}
+					if (!this.#isActive(generation, controller)) return;
+					this.#options.onEvent(event);
+				});
+				client.onExtension(request => {
+					if (this.#isActive(generation, controller)) this.#options.onExtension(request);
+				});
+				await raceStartup(client.start(), startupFailure, controller.signal);
+				this.#assertActive(generation, controller);
+				if (child.exitCode !== null || child.signalCode !== null)
+					throw formatOmpExitError(child.exitCode, child.signalCode);
+				this.#setState("ready");
+				this.#assertActive(generation, controller);
+				return client;
+			} catch (error) {
+				if (connectionTransferred) throw error;
+				if (connection) closeConnectionOnce(connection);
+				else attachLateConnectionCleanup();
+				throw error;
+			}
 		} catch (error) {
 			if (this.#isActive(generation, controller)) {
 				this.#setState(
@@ -350,9 +389,12 @@ export class RpcProcess {
 	#assertActive(generation: number, controller: AbortController): void {
 		if (!this.#isActive(generation, controller)) throw new StartupAbortedError();
 	}
-
 	#isActive(generation: number, controller: AbortController): boolean {
-		return this.#generation === generation && !controller.signal.aborted && this.#state !== "stopping";
+		return (
+			this.#generation === generation &&
+			!controller.signal.aborted &&
+			(this.#startupAbort === controller || this.#client !== undefined)
+		);
 	}
 
 	#setState(state: ProcessState, error?: string): void {
@@ -388,18 +430,26 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 	return gate.promise;
 }
 
+function raceStartup<T>(promise: Promise<T>, startupFailure: Promise<never>, signal: AbortSignal): Promise<T> {
+	return abortable(Promise.race([promise, startupFailure]), signal);
+}
+
 function isFiniteNonnegative(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function formatOmpExitError(code: number | null, signal: NodeJS.Signals | null): Error {
+	return new Error(`OMP exited (${code ?? signal ?? "unknown"})`);
 }
 
 function waitForStartupFailure(child: ChildProcessWithoutNullStreams): Promise<never> {
 	const failed = Promise.withResolvers<never>();
 	if (child.exitCode !== null || child.signalCode !== null) {
-		failed.reject(new Error(`OMP exited (${child.exitCode ?? child.signalCode ?? "unknown"})`));
+		failed.reject(formatOmpExitError(child.exitCode, child.signalCode));
 		return failed.promise;
 	}
 	child.once("error", error => failed.reject(error));
-	child.once("exit", (code, signal) => failed.reject(new Error(`OMP exited (${code ?? signal ?? "unknown"})`)));
+	child.once("exit", (code, signal) => failed.reject(formatOmpExitError(code, signal)));
 	return failed.promise;
 }
 

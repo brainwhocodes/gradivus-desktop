@@ -1,15 +1,4 @@
-/**
- * Coding-agent runner that drives the hashline {@link Patcher} on behalf of
- * the `edit` tool. Converts an `{input}` tool-call payload into a
- * fully-applied patch, wraps the result in the agent's
- * {@link AgentToolResult} shape, and attaches LSP diagnostics + `outputMeta`
- * for the renderer.
- *
- * Multi-section patches are preflighted up front via {@link Patcher.prepare}
- * so a partial batch never lands; the commit loop then narrows the LSP
- * batch's `flush` flag to true only for the final write so diagnostics
- * round-trip once.
- */
+import * as path from "node:path";
 import {
 	type BlockResolution,
 	buildCompactDiffPreview,
@@ -17,6 +6,8 @@ import {
 	commitClipboard,
 	forkClipboard,
 	MismatchError as HashlineMismatchError,
+	type InMemorySnapshotStore,
+	type MutationScope,
 	Patch,
 	Patcher,
 	type PatchSectionResult,
@@ -31,6 +22,7 @@ import { ToolError } from "../../tools/tool-errors";
 import { generateDiffString } from "../diff";
 import { getEditClipboard } from "../edit-clipboard";
 import { getFileSnapshotStore } from "../file-snapshot-store";
+import { exactMutationScope, withMutationLease } from "../mutation";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "../renderer";
 import { pruneOversizedEditSnapshots } from "../snapshot-details";
 import { nativeBlockResolver } from "./block-resolver";
@@ -79,18 +71,45 @@ function noChangeLoopDiagnostic(path: string, count: number): string {
 		`tag, then author a different edit). This exact payload will keep being rejected until it changes.`
 	);
 }
-
 function assertUniqueCanonicalPaths(prepared: readonly PreparedSection[]): void {
 	const seen = new Map<string, string>();
 	for (const entry of prepared) {
-		const previous = seen.get(entry.canonicalPath);
-		if (previous !== undefined) {
-			throw new Error(
-				`Multiple hashline sections resolve to the same file (${previous} and ${entry.section.path}). Merge their ops under one header before applying.`,
-			);
+		const paths = [
+			{ canonicalPath: entry.canonicalPath, label: entry.section.path },
+			...(entry.destinationCanonicalPath
+				? [{ canonicalPath: entry.destinationCanonicalPath, label: `${entry.section.path} destination` }]
+				: []),
+		];
+		for (const { canonicalPath, label } of paths) {
+			const previous = seen.get(canonicalPath);
+			if (previous !== undefined) {
+				throw new Error(
+					`Multiple hashline mutations resolve to the same file (${previous} and ${label}). Merge their ops under one header before applying.`,
+				);
+			}
+			seen.set(canonicalPath, label);
 		}
-		seen.set(entry.canonicalPath, entry.section.path);
 	}
+}
+
+async function mutationScopesForPatch(
+	fs: HashlineFilesystem,
+	snapshots: InMemorySnapshotStore,
+	patch: Patch,
+): Promise<MutationScope[]> {
+	const scopes: MutationScope[] = [];
+	for (const section of patch.sections) {
+		scopes.push(exactMutationScope(fs.canonicalPath(section.path)));
+		if (section.fileOp?.kind === "move") scopes.push(exactMutationScope(fs.canonicalPath(section.fileOp.dest)));
+		if (section.fileHash !== undefined && !(await fs.exists(section.path))) {
+			const basename = path.basename(section.path);
+			for (const snapshot of snapshots.findByHash(section.fileHash)) {
+				if (path.basename(snapshot.path) === basename)
+					scopes.push(exactMutationScope(fs.canonicalPath(snapshot.path)));
+			}
+		}
+	}
+	return scopes;
 }
 
 function narrowBatchRequest(outer: LspBatchRequest | undefined, isLast: boolean): LspBatchRequest | undefined {
@@ -236,78 +255,88 @@ export async function executeHashlineSingle(
 	const sessionClipboard = getEditClipboard(options.session);
 	const clipboard = startClipboardBatch(sessionClipboard);
 
-	// Single-section fast path: prepare, commit, render.
-	const inputHash = hashPatchInput(options.input);
-	if (patch.sections.length === 1) {
-		fs.setBatchRequest(narrowBatchRequest(options.batchRequest, true));
-		const prepared = await patcher.prepare(patch.sections[0], clipboard);
-		const sectionResult = await patcher.commit(prepared);
-		commitClipboard(clipboard, sessionClipboard);
-		if (sectionResult.op === "noop") {
-			const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
-			if (escalate) {
-				throw new ToolError(noChangeLoopDiagnostic(sectionResult.path, count));
+	const scopes = await mutationScopesForPatch(fs, snapshots, patch);
+	return withMutationLease(
+		scopes,
+		async lease => {
+			// Single-section fast path: prepare, commit, render.
+			const inputHash = hashPatchInput(options.input);
+			if (patch.sections.length === 1) {
+				fs.setBatchRequest(narrowBatchRequest(options.batchRequest, true));
+				const prepared = await patcher.prepare(patch.sections[0], clipboard);
+				const sectionResult = await patcher.commit(prepared, lease);
+				commitClipboard(clipboard, sessionClipboard);
+				if (sectionResult.op === "noop") {
+					const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
+					if (escalate) {
+						throw new ToolError(noChangeLoopDiagnostic(sectionResult.path, count));
+					}
+					return renderSection(sectionResult, undefined, prepared.section.path).toolResult;
+				}
+				resetNoopEdit(options.session, sectionResult.canonicalPath);
+				return renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared.section.path)
+					.toolResult;
 			}
-			return renderSection(sectionResult, undefined, prepared.section.path).toolResult;
-		}
-		resetNoopEdit(options.session, sectionResult.canonicalPath);
-		return renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared.section.path).toolResult;
-	}
 
-	// Multi-section: prepare every section up front so we fail fast before
-	// any write hits the filesystem. One batch-local register spans the batch,
-	// so `CUT` in one section feeds a register-backed `PUT` in a later one.
-	const prepared: PreparedSection[] = [];
-	// Register state after each section's prepare. Commits are non-atomic: a
-	// mid-batch write failure leaves earlier sections on disk, so the session
-	// register must reflect exactly the landed prefix — content a landed CUT
-	// deleted would otherwise be lost.
-	const sectionStates: Clipboard[] = [];
-	for (const section of patch.sections) {
-		prepared.push(await patcher.prepare(section, clipboard));
-		sectionStates.push(forkClipboard(clipboard));
-	}
-	assertUniqueCanonicalPaths(prepared);
-	for (const entry of prepared) {
-		if (entry.isNoop) {
-			const { count, escalate } = recordNoopEdit(options.session, entry.canonicalPath, inputHash);
-			throw escalate
-				? new ToolError(noChangeLoopDiagnostic(entry.section.path, count))
-				: new ToolError(noChangeDiagnostic(entry.section.path));
-		}
-	}
-	// Then commit each one, narrowing the LSP batch flush flag to the final
-	// section only. A no-op apply mid-batch is treated as a hard failure —
-	// the model authored anchors that match the current file content.
-	const rendered: RenderedSection[] = [];
-	for (let i = 0; i < prepared.length; i++) {
-		const isLast = i === prepared.length - 1;
-		fs.setBatchRequest(narrowBatchRequest(options.batchRequest, isLast));
-		const sectionResult = await patcher.commit(prepared[i]);
-		commitClipboard(sectionStates[i], sessionClipboard);
-		if (sectionResult.op === "noop") {
-			const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
-			throw escalate
-				? new ToolError(noChangeLoopDiagnostic(sectionResult.path, count))
-				: new ToolError(noChangeDiagnostic(sectionResult.path));
-		}
-		resetNoopEdit(options.session, sectionResult.canonicalPath);
-		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path));
-	}
-	return {
-		content: [
-			{
-				type: "text",
-				text: rendered
-					.map(r => r.toolResult.content.map(part => (part.type === "text" ? part.text : "")).join("\n"))
-					.join("\n\n"),
-			},
-		],
-		details: pruneOversizedEditSnapshots({
-			diff: rendered.map(r => r.toolResult.details?.diff ?? "").join("\n"),
-			perFileResults: rendered.map(r => r.perFileResult),
-		}),
-	};
+			// Multi-section: prepare every section up front so we fail fast before
+			// any write hits the filesystem. One batch-local register spans the batch,
+			// so `CUT` in one section feeds a register-backed `PUT` in a later one.
+			const prepared: PreparedSection[] = [];
+			// Register state after each section's prepare. Commits are non-atomic: a
+			// mid-batch write failure leaves earlier sections on disk, so the session
+			// register must reflect exactly the landed prefix — content a landed CUT
+			// deleted would otherwise be lost.
+			const sectionStates: Clipboard[] = [];
+			for (const section of patch.sections) {
+				prepared.push(await patcher.prepare(section, clipboard));
+				sectionStates.push(forkClipboard(clipboard));
+			}
+			assertUniqueCanonicalPaths(prepared);
+			for (const entry of prepared) {
+				if (entry.isNoop) {
+					const { count, escalate } = recordNoopEdit(options.session, entry.canonicalPath, inputHash);
+					throw escalate
+						? new ToolError(noChangeLoopDiagnostic(entry.section.path, count))
+						: new ToolError(noChangeDiagnostic(entry.section.path));
+				}
+			}
+			// Then commit each one, narrowing the LSP batch flush flag to the final
+			// section only. A no-op apply mid-batch is treated as a hard failure —
+			// the model authored anchors that match the current file content.
+			const rendered: RenderedSection[] = [];
+			for (let i = 0; i < prepared.length; i++) {
+				const isLast = i === prepared.length - 1;
+				fs.setBatchRequest(narrowBatchRequest(options.batchRequest, isLast));
+				const sectionResult = await patcher.commit(prepared[i], lease);
+				commitClipboard(sectionStates[i], sessionClipboard);
+				if (sectionResult.op === "noop") {
+					const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
+					throw escalate
+						? new ToolError(noChangeLoopDiagnostic(sectionResult.path, count))
+						: new ToolError(noChangeDiagnostic(sectionResult.path));
+				}
+				resetNoopEdit(options.session, sectionResult.canonicalPath);
+				rendered.push(
+					renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path),
+				);
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text: rendered
+							.map(r => r.toolResult.content.map(part => (part.type === "text" ? part.text : "")).join("\n"))
+							.join("\n\n"),
+					},
+				],
+				details: pruneOversizedEditSnapshots({
+					diff: rendered.map(r => r.toolResult.details?.diff ?? "").join("\n"),
+					perFileResults: rendered.map(r => r.perFileResult),
+				}),
+			};
+		},
+		options.signal,
+	);
 }
 
 export { HashlineMismatchError, type HashlineParams, hashlineEditParamsSchema };

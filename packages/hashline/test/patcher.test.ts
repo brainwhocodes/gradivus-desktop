@@ -10,6 +10,7 @@ import {
 	InMemorySnapshotStore,
 	MismatchError,
 	NodeFilesystem,
+	NoWriteConflictError,
 	Patch,
 	Patcher,
 	type WriteResult,
@@ -529,5 +530,55 @@ describe("Patcher tag-based path recovery", () => {
 		const patcher = new Patcher({ fs, snapshots });
 
 		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nPUT 1-1:\n+X`))).rejects.toThrow(/write gate/);
+	});
+});
+describe("Patcher prepare/commit revalidation", () => {
+	it("rejects a stale prepared update without writing or recording a new snapshot", async () => {
+		const fs = new InMemoryFilesystem([[PATH, "before\n"]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, "before\n");
+		const patcher = new Patcher({ fs, snapshots });
+		const prepared = await patcher.prepare(Patch.parse(`[${PATH}#${tag}]\nPUT 1-1:\n+after`).sections[0]!);
+
+		fs.set(PATH, "another agent\n");
+		await expect(patcher.commit(prepared)).rejects.toBeInstanceOf(NoWriteConflictError);
+		expect(fs.get(PATH)).toBe("another agent\n");
+		expect(snapshots.byHash(PATH, tag)?.text).toBe("before\n");
+	});
+
+	it("validates both source and move destination identities", async () => {
+		const fs = new InMemoryFilesystem([
+			["src/old.ts", "before\n"],
+			["src/new.ts", "destination\n"],
+		]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record("src/old.ts", "before\n");
+		const patcher = new Patcher({ fs, snapshots });
+		const prepared = await patcher.prepare(Patch.parse(`[src/old.ts#${tag}]\nMV src/new.ts`).sections[0]!);
+
+		fs.set("src/new.ts", "changed destination\n");
+		await expect(patcher.commit(prepared)).rejects.toBeInstanceOf(NoWriteConflictError);
+		expect(fs.get("src/old.ts")).toBe("before\n");
+		expect(fs.get("src/new.ts")).toBe("changed destination\n");
+	});
+
+	it("rejects source/destination collisions before any section writes", async () => {
+		const fs = new InMemoryFilesystem([
+			["src/old.ts", "before\n"],
+			["src/new.ts", "destination\n"],
+		]);
+		const snapshots = new InMemorySnapshotStore();
+		const sourceTag = snapshots.record("src/old.ts", "before\n");
+		const destinationTag = snapshots.record("src/new.ts", "destination\n");
+		const patcher = new Patcher({ fs, snapshots });
+		const patch = Patch.parse(
+			[`[src/old.ts#${sourceTag}]`, "MV src/new.ts", `[src/new.ts#${destinationTag}]`, "PUT 1-1:", "+changed"].join(
+				"\n",
+			),
+		);
+
+		await expect(patcher.apply(patch)).rejects.toThrow(/same file/);
+		expect(fs.get("src/old.ts")).toBe("before\n");
+		expect(fs.get("src/new.ts")).toBe("destination\n");
 	});
 });

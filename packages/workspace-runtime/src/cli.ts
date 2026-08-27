@@ -9,18 +9,18 @@ const firstArg = argv[0];
 
 // Hidden worker runtime server selector
 if (firstArg === "__omp_worker_runtime_server") {
-	const bootstrapRuntimeDir = process.env.BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR;
-	const tokenBasename = process.env.BRANCHLIGHT_BOOTSTRAP_TOKEN_BASENAME;
-	const endpointBasename = process.env.BRANCHLIGHT_BOOTSTRAP_ENDPOINT_BASENAME;
-	const executablePath = process.env.BRANCHLIGHT_BOOTSTRAP_EXECUTABLE_PATH;
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_TOKEN_BASENAME;
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_ENDPOINT_BASENAME;
+	const bootstrapRuntimeDir = process.env.GRADIVUS_BOOTSTRAP_RUNTIME_DIR;
+	const tokenBasename = process.env.GRADIVUS_BOOTSTRAP_TOKEN_BASENAME;
+	const endpointBasename = process.env.GRADIVUS_BOOTSTRAP_ENDPOINT_BASENAME;
+	const executablePath = process.env.GRADIVUS_BOOTSTRAP_EXECUTABLE_PATH;
+	delete process.env.GRADIVUS_BOOTSTRAP_TOKEN_BASENAME;
+	delete process.env.GRADIVUS_BOOTSTRAP_ENDPOINT_BASENAME;
 
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_EXECUTABLE_PATH;
+	delete process.env.GRADIVUS_BOOTSTRAP_EXECUTABLE_PATH;
 	captureSanitizedUserEnvironment();
 
 	if (!bootstrapRuntimeDir) {
-		process.stderr.write("Fatal: missing BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR\n");
+		process.stderr.write("Fatal: missing GRADIVUS_BOOTSTRAP_RUNTIME_DIR\n");
 		process.exit(1);
 	}
 
@@ -44,11 +44,11 @@ if (firstArg === "__omp_worker_runtime_server") {
 	captureSanitizedUserEnvironment();
 
 	const resolveRuntimeRoot = (): string => {
-		if (process.env.BRANCHLIGHT_RUNTIME_DIR) {
-			return path.resolve(process.env.BRANCHLIGHT_RUNTIME_DIR);
+		if (process.env.GRADIVUS_RUNTIME_DIR) {
+			return path.resolve(process.env.GRADIVUS_RUNTIME_DIR);
 		}
 		const home = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
-		return path.join(home, ".branchlight", "runtime");
+		return path.join(home, ".gradivus", "runtime");
 	};
 
 	const runtimeRoot = resolveRuntimeRoot();
@@ -93,7 +93,7 @@ if (firstArg === "__omp_worker_runtime_server") {
 	} else if (command === "command") {
 		const rawJson = argv[1];
 		if (!rawJson) {
-			process.stderr.write("Usage: branchlight command <json>\n");
+			process.stderr.write("Usage: gradivus command <json>\n");
 			process.exit(1);
 		}
 		const client = new WorkspaceClient({ runtimeRoot });
@@ -111,6 +111,6 @@ if (firstArg === "__omp_worker_runtime_server") {
 			process.exit(1);
 		}
 	} else {
-		process.stdout.write("Branchlight Workspace Runtime CLI\nCommands: status, workspace list, command <json>\n");
+		process.stdout.write("Gradivus Workspace Runtime CLI\nCommands: status, workspace list, command <json>\n");
 	}
 }

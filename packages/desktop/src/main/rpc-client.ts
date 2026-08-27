@@ -4,6 +4,7 @@ import {
 	type OmpGrpcClientConnection,
 	type OmpGrpcServerFrame,
 } from "@oh-my-pi/pi-grpc";
+import type { PromptImageContent } from "../shared/contracts";
 import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse } from "../shared/rpc-wire";
 
 type RpcEventListener = (event: unknown) => void;
@@ -45,17 +46,23 @@ export class RpcClient {
 	async start(): Promise<void> {
 		await this.#ready.promise;
 	}
-
-	async prompt(message: string): Promise<void> {
-		const response = await this.request({ type: "prompt", message });
+	async prompt(message: string, images?: PromptImageContent[]): Promise<string> {
+		const id = `gradivus-${++this.#sequence}`;
+		const response = await this.request({
+			id,
+			type: "prompt",
+			message,
+			...(images && images.length > 0 ? { images } : {}),
+		});
 		if (!response.success) throw new Error(response.error);
+		return id;
 	}
 
 	async request(command: RpcCommand): Promise<RpcResponse> {
 		if (this.#closed) throw new Error("RPC process is closed");
 		if (!this.#readyReceived) throw new Error("RPC process is not ready");
 		const { id: commandId, type, ...payload } = command;
-		const id = commandId ?? `branchlight-${++this.#sequence}`;
+		const id = commandId ?? `gradivus-${++this.#sequence}`;
 		if (this.#pending.has(id)) throw new Error(`RPC request id is already pending: ${id}`);
 		const pending = Promise.withResolvers<RpcResponse>();
 		this.#pending.set(id, { command: type, resolve: pending.resolve, reject: pending.reject });
@@ -165,6 +172,7 @@ export class RpcClient {
 
 	#fail(error: Error): void {
 		if (this.#closed) return;
+		console.error("RPC CLIENT FAIL REASON:", error.message);
 		this.#closed = true;
 		this.#ready.reject(error);
 		for (const request of this.#pending.values()) request.reject(error);

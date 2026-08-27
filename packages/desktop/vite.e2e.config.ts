@@ -6,4 +6,7 @@ export default defineConfig({
 	publicDir: "../../e2e/public",
 	plugins: [svelte()],
 	base: "./",
+	server: {
+		allowedHosts: true,
+	},
 });

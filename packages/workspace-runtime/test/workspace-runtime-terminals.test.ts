@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	buildChildEnvironment,
+	isReservedChildEnvName,
 	type TerminalOutputChunk,
 	WorkspaceClient,
 	WorkspaceServer,
@@ -10,6 +12,12 @@ import {
 	WorkspaceTerminalManager,
 	WorkspaceTerminalSession,
 } from "../src";
+
+// Parent-provided reserved variables must never reach terminal children (reserved prefix in src/env.ts).
+process.env.GRADIVUS_PARENT_LEAK = "parent-provided";
+afterAll(() => {
+	delete process.env.GRADIVUS_PARENT_LEAK;
+});
 
 describe("WorkspaceTerminalSession & Manager", () => {
 	let supervisor: WorkspaceSupervisor;
@@ -188,6 +196,42 @@ describe("WorkspaceServer terminal authority", () => {
 		expect(closed.status).toBe("accepted");
 		expect(closed.document.terminals.some(item => item.id === "term-authoritative")).toBe(false);
 	});
+	it("opens detached terminals without creating tabs or panes", async () => {
+		const workspace = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-detached-workspace",
+			workspaceId: "ws-detached",
+			expectedRevision: 0,
+			issuedAt: Date.now(),
+			type: "workspace.create",
+			payload: {
+				name: "Detached Workspace",
+				locationId: "loc-detached",
+				locationName: "Local",
+				address: { kind: "local", path: root },
+			},
+		});
+		const opened = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-detached-open",
+			workspaceId: "ws-detached",
+			expectedRevision: workspace.document.revision,
+			issuedAt: Date.now(),
+			type: "terminal.open",
+			payload: {
+				id: "term-detached",
+				detached: true,
+				locationId: "loc-detached",
+				label: "Chat shell",
+				columns: 80,
+				rows: 24,
+			},
+		});
+		expect(opened.status).toBe("accepted");
+		expect(opened.document.terminals.find(item => item.id === "term-detached")?.paneId).toBeUndefined();
+		expect(opened.document.tabs).toHaveLength(0);
+		expect(opened.document.panes).toHaveLength(0);
+	});
 
 	it("accepts terminal.open with custom shell and args and launches process with them", async () => {
 		const workspace = await client.executeCommand({
@@ -252,5 +296,184 @@ describe("WorkspaceServer terminal authority", () => {
 			type: "terminal.close",
 			payload: { id: "term-custom-shell" },
 		});
+	});
+
+	it("stamps spawned terminals with the Gradivus capability family", async () => {
+		const workspace = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-env-family-workspace",
+			workspaceId: "ws-env-family",
+			expectedRevision: 0,
+			issuedAt: Date.now(),
+			type: "workspace.create",
+			payload: {
+				name: "Env Family Workspace",
+				locationId: "loc-env-family",
+				locationName: "Local",
+				address: { kind: "local", path: root },
+			},
+		});
+		expect(workspace.status).toBe("accepted");
+		const profile = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-env-family-profile",
+			workspaceId: "ws-env-family",
+			expectedRevision: workspace.document.revision,
+			issuedAt: Date.now(),
+			type: "profile.create",
+			payload: {
+				id: "profile-env-family",
+				name: "Env Family Profile",
+				config: {},
+				capabilityIds: [],
+			},
+		});
+		expect(profile.status).toBe("accepted");
+
+		const isWindows = process.platform === "win32";
+		const opened = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-env-family-open",
+			workspaceId: "ws-env-family",
+			expectedRevision: profile.document.revision,
+			issuedAt: Date.now(),
+			type: "terminal.open",
+			payload: {
+				id: "term-env-family",
+				paneId: "pane-env-family",
+				tabId: "tab-env-family",
+				locationId: "loc-env-family",
+				profileId: "profile-env-family",
+				label: "Env Family Terminal",
+				columns: 80,
+				rows: 24,
+				...(isWindows
+					? {
+							shell: "cmd.exe",
+							args: [
+								"/c",
+								"if defined GRADIVUS_PARENT_LEAK (echo FAMILY[%GRADIVUS_TERMINAL%][%GRADIVUS_TERMINAL_ID%][%GRADIVUS_PANE_ID%][%GRADIVUS_WORKSPACE_ID%][%GRADIVUS_PROFILE_ID%][leaked]) else (echo FAMILY[%GRADIVUS_TERMINAL%][%GRADIVUS_TERMINAL_ID%][%GRADIVUS_PANE_ID%][%GRADIVUS_WORKSPACE_ID%][%GRADIVUS_PROFILE_ID%][unset])",
+							],
+						}
+					: {
+							shell: "/bin/sh",
+							args: [
+								"-c",
+								'printf \'FAMILY[%s][%s][%s][%s][%s][%s]\\n\' "$GRADIVUS_TERMINAL" "$GRADIVUS_TERMINAL_ID" "$GRADIVUS_PANE_ID" "$GRADIVUS_WORKSPACE_ID" "$GRADIVUS_PROFILE_ID" "${GRADIVUS_PARENT_LEAK:-unset}"',
+							],
+						}),
+			},
+		});
+		expect(opened.status).toBe("accepted");
+
+		const expectedFamily = "FAMILY[1][term-env-family][pane-env-family][ws-env-family][profile-env-family][unset]";
+		let familyOutput = "";
+		const marker = Promise.withResolvers<void>();
+		const removeOutput = client.onTerminalOutput("term-env-family", frame => {
+			familyOutput += frame.data;
+			if (familyOutput.includes(expectedFamily)) marker.resolve();
+		});
+		await client.subscribeTerminal("term-env-family", 0);
+		await marker.promise;
+		removeOutput();
+		expect(familyOutput).toContain(expectedFamily);
+		expect(familyOutput).not.toContain("parent-provided");
+
+		const current = await client.getDocument();
+		await client.executeCommand({
+			version: 1,
+			commandId: "cmd-env-family-close",
+			workspaceId: "ws-env-family",
+			expectedRevision: current.revision,
+			issuedAt: Date.now(),
+			type: "terminal.close",
+			payload: { id: "term-env-family" },
+		});
+	});
+
+	it("omits GRADIVUS_PROFILE_ID for terminals opened without a profile", async () => {
+		const workspace = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-no-profile-workspace",
+			workspaceId: "ws-no-profile",
+			expectedRevision: 0,
+			issuedAt: Date.now(),
+			type: "workspace.create",
+			payload: {
+				name: "No Profile Workspace",
+				locationId: "loc-no-profile",
+				locationName: "Local",
+				address: { kind: "local", path: root },
+			},
+		});
+		expect(workspace.status).toBe("accepted");
+
+		const isWindows = process.platform === "win32";
+		const opened = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-no-profile-open",
+			workspaceId: "ws-no-profile",
+			expectedRevision: workspace.document.revision,
+			issuedAt: Date.now(),
+			type: "terminal.open",
+			payload: {
+				id: "term-no-profile",
+				locationId: "loc-no-profile",
+				label: "No Profile Terminal",
+				columns: 80,
+				rows: 24,
+				...(isWindows
+					? {
+							shell: "cmd.exe",
+							args: ["/c", "if defined GRADIVUS_PROFILE_ID (echo PROFILE^[set^]) else (echo PROFILE^[unset^])"],
+						}
+					: {
+							shell: "/bin/sh",
+							args: ["-c", "printf 'PROFILE[%s]\\n' \"${GRADIVUS_PROFILE_ID-unset}\""],
+						}),
+			},
+		});
+		expect(opened.status).toBe("accepted");
+
+		let profileOutput = "";
+		const marker = Promise.withResolvers<void>();
+		const removeOutput = client.onTerminalOutput("term-no-profile", frame => {
+			profileOutput += frame.data;
+			if (profileOutput.includes("PROFILE[unset]")) marker.resolve();
+		});
+		await client.subscribeTerminal("term-no-profile", 0);
+		await marker.promise;
+		removeOutput();
+		expect(profileOutput).not.toContain("profile-env-family");
+		expect(profileOutput).toContain("PROFILE[unset]");
+
+		const current = await client.getDocument();
+		await client.executeCommand({
+			version: 1,
+			commandId: "cmd-no-profile-close",
+			workspaceId: "ws-no-profile",
+			expectedRevision: current.revision,
+			issuedAt: Date.now(),
+			type: "terminal.close",
+			payload: { id: "term-no-profile" },
+		});
+	});
+});
+
+describe("child environment policy", () => {
+	it("rejects reserved GRADIVUS_* names in explicit bindings but keeps approved scoped descriptors", () => {
+		expect(isReservedChildEnvName("GRADIVUS_PARENT_LEAK")).toBe(true);
+
+		const env = buildChildEnvironment({
+			explicitBindings: {
+				TERM: "xterm-256color",
+				GRADIVUS_PARENT_LEAK: "parent-provided",
+			},
+		});
+		expect(env.TERM).toBe("xterm-256color");
+		expect(env.GRADIVUS_PARENT_LEAK).toBeUndefined();
+
+		const scoped = buildChildEnvironment({ scopedDescriptor: { GRADIVUS_TERMINAL: "1" } });
+		expect(scoped.GRADIVUS_TERMINAL).toBe("1");
 	});
 });

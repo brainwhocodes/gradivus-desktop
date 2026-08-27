@@ -13,7 +13,7 @@ bun add @oh-my-pi/omptype
 ```
 
 Runs on Node 20+ (published as compiled ESM with bundled type declarations)
-and Bun 1.3.14+ (which resolves the TypeScript source directly via the `bun`
+and Bun 1.4.0+ (which resolves the TypeScript source directly via the `bun`
 export condition). No runtime dependencies.
 
 ## Usage
@@ -101,7 +101,7 @@ schemas and report the fastest of five repetitions. Hot validation mixes valid
 and invalid inputs after 2,000 warmup calls. The valid-only row uses each
 library's public boolean path after 20,000 warmup calls.
 
-Representative result on an Apple M4 Max with Darwin 25.6.0 and Bun 1.3.14:
+Representative result on an Apple M4 Max with Darwin 25.6.0 and Bun 1.4.0:
 
 | Phase                   |    omptype |           ArkType |         TypeBox |
 | ----------------------- | ---------: | ----------------: | --------------: |

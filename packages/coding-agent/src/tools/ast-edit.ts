@@ -8,6 +8,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { editMutationCoordinator } from "../edit/mutation";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
@@ -444,87 +445,146 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-						});
-						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
-							applyResult.parseErrors,
+						const lease = await editMutationCoordinator.acquire(
+							fileList.map(relativePath => ({
+								kind: "exact" as const,
+								path: path.resolve(this.session.cwd, relativePath),
+							})),
+							signal,
 						);
-						const { record: recordAppliedFile, list: appliedFileList } = createFileRecorder();
-						const appliedFileReplacementCounts = new Map<string, number>();
-						for (const fileChange of applyResult.fileChanges) {
-							const relativePath = formatPath(fileChange.path);
-							recordAppliedFile(relativePath);
-							appliedFileReplacementCounts.set(
-								relativePath,
-								(appliedFileReplacementCounts.get(relativePath) ?? 0) + fileChange.count,
+						try {
+							const verification = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: true,
+								maxFiles,
+								failOnParseError: false,
+								signal,
+							});
+							const verificationCounts = new Map(
+								verification.fileChanges.map(change => [formatPath(change.path), change.count]),
 							);
-						}
-						for (const change of applyResult.changes) {
-							recordAppliedFile(formatPath(change.path));
-						}
-						// The preview minted tags from pre-apply content; the rewrite just
-						// invalidated them. Re-record post-apply snapshots (canonical keys)
-						// so the model's next hashline edit anchors against fresh tags.
-						const freshTagLines: string[] = [];
-						if (useHashLines) {
-							const snapshotStore = getFileSnapshotStore(this.session);
-							for (const relativePath of appliedFileList) {
-								const appliedAbsolutePath = path.resolve(this.session.cwd, relativePath);
-								try {
-									const fullText = normalizeToLF(await Bun.file(appliedAbsolutePath).text());
-									const freshTag = snapshotStore.record(canonicalSnapshotKey(appliedAbsolutePath), fullText);
-									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
-								} catch {
-									// File disappeared between apply and re-read; skip its tag.
+							const previewStillMatches =
+								verification.totalReplacements === result.totalReplacements &&
+								verification.filesTouched === result.filesTouched &&
+								fileList.every(
+									filePath => verificationCounts.get(filePath) === fileReplacementCounts.get(filePath),
+								) &&
+								verification.fileChanges.every(
+									change => fileReplacementCounts.get(formatPath(change.path)) === change.count,
+								);
+							if (!previewStillMatches) {
+								const staleDetails: AstEditToolDetails = {
+									totalReplacements: verification.totalReplacements,
+									filesTouched: verification.filesTouched,
+									filesSearched: verification.filesSearched,
+									applied: false,
+									limitReached: verification.limitReached,
+									scopePath,
+									files: verification.fileChanges.map(change => formatPath(change.path)),
+									fileReplacements: verification.fileChanges.map(change => ({
+										path: formatPath(change.path),
+										count: change.count,
+									})),
+								};
+								return {
+									...toolResult(staleDetails)
+										.text(
+											"Preview is stale / no longer matches; no replacements were applied. Re-read the affected files and stage a new preview.",
+										)
+										.done(),
+									isError: true,
+								};
+							}
+							const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+							});
+							const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
+								applyResult.parseErrors,
+							);
+							const { record: recordAppliedFile, list: appliedFileList } = createFileRecorder();
+							const appliedFileReplacementCounts = new Map<string, number>();
+							for (const fileChange of applyResult.fileChanges) {
+								const relativePath = formatPath(fileChange.path);
+								recordAppliedFile(relativePath);
+								appliedFileReplacementCounts.set(
+									relativePath,
+									(appliedFileReplacementCounts.get(relativePath) ?? 0) + fileChange.count,
+								);
+							}
+							for (const change of applyResult.changes) {
+								recordAppliedFile(formatPath(change.path));
+							}
+							// The preview minted tags from pre-apply content; the rewrite just
+							// invalidated them. Re-record post-apply snapshots (canonical keys)
+							// so the model's next hashline edit anchors against fresh tags.
+							const freshTagLines: string[] = [];
+							if (useHashLines) {
+								const snapshotStore = getFileSnapshotStore(this.session);
+								for (const relativePath of appliedFileList) {
+									const appliedAbsolutePath = path.resolve(this.session.cwd, relativePath);
+									try {
+										const fullText = normalizeToLF(await Bun.file(appliedAbsolutePath).text());
+										const freshTag = snapshotStore.record(
+											canonicalSnapshotKey(appliedAbsolutePath),
+											fullText,
+										);
+										freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
+									} catch {
+										// File disappeared between apply and re-read; skip its tag.
+									}
 								}
 							}
+							const appliedFileReplacements = appliedFileList.map(filePath => ({
+								path: filePath,
+								count: appliedFileReplacementCounts.get(filePath) ?? 0,
+							}));
+							const appliedDetails: AstEditToolDetails = {
+								totalReplacements: applyResult.totalReplacements,
+								filesTouched: applyResult.filesTouched,
+								filesSearched: applyResult.filesSearched,
+								applied: applyResult.applied,
+								limitReached: applyResult.limitReached,
+								...(cappedApplyParseErrors.length > 0
+									? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
+									: {}),
+								scopePath,
+								files: appliedFileList,
+								fileReplacements: appliedFileReplacements,
+							};
+							const stalePreview =
+								applyResult.totalReplacements !== result.totalReplacements ||
+								applyResult.filesTouched !== result.filesTouched ||
+								fileList.some(
+									filePath =>
+										appliedFileReplacementCounts.get(filePath) !== fileReplacementCounts.get(filePath),
+								) ||
+								appliedFileList.some(
+									filePath =>
+										fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
+								);
+							if (stalePreview) {
+								const staleText =
+									applyResult.totalReplacements === 0
+										? `Preview is stale / no longer matches; no replacements were applied. Preview expected ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}.`
+										: applyResult.totalReplacements < result.totalReplacements
+											? `Preview is stale / no longer matches; only ${applyResult.totalReplacements} of ${result.totalReplacements} replacements were applied in ${applyResult.filesTouched} of ${result.filesTouched} files.`
+											: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
+								const staleWithTags =
+									freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
+								return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
+							}
+							const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
+							const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
+							const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+							const text =
+								freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
+							return toolResult(appliedDetails).text(text).done();
+						} finally {
+							lease.release();
 						}
-						const appliedFileReplacements = appliedFileList.map(filePath => ({
-							path: filePath,
-							count: appliedFileReplacementCounts.get(filePath) ?? 0,
-						}));
-						const appliedDetails: AstEditToolDetails = {
-							totalReplacements: applyResult.totalReplacements,
-							filesTouched: applyResult.filesTouched,
-							filesSearched: applyResult.filesSearched,
-							applied: applyResult.applied,
-							limitReached: applyResult.limitReached,
-							...(cappedApplyParseErrors.length > 0
-								? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
-								: {}),
-							scopePath,
-							files: appliedFileList,
-							fileReplacements: appliedFileReplacements,
-						};
-						const stalePreview =
-							applyResult.totalReplacements !== result.totalReplacements ||
-							applyResult.filesTouched !== result.filesTouched ||
-							fileList.some(
-								filePath => appliedFileReplacementCounts.get(filePath) !== fileReplacementCounts.get(filePath),
-							) ||
-							appliedFileList.some(
-								filePath => fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
-							);
-						if (stalePreview) {
-							const staleText =
-								applyResult.totalReplacements === 0
-									? `Preview is stale / no longer matches; no replacements were applied. Preview expected ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}.`
-									: applyResult.totalReplacements < result.totalReplacements
-										? `Preview is stale / no longer matches; only ${applyResult.totalReplacements} of ${result.totalReplacements} replacements were applied in ${applyResult.filesTouched} of ${result.filesTouched} files.`
-										: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
-							const staleWithTags =
-								freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
-							return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
-						}
-						const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
-						const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
-						const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
-						const text = freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
-						return toolResult(appliedDetails).text(text).done();
 					},
 				});
 				// The renderer's ⟨proposed⟩ badge is TUI-only; this line is the model's

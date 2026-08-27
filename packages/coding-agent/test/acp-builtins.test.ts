@@ -746,6 +746,51 @@ describe("ACP builtin slash commands", () => {
 		expect(configNotified).toBe(0);
 	});
 
+	it("plan: toggles plan mode and handles status", async () => {
+		const { output, runtime } = createRuntime();
+		let planState: { enabled: boolean; planFilePath?: string } | undefined;
+		runtime.session.getPlanModeState = () => planState as never;
+		runtime.session.setPlanModeState = (state: never) => {
+			planState = state;
+		};
+		runtime.session.getEnabledToolNames = () => ["read", "bash"];
+		runtime.session.setActiveToolsByName = async () => {};
+
+		const statusResult = await executeAcpBuiltinSlashCommand("/plan status", runtime);
+		expect(statusResult).toEqual({ consumed: true });
+		expect(output[0]).toContain("Plan mode is off");
+
+		const onResult = await executeAcpBuiltinSlashCommand("/plan on", runtime);
+		expect(onResult).toEqual({ consumed: true });
+		expect(output[1]).toContain("Plan mode enabled");
+		expect(planState?.enabled).toBe(true);
+
+		const offResult = await executeAcpBuiltinSlashCommand("/plan off", runtime);
+		expect(offResult).toEqual({ consumed: true });
+		expect(output[2]).toContain("Plan mode disabled");
+		expect(planState).toBeUndefined();
+	});
+
+	it("thinking: sets and inspects thinking level", async () => {
+		const { output, runtime } = createRuntime();
+		let currentThinkingLevel: string | undefined;
+		Object.defineProperty(runtime.session, "thinkingLevel", {
+			get: () => currentThinkingLevel,
+			configurable: true,
+		});
+		runtime.session.setThinkingLevel = (level: never) => {
+			currentThinkingLevel = level;
+		};
+		const showResult = await executeAcpBuiltinSlashCommand("/thinking", runtime);
+		expect(showResult).toEqual({ consumed: true });
+		expect(output[0]).toContain("Current thinking level: inherit");
+
+		const setResult = await executeAcpBuiltinSlashCommand("/thinking high", runtime);
+		expect(setResult).toEqual({ consumed: true });
+		expect(output[1]).toContain("Thinking level set to high");
+		expect(currentThinkingLevel).toBe("high");
+	});
+
 	// Removed TUI-only and dropped commands fall through as false
 	it("removed commands return false (fall through to model)", async () => {
 		const removedCommands = [
@@ -754,8 +799,6 @@ describe("ACP builtin slash commands", () => {
 			"/resume",
 			"/tree",
 			"/branch",
-			"/plan",
-			"/loop",
 			"/hotkeys",
 			"/extensions",
 			"/agents",

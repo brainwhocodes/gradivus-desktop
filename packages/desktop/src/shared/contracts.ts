@@ -5,6 +5,33 @@ export type QueueMode = "all" | "one-at-a-time";
 export type InterruptMode = "immediate" | "wait";
 export type SlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 export type ModelInputModality = "text" | "image";
+export const MAX_INLINE_PROMPT_BYTES = 512 * 1024;
+export const MAX_TEMP_PROMPT_BYTES = 16 * 1024 * 1024;
+export const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_PROMPT_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_PROMPT_ATTACHMENT_BATCH_BYTES = 32 * 1024 * 1024;
+export const MAX_PROMPT_ATTACHMENT_COUNT = 12;
+
+export interface PromptAttachmentUpload {
+	name: string;
+	mimeType?: string;
+	data: Uint8Array;
+}
+
+export type PromptAttachmentView = {
+	id: string;
+	name: string;
+	size: number;
+	kind: "file" | "image" | "prompt";
+};
+
+export interface PromptImageContent {
+	type: "image";
+	data: string;
+	mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+}
+
+export type PromptAttachmentStageResult = PromptAttachmentView[];
 
 export interface SlashCommand {
 	name: string;
@@ -36,7 +63,15 @@ export interface OpenRouterModelRouting {
 }
 
 export type AgentSettingValue = boolean | string | number;
-export type AgentSettingTab = "appearance" | "model" | "interaction" | "context" | "tools" | "tasks";
+export type AgentSettingTab =
+	| "appearance"
+	| "model"
+	| "interaction"
+	| "context"
+	| "files"
+	| "shell"
+	| "tools"
+	| "tasks";
 
 export interface AgentSettingOption {
 	value: AgentSettingValue;
@@ -56,9 +91,14 @@ export interface AgentSettingView {
 	apply: "immediate" | "next-session";
 }
 
-export interface BranchlightSettings {
+export interface GradivusSettings {
 	theme: "dark" | "light" | "system";
 	confirmCloseTab: boolean;
+	ui: {
+		density: "comfortable" | "compact";
+		reduceMotion: boolean;
+		showToolDetails: boolean;
+	};
 	terminal: {
 		shell: string;
 		fontSize: number;
@@ -76,18 +116,20 @@ export interface BranchlightSettings {
 	};
 }
 
-export type UpdateBranchlightSettingsInput = Partial<{
+export type UpdateGradivusSettingsInput = Partial<{
 	theme: "dark" | "light" | "system";
 	confirmCloseTab: boolean;
-	terminal: Partial<BranchlightSettings["terminal"]>;
-	browser: Partial<BranchlightSettings["browser"]>;
-	workspace: Partial<BranchlightSettings["workspace"]>;
+	ui: Partial<GradivusSettings["ui"]>;
+	terminal: Partial<GradivusSettings["terminal"]>;
+	browser: Partial<GradivusSettings["browser"]>;
+	workspace: Partial<GradivusSettings["workspace"]>;
 }>;
 
 export interface SessionRuntimeConfig {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	fastMode?: boolean;
+	planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	interruptMode?: InterruptMode;
@@ -122,7 +164,30 @@ export interface TimelineFileChange {
 	path: string;
 	operation: FileChangeOperation;
 }
-
+export type TimelineToolActivity =
+	| {
+			operation: "read";
+			path: string;
+			range?: string;
+			count?: number;
+			preview: string[];
+			expandedPreview: string[];
+	  }
+	| {
+			operation: "write";
+			path: string;
+			preview: string[];
+	  }
+	| {
+			operation: "edit";
+			paths: string[];
+			diff: string[];
+	  }
+	| {
+			operation: "hub";
+			operationName: string;
+			target?: string;
+	  };
 export type FileDiffStatus = "modified" | "added" | "deleted" | "renamed" | "clean" | "binary" | "unavailable";
 
 export interface FileDiffView {
@@ -135,9 +200,101 @@ export interface FileDiffView {
 	message?: string;
 }
 
+export type TimelineTone = "neutral" | "info" | "success" | "warning" | "error";
+
+export type TimelinePresentationMeta = Array<{
+	label: string;
+	value: string;
+}>;
+
+export type TimelineStatusCategory =
+	| "notice"
+	| "command"
+	| "model"
+	| "thinking"
+	| "fallback"
+	| "compaction"
+	| "todo"
+	| "retry";
+
+export type TimelinePresentation =
+	| {
+			type: "status";
+			category: TimelineStatusCategory;
+			tone: TimelineTone;
+			title: string;
+			source?: string;
+			meta?: TimelinePresentationMeta;
+			entries?: Array<{ label: string; value: string; tone?: TimelineTone }>;
+			omittedCount?: number;
+	  }
+	| {
+			type: "activity";
+			category: "job" | "tangent" | "process" | "diagnostics" | "files";
+			tone: TimelineTone;
+			title: string;
+			entries: Array<{ label: string; value?: string; status?: string }>;
+			omittedCount?: number;
+	  }
+	| {
+			type: "irc";
+			direction: "incoming" | "autoreply" | "relay";
+			from?: string;
+			to?: string;
+			reply?: string;
+			previewLines: string[];
+			omittedCount?: number;
+	  }
+	| {
+			type: "advisor";
+			notes: Array<{ note: string; severity: "nit" | "concern" | "blocker"; advisor?: string }>;
+			total: number;
+			blockerCount: number;
+			omittedCount?: number;
+	  }
+	| {
+			type: "custom";
+			variant: "system" | "collab" | "skill" | "extension" | "hook";
+			title: string;
+			attribution?: string;
+			meta?: TimelinePresentationMeta;
+			previewLines: string[];
+			omittedCount?: number;
+			collapsed?: boolean;
+	  }
+	| {
+			type: "context";
+			transition: "compaction" | "branch" | "handoff";
+			title: string;
+			tokenCount?: number;
+			frameCount?: number;
+			warning?: string;
+			previewLines: string[];
+			omittedCount?: number;
+	  }
+	| {
+			type: "execution";
+			engine: "bash" | "python";
+			input: string;
+			outputPreview: string[];
+			state: "running" | "complete" | "cancelled" | "error";
+			exitCode?: number;
+			truncated: boolean;
+			excludedFromContext: boolean;
+			omittedCount?: number;
+	  }
+	| {
+			type: "assistant-outcome";
+			mode: "recovered" | "error";
+			tone: TimelineTone;
+			label: string;
+			previewLines: string[];
+			omittedCount?: number;
+	  };
+
 export interface TimelineItem {
 	id: string;
-	kind: "user" | "assistant" | "thinking" | "tool" | "notice" | "todo" | "marker" | "raw";
+	kind: "user" | "assistant" | "thinking" | "tool" | "special" | "raw";
 	text: string;
 	textLoaded?: boolean;
 	detail?: string;
@@ -148,8 +305,12 @@ export interface TimelineItem {
 	result?: unknown;
 	images?: TimelineImage[];
 	files?: TimelineFileChange[];
+	toolActivity?: TimelineToolActivity;
 	isError?: boolean;
 	timestamp?: string;
+	role?: string;
+	createdAt?: number;
+	presentation?: TimelinePresentation;
 }
 
 export interface TimelinePage {
@@ -178,6 +339,49 @@ export interface SubagentView {
 		requests?: number;
 	};
 }
+export type AgentHubAgentKind = "sub" | "advisor";
+export type AgentHubAgentStatus = "running" | "idle" | "parked" | "aborted";
+
+export interface AgentHubMetrics {
+	tokens: number;
+	requests: number;
+	tools: number;
+	cost: number;
+	durationMs: number;
+	contextTokens?: number;
+	contextWindow?: number;
+}
+
+export interface AgentHubAgent {
+	id: string;
+	displayName: string;
+	kind: AgentHubAgentKind;
+	parentId?: string;
+	status: AgentHubAgentStatus;
+	activity?: string;
+	createdAt: number;
+	lastActivity: number;
+	transcriptAvailable: boolean;
+	readOnly: boolean;
+	agent?: string;
+	modelRole?: string;
+	resolvedModel?: string;
+	metrics?: AgentHubMetrics;
+	progress?: SubagentView["progress"];
+}
+
+export interface AgentHubSnapshot {
+	agents: AgentHubAgent[];
+}
+
+export interface AgentHubMessagePage {
+	fromByte: number;
+	nextByte: number;
+	reset: boolean;
+	entries: unknown[];
+	messages: unknown[];
+}
+
 export type RuntimePhase = "dormant" | "queued" | "starting" | "resident" | "stopping";
 
 export interface RuntimeReportView {
@@ -200,12 +404,14 @@ export interface SessionSnapshot extends SessionRuntimeConfig {
 	timelineStart?: number;
 	timelineTotal?: number;
 	subagents: SubagentView[];
+	agentHub?: AgentHubSnapshot;
 	commands?: SlashCommand[];
 	contextTokens?: number;
 	contextWindow?: number;
 	tokensPerSecond?: number | null;
 	queuedMessageCount?: number;
 	todoPhases?: Array<{ title?: string; items: Array<{ text: string; completed: boolean }> }>;
+	pendingExtension?: ExtensionView;
 	warning?: string;
 	runtime?: RuntimeReportView;
 }
@@ -273,7 +479,11 @@ import type {
 	ElementEditState,
 	ElementScreenshot,
 	ElementSelectionV1,
+	ElementTaskAction,
+	QueuedElementTask,
+	QueuedElementTaskStatus,
 	SelectionAuthScope,
+	SelectionTargetAgent,
 } from "@oh-my-pi/pi-workspace-runtime/selection";
 import { SELECTION_LIMITS } from "@oh-my-pi/pi-workspace-runtime/selection";
 
@@ -289,7 +499,11 @@ export type {
 	ElementEditState,
 	ElementScreenshot,
 	ElementSelectionV1,
+	ElementTaskAction,
+	QueuedElementTask,
+	QueuedElementTaskStatus,
 	SelectionAuthScope,
+	SelectionTargetAgent,
 };
 export { SELECTION_LIMITS };
 export type SelectionCaptureMode = "dom" | "screenshot";
@@ -308,6 +522,18 @@ export interface CreateTerminalInput {
 	cols: number;
 	rows: number;
 	layout?: "columns" | "rows" | "grid";
+}
+export interface TerminalViewState {
+	id: string;
+	cwd: string;
+}
+
+export interface OpenChatTerminalInput {
+	id: string;
+	sessionId: string;
+	cols: number;
+	rows: number;
+	fromOffset: number;
 }
 
 export interface UpdateTabInput {
@@ -330,6 +556,7 @@ export interface CommitSelectionPayload {
 	target?: string;
 	selector?: string;
 	instruction?: string;
+	action?: ElementTaskAction;
 	agentId?: string;
 	domSnapshot?: ElementDomSnapshot;
 	screenshot?: ElementScreenshot;
@@ -356,38 +583,64 @@ export interface BrowserViewState {
 	loading: boolean;
 	error?: string;
 }
+export type ChatTerminalStatus = "starting" | "running" | "exited" | "failed";
 
-export interface TerminalViewState {
+export interface ChatTerminalViewState {
 	id: string;
+	workspace: string;
 	cwd: string;
+	status: ChatTerminalStatus;
+	offset: number;
+	truncated?: boolean;
+	error?: string;
 }
 
 export type WorkspaceEvent =
 	| { type: "browser-state"; paneId: string; state: BrowserViewState }
 	| { type: "browser-focus"; paneId: string }
 	| { type: "browser-new-window"; paneId: string; url: string }
-	| { type: "terminal-data"; paneId: string; data: string }
+	| { type: "terminal-data"; paneId: string; data: string; offset: number }
 	| { type: "terminal-exit"; paneId: string; exitCode: number }
 	| { type: "terminal-error"; paneId: string; message: string }
 	| { type: "pane-context-action"; paneId: string; action: PaneContextMenuAction }
 	| { type: "selection-state"; paneId: string; state: ElementEditState }
-	| { type: "connection-state"; state: "connected" | "reconnecting" | "disconnected" };
+	| {
+			type: "connection-state";
+			state: "connected" | "reconnecting" | "disconnected";
+			/** Number of reconnect attempts made; set on `disconnected`. */
+			attempts?: number;
+			/** True when every reconnect attempt failed and manual retry is required. */
+			retryExhausted?: boolean;
+	  };
 export interface BootstrapSnapshot {
 	registry: SessionRegistryV1;
 	warning?: string;
 }
 
-export interface BranchlightEvent {
+export interface GradivusEvent {
 	sessionId: string;
-	type: "session" | "timeline" | "subagents" | "extension" | "commands" | "config" | "warning";
+	type:
+		| "session"
+		| "timeline"
+		| "subagents"
+		| "agent_hub_update"
+		| "extension"
+		| "commands"
+		| "config"
+		| "prompt_result"
+		| "warning";
 	state?: ProcessState;
 	record?: SessionRecordV1;
 	item?: TimelineItem;
 	subagents?: SubagentView[];
+	agentHub?: AgentHubSnapshot;
 	commands?: SlashCommand[];
 	config?: SessionRuntimeConfig;
 	extension?: ExtensionView;
 	runtime?: RuntimeReportView;
+	requestId?: string;
+	agentInvoked?: boolean;
+	error?: { message: string; code?: string };
 	message?: string;
 }
 
@@ -423,7 +676,7 @@ export interface ExtensionView {
 	widgetPlacement?: "aboveEditor" | "belowEditor";
 }
 
-export interface BranchlightApi {
+export interface GradivusApi {
 	getAuthStatus(): Promise<AuthAccountView[]>;
 	getOAuthAccounts(): Promise<OAuthAccountsView>;
 	setOAuthAccountLock(providerId: string, credentialId?: number): Promise<OAuthAccountsView>;
@@ -435,10 +688,16 @@ export interface BranchlightApi {
 	getAgentSettings(id?: string): Promise<AgentSettingView[]>;
 	setAgentSetting(id: string | undefined, path: string, value: AgentSettingValue): Promise<AgentSettingView>;
 	bootstrap(): Promise<BootstrapSnapshot>;
-	chooseAndCreate(kind: SessionKind): Promise<SessionSnapshot | null>;
+	reconnectRuntime(): Promise<void>;
+	chooseAndCreate(kind: SessionKind, cwd?: string): Promise<SessionSnapshot | null>;
 	openSession(id: string): Promise<SessionSnapshot>;
 	resume(id: string): Promise<SessionSnapshot>;
 	loadTimelinePage(id: string, before: number, limit: number): Promise<TimelinePage>;
+	getAgentHub(id: string): Promise<AgentHubSnapshot>;
+	getAgentHubMessages(id: string, agentId: string, fromByte?: number): Promise<AgentHubMessagePage>;
+	agentHubMessage(id: string, agentId: string, message: string): Promise<void>;
+	agentHubKill(id: string, agentId: string): Promise<void>;
+	agentHubRevive(id: string, agentId: string): Promise<void>;
 	loadTimelineItem(id: string, itemId: string): Promise<TimelineItem>;
 	getAvailableCommands(id: string): Promise<SlashCommand[]>;
 	getAvailableModels(id: string): Promise<ModelOption[]>;
@@ -451,13 +710,18 @@ export interface BranchlightApi {
 	): Promise<OpenRouterModelRouting>;
 	stop(id: string): Promise<SessionSnapshot>;
 	rename(id: string, title: string): Promise<SessionSnapshot>;
-	prompt(id: string, text: string): Promise<void>;
-	steer(id: string, text: string): Promise<void>;
-	queueFollowUp(id: string, text: string): Promise<void>;
+	deleteSession(id: string): Promise<BootstrapSnapshot>;
+	stagePromptAttachments(id: string, uploads: PromptAttachmentUpload[]): Promise<PromptAttachmentStageResult>;
+	stagePromptText(id: string, text: string): Promise<PromptAttachmentView>;
+	releasePromptAttachments(id: string, attachmentIds: string[]): Promise<void>;
+	prompt(id: string, text: string, attachmentIds?: string[]): Promise<string>;
+	steer(id: string, text: string, attachmentIds?: string[]): Promise<void>;
+	queueFollowUp(id: string, text: string, attachmentIds?: string[]): Promise<void>;
 	abort(id: string): Promise<void>;
 	setModel(id: string, provider: string, modelId: string): Promise<void>;
 	setThinking(id: string, level: ThinkingLevel): Promise<void>;
 	setFastMode(id: string, enabled: boolean): Promise<void>;
+	togglePlanMode(id: string, enabled?: boolean): Promise<{ enabled: boolean; planFilePath?: string } | undefined>;
 	setQueueMode(id: string, kind: "steering" | "follow-up", mode: QueueMode): Promise<void>;
 	setInterruptMode(id: string, mode: InterruptMode): Promise<void>;
 	setAutoCompaction(id: string, enabled: boolean): Promise<void>;
@@ -476,6 +740,7 @@ export interface BranchlightApi {
 	closeBrowser(id: string): Promise<void>;
 	showPaneContextMenu(id: string, canSplit: boolean): void;
 	createTerminal(options: CreateTerminalInput): Promise<TerminalViewState>;
+	openChatTerminal(input: OpenChatTerminalInput): Promise<ChatTerminalViewState>;
 	writeTerminal(id: string, data: string): Promise<void>;
 	resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
 	closeTerminal(id: string): Promise<void>;
@@ -485,22 +750,24 @@ export interface BranchlightApi {
 	minimizeWindow(): Promise<void>;
 	toggleMaximizeWindow(): Promise<boolean>;
 	closeWindow(): Promise<void>;
-	onEvent(listener: (event: BranchlightEvent) => void): () => void;
+	onEvent(listener: (event: GradivusEvent) => void): () => void;
 	onAuthEvent(listener: (event: AuthEvent) => void): () => void;
 	onWorkspaceEvent(listener: (event: WorkspaceEvent) => void): () => void;
 	onWorkspaceDocument(listener: (doc: WorkspaceDocumentV1) => void): () => void;
 	startSelection(paneId: string, agentId?: string, captureMode?: SelectionCaptureMode): Promise<ElementEditState>;
 	cancelSelection(paneId: string, reason?: string): Promise<ElementEditState>;
-	commitSelection(paneId: string, instruction?: string): Promise<ElementEditState>;
+	commitSelection(paneId: string, instruction?: string, action?: ElementTaskAction): Promise<ElementEditState>;
+	runQueuedTasks(paneId: string): Promise<ElementEditState>;
+	clearQueuedTasks(paneId: string): Promise<ElementEditState>;
 	getSelectionState(paneId: string): Promise<ElementEditState>;
 	onSelectionStateChanged(listener: (state: ElementEditState) => void): () => void;
-	getAppSettings(): Promise<BranchlightSettings>;
-	updateAppSettings(updates: UpdateBranchlightSettingsInput): Promise<BranchlightSettings>;
-	resetAppSettings(): Promise<BranchlightSettings>;
+	getAppSettings(): Promise<GradivusSettings>;
+	updateAppSettings(updates: UpdateGradivusSettingsInput): Promise<GradivusSettings>;
+	resetAppSettings(): Promise<GradivusSettings>;
 }
 
 declare global {
 	interface Window {
-		branchlight: BranchlightApi;
+		gradivus: GradivusApi;
 	}
 }

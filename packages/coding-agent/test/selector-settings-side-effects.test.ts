@@ -95,6 +95,40 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("delegates omitThinking to the session effect setter", () => {
+		const setOmitThinking = vi.fn();
+		const controller = new SelectorController({
+			session: { setOmitThinking },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("omitThinking", true);
+
+		expect(setOmitThinking).toHaveBeenCalledWith(true);
+	});
+
+	it("routes sampling changes through the session setter", () => {
+		const setSamplingParameters = vi.fn();
+		const controller = new SelectorController({
+			session: { setSamplingParameters },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("temperature", -1);
+		controller.handleSettingChange("topP", 0.8);
+		controller.handleSettingChange("topK", "-1");
+		controller.handleSettingChange("minP", 0.2);
+		controller.handleSettingChange("presencePenalty", -1);
+		controller.handleSettingChange("repetitionPenalty", 1.1);
+
+		expect(setSamplingParameters.mock.calls).toEqual([
+			[{ temperature: -1 }],
+			[{ topP: 0.8 }],
+			[{ topK: -1 }],
+			[{ minP: 0.2 }],
+			[{ presencePenalty: -1 }],
+			[{ repetitionPenalty: 1.1 }],
+		]);
+	});
+
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {

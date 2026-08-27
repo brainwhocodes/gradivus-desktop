@@ -61,7 +61,7 @@ out.jsonl
 out.html
 pi-*.html
 .close_issue.sh
-.branchlight-fixture.jsonl
+.gradivus-fixture.jsonl
 
 # Generated files
 packages/coding-agent/src/export/html/tool-views.generated.js

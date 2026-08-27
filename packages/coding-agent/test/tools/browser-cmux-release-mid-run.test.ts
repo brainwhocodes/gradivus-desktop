@@ -37,7 +37,8 @@ import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/s
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
 	acquireTab,
-	getTabsMapForTest,
+	getTab,
+	getTabsInventory,
 	releaseTab,
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -64,7 +65,7 @@ function makeSession(cwd: string, screenshotDir?: string): ToolSession {
 }
 
 async function drainAllTabs(): Promise<void> {
-	for (const name of [...getTabsMapForTest().keys()]) {
+	for (const { name } of getTabsInventory()) {
 		await releaseTab(name, { kill: false }).catch(() => undefined);
 	}
 }
@@ -150,7 +151,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			// Deterministic wait: proceed only once the cmux request is actually
 			// mid-flight (and therefore `tab.pending` is populated).
 			await navStarted.promise;
-			const tabBeforeRelease = getTabsMapForTest().get("docfinal");
+			const tabBeforeRelease = getTab("docfinal");
 			expect(tabBeforeRelease?.pending.size).toBeGreaterThan(0);
 
 			// `releaseTab` walks `tab.pending` and calls `pending.reject(new
@@ -168,7 +169,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			// would have fired by the time we assert.
 			for (let i = 0; i < 8; i++) await Promise.resolve();
 			expect(unhandled).toEqual([]);
-			expect(getTabsMapForTest().has("docfinal")).toBe(false);
+			expect(getTab("docfinal")).toBeUndefined();
 		} finally {
 			// Unblock the stalled `browser.navigate` so the abort signal
 			// composed into the cmux run gets a chance to short-circuit the
@@ -241,11 +242,11 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			// bounded loop keeps the test robust against future micro-batching
 			// changes without relying on real timers.
 			for (let i = 0; i < 32; i++) {
-				const tab = getTabsMapForTest().get("docfinal");
+				const tab = getTab("docfinal");
 				if (tab && tab.pending.size > 0) break;
 				await Promise.resolve();
 			}
-			const tabBeforeRelease = getTabsMapForTest().get("docfinal");
+			const tabBeforeRelease = getTab("docfinal");
 			expect(tabBeforeRelease?.pending.size).toBeGreaterThan(0);
 
 			// Capture the pending run's `closeAc` BEFORE `releaseTab` clears
@@ -281,7 +282,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 
 			for (let i = 0; i < 8; i++) await Promise.resolve();
 			expect(unhandled).toEqual([]);
-			expect(getTabsMapForTest().has("docfinal")).toBe(false);
+			expect(getTab("docfinal")).toBeUndefined();
 		} finally {
 			process.removeListener("unhandledRejection", onUnhandled);
 		}

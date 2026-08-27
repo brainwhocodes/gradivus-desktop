@@ -7,6 +7,12 @@ Inspect and edit the selected web page element.
 {{/if}}
 
 - **Page URL**: {{url}}
+{{#if agentType}}
+- **Requested Agent Type**: {{agentType}}
+{{/if}}
+{{#if targetAgentName}}
+- **Workspace Target Agent**: {{targetAgentName}} (`{{targetAgentId}}`)
+{{/if}}
 - **Target Selector**: `{{selector}}`
 {{#if tagName}}
 - **Element Tag**: `<{{tagName}}>`
@@ -20,8 +26,11 @@ Inspect and edit the selected web page element.
 {{#if text}}
 - **Text Content**: "{{text}}"
 {{/if}}
+{{#if screenshotWidth}}
+- **Screenshot Dimensions**: {{screenshotWidth}}×{{screenshotHeight}}px
+{{/if}}
 {{#if screenshotAttached}}
-- **Screenshot Attached**: {{screenshotWidth}}×{{screenshotHeight}}px
+- **Screenshot Attachment**: Included
 {{/if}}
 {{#if domHtml}}
 

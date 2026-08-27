@@ -45,7 +45,7 @@ input.on("line", line => {
 			if (
 				!actualPath ||
 				(actualPath !== expectedPath && !actualPath.includes(expectedPath)) ||
-				request.env?.BRANCHLIGHT_TERMINAL !== "1"
+				request.env?.GRADIVUS_TERMINAL !== "1"
 			) {
 				send({ type: "error", id: request.id, message: "Regular shell environment is missing or modified" });
 				break;
@@ -55,7 +55,7 @@ input.on("line", line => {
 			send({
 				type: "data",
 				id: request.id,
-				data: "\u001b[2J\u001b[H\u001b[38;2;220;132;80mBranchlight\u001b[0m terminal bridge ready\r\nfixture> ",
+				data: "\u001b[2J\u001b[H\u001b[38;2;220;132;80mGradivus\u001b[0m terminal bridge ready\r\nfixture> ",
 			});
 			break;
 		}

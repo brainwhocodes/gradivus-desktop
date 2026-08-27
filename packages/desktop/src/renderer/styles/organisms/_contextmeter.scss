@@ -1,0 +1,211 @@
+.context-meter-anchor {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	height: 32px;
+}
+
+.context-donut-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	height: 32px;
+	padding: 0 8px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	background: var(--shell);
+	color: var(--foreground-muted);
+	cursor: pointer;
+	box-sizing: border-box;
+	transition: all 140ms var(--ease-standard);
+
+	&:hover,
+	&.is-active {
+		border-color: var(--line-soft);
+		background: var(--shell-hover);
+		color: var(--foreground-strong);
+	}
+
+	.donut-svg {
+		width: 18px;
+		height: 18px;
+		flex: 0 0 18px;
+		display: block;
+	}
+
+	.donut-bg {
+		stroke: var(--line-soft);
+	}
+
+	.donut-fill {
+		stroke: var(--accent-boundary);
+		transition:
+			stroke-dashoffset 200ms var(--ease-standard),
+			stroke 200ms var(--ease-standard);
+	}
+
+	&.warning .donut-fill {
+		stroke: var(--warning-boundary);
+	}
+
+	&.danger .donut-fill {
+		stroke: var(--danger-boundary);
+	}
+
+	.donut-percent-text {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		line-height: 1;
+	}
+
+	&.warning .donut-percent-text {
+		color: var(--foreground);
+	}
+
+	&.danger .donut-percent-text {
+		color: var(--foreground);
+	}
+}
+
+.context-popover {
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 10px);
+	z-index: var(--z-popover);
+	width: 290px;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-medium);
+	background: var(--shell-raised);
+	box-shadow: 0 16px 40px var(--shadow-color);
+	color: var(--foreground);
+	animation: contextPopoverFadeIn 140ms var(--ease-standard);
+	user-select: none;
+}
+
+@keyframes contextPopoverFadeIn {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+.context-popover-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding-bottom: 8px;
+	border-bottom: 1px solid var(--line-soft);
+
+	strong {
+		font-family: var(--font-display);
+		font-size: 12px;
+		font-weight: 700;
+		color: var(--foreground-strong);
+	}
+
+	.context-popover-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: 0;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--foreground-muted);
+		font-size: 14px;
+		line-height: 1;
+		cursor: pointer;
+
+		&:hover {
+			color: var(--foreground-strong);
+			background: var(--shell-hover);
+		}
+	}
+}
+
+.context-popover-body {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-top: 8px;
+	font-size: 12px;
+}
+
+.context-metric-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+
+	.metric-label {
+		color: var(--foreground-muted);
+	}
+
+.metric-value {
+	font-family: var(--font-mono);
+	font-weight: 650;
+	color: var(--foreground);
+
+	&.text-warning,
+	&.text-danger {
+		color: var(--foreground);
+	}
+}
+}
+
+.context-progress-track {
+	width: 100%;
+	height: 6px;
+	border-radius: 999px;
+	background: var(--shell);
+	overflow: hidden;
+	margin: 4px 0;
+}
+
+.context-progress-bar {
+	height: 100%;
+	border-radius: 999px;
+	background: var(--accent-boundary);
+	transition:
+		width 200ms var(--ease-standard),
+		background-color 200ms var(--ease-standard);
+
+	&.warning {
+		background: var(--warning-boundary);
+	}
+
+	&.danger {
+		background: var(--danger-boundary);
+	}
+}
+
+.context-model-name {
+	margin-top: 4px;
+	padding-top: 6px;
+	border-top: 1px solid var(--line-soft);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 12px;
+
+	span {
+		color: var(--foreground-muted);
+	}
+
+	code {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--foreground-strong);
+		word-break: break-all;
+	}
+}

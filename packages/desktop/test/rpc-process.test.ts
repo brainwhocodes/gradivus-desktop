@@ -32,6 +32,21 @@ class FakeChild extends EventEmitter {
 		this.emit("exit", 0, null);
 	}
 }
+class FakeConnection implements OmpGrpcClientConnection {
+	readonly frames: AsyncIterable<never> = {
+		async *[Symbol.asyncIterator](): AsyncIterator<never> {},
+	};
+	closeCount = 0;
+
+	send(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	close(): Promise<void> {
+		this.closeCount++;
+		return Promise.resolve();
+	}
+}
 
 class FakeClient {
 	readonly startGate: PromiseWithResolvers<void> | undefined;
@@ -88,17 +103,30 @@ type Harness = {
 	dependencies: Partial<RpcProcessDependencies>;
 	children: FakeChild[];
 	clients: FakeClient[];
+	connections: FakeConnection[];
+	connectCalls: { count: number };
 	spawnArgs: string[][];
 	removedTempDirs: { count: number };
 	holdNextClientStart: () => void;
+	holdNextConnect: () => void;
+	resolveNextConnect: () => FakeConnection;
 };
 
 function createHarness(): Harness {
 	const children: FakeChild[] = [];
 	const clients: FakeClient[] = [];
+	const connections: FakeConnection[] = [];
+	const connectCalls = { count: 0 };
 	const removedTempDirs = { count: 0 };
 	const spawnArgs: string[][] = [];
 	let holdClientStart = false;
+	let holdConnect = false;
+	let pendingConnect: PromiseWithResolvers<OmpGrpcClientConnection> | undefined;
+	const makeConnection = (): FakeConnection => {
+		const connection = new FakeConnection();
+		connections.push(connection);
+		return connection;
+	};
 	const dependencies: Partial<RpcProcessDependencies> = {
 		createTempDir: async () =>
 			({
@@ -107,6 +135,7 @@ function createHarness(): Harness {
 					removedTempDirs.count++;
 				},
 			}) as never,
+		waitForBootstrap: async () => BOOTSTRAP,
 		spawn: ((_: string, args: readonly string[]) => {
 			spawnArgs.push([...args]);
 			const child = new FakeChild(100 + children.length);
@@ -114,8 +143,15 @@ function createHarness(): Harness {
 			return child as unknown as ChildProcessWithoutNullStreams;
 		}) as typeof spawn,
 		generateToken: () => BOOTSTRAP.token,
-		waitForBootstrap: async () => BOOTSTRAP,
-		connect: async () => ({}) as OmpGrpcClientConnection,
+		connect: () => {
+			connectCalls.count++;
+			if (holdConnect) {
+				holdConnect = false;
+				pendingConnect = Promise.withResolvers<OmpGrpcClientConnection>();
+				return pendingConnect.promise;
+			}
+			return Promise.resolve(makeConnection());
+		},
 		createClient: () => {
 			const client = new FakeClient(children.at(-1)!, holdClientStart);
 			holdClientStart = false;
@@ -126,17 +162,29 @@ function createHarness(): Harness {
 			children.find(child => child.pid === pid)?.exit();
 		},
 		platform: "linux",
-		ompExecutablePath: () => "/opt/branchlight/omp",
-		rpcConfigPath: () => "/opt/branchlight/rpc-config.yml",
+		ompExecutablePath: () => "/opt/gradivus/omp",
+		rpcConfigPath: () => "/opt/gradivus/rpc-config.yml",
 	};
 	return {
 		dependencies,
 		children,
 		clients,
+		connections,
+		connectCalls,
 		removedTempDirs,
 		spawnArgs,
 		holdNextClientStart: () => {
 			holdClientStart = true;
+		},
+		holdNextConnect: () => {
+			holdConnect = true;
+		},
+		resolveNextConnect: () => {
+			if (!pendingConnect) throw new Error("no pending connection");
+			const connection = makeConnection();
+			pendingConnect.resolve(connection);
+			pendingConnect = undefined;
+			return connection;
 		},
 	};
 }
@@ -158,6 +206,62 @@ async function waitForClient(harness: Harness): Promise<FakeClient> {
 }
 
 describe("RpcProcess lifecycle", () => {
+	it("rejects startup on child exit during connect and closes a late connection", async () => {
+		const harness = createHarness();
+		harness.holdNextConnect();
+		const states: string[] = [];
+		const process = createProcess(harness, states);
+		const starting = process.start();
+		await vi.waitFor(() => expect(harness.children).toHaveLength(1));
+		await vi.waitFor(() => expect(harness.connectCalls.count).toBe(1));
+		harness.children[0]!.exit();
+
+		await expect(starting).rejects.toThrow("OMP exited (0)");
+		expect(states).not.toContain("ready");
+		expect(process.client).toBeUndefined();
+		expect(harness.removedTempDirs.count).toBe(1);
+
+		const connection = harness.resolveNextConnect();
+		await vi.waitFor(() => expect(connection.closeCount).toBe(1));
+		await process.stop();
+	});
+
+	it("stops promptly while connect is pending and closes the eventual connection", async () => {
+		const harness = createHarness();
+		harness.holdNextConnect();
+		const process = createProcess(harness);
+		const starting = process.start();
+		await vi.waitFor(() => expect(harness.children).toHaveLength(1));
+		await vi.waitFor(() => expect(harness.connectCalls.count).toBe(1));
+		const stopping = process.stop();
+		harness.children[0]!.exit();
+		await expect(starting).rejects.toThrow("OMP startup was stopped");
+		await stopping;
+		expect(process.state).toBe("stopped");
+		expect(harness.removedTempDirs.count).toBe(1);
+
+		const connection = harness.resolveNextConnect();
+		await vi.waitFor(() => expect(connection.closeCount).toBe(1));
+	});
+
+	it("rejects startup when the child exits before Ready publication", async () => {
+		const harness = createHarness();
+		harness.holdNextClientStart();
+		const states: string[] = [];
+		const process = createProcess(harness, states);
+		const starting = process.start();
+		const client = await waitForClient(harness);
+
+		harness.children[0]!.exit();
+		client.startGate?.resolve();
+
+		await expect(starting).rejects.toThrow("OMP exited (0)");
+		expect(states).not.toContain("ready");
+		expect(process.client).toBeUndefined();
+		expect(harness.clients[0]!.closeCount).toBe(1);
+		expect(harness.removedTempDirs.count).toBe(1);
+		await process.stop();
+	});
 	it("coalesces concurrent starts onto one child process", async () => {
 		const harness = createHarness();
 		const process = createProcess(harness);
@@ -177,13 +281,12 @@ describe("RpcProcess lifecycle", () => {
 		const states: string[] = [];
 		const process = createProcess(harness, states);
 		const starting = process.start();
-		const rejectedStart = expect(starting).rejects.toThrow("startup was stopped");
 		const client = await waitForClient(harness);
 
 		const stopping = process.stop();
 		client.startGate?.resolve();
 		client.emit({ type: "agent_start" });
-		await rejectedStart;
+		await expect(starting).rejects.toThrow("startup was stopped");
 		await stopping;
 
 		expect(process.state).toBe("stopped");
@@ -222,7 +325,7 @@ describe("RpcProcess lifecycle", () => {
 			const client = harness.clients[0]!;
 			client.abortNever = true;
 			client.emit({ type: "agent_start" });
-			expect(process.state).toBe("running");
+			await vi.waitFor(() => expect(process.state).toBe("running"));
 
 			const firstStop = process.stop();
 			const secondStop = process.stop();

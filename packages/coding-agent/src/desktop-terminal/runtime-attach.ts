@@ -4,15 +4,15 @@ import type { WorkspaceCommandV1 } from "@oh-my-pi/pi-wire";
 import { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
 
-export function createBranchlightLifecycleExtension(): ExtensionFactory | undefined {
+export function createGradivusLifecycleExtension(): ExtensionFactory | undefined {
 	const runtimeRoot = process.env.PI_RUNTIME_DIR;
 	const token = process.env.PI_RUNTIME_TOKEN;
-	const terminalId = process.env.BRANCHLIGHT_TERMINAL_ID;
-	if (process.env.BRANCHLIGHT_TERMINAL !== "1" || !runtimeRoot || !token || !terminalId) return undefined;
+	const terminalId = process.env.GRADIVUS_TERMINAL_ID;
+	if (process.env.GRADIVUS_TERMINAL !== "1" || !runtimeRoot || !token || !terminalId) return undefined;
 
-	const paneId = process.env.BRANCHLIGHT_PANE_ID;
-	const profileId = process.env.BRANCHLIGHT_PROFILE_ID ?? "profile-omp";
-	const workspaceIdFromEnvironment = process.env.BRANCHLIGHT_WORKSPACE_ID;
+	const paneId = process.env.GRADIVUS_PANE_ID;
+	const profileId = process.env.GRADIVUS_PROFILE_ID ?? "profile-omp";
+	const workspaceIdFromEnvironment = process.env.GRADIVUS_WORKSPACE_ID;
 	let client: WorkspaceClient | undefined;
 	let attachedAgentId: string | undefined;
 	let attachedSessionId: string | undefined;
@@ -68,11 +68,11 @@ export function createBranchlightLifecycleExtension(): ExtensionFactory | undefi
 	const attach = async (api: ExtensionAPI, context: ExtensionContext): Promise<void> => {
 		const currentClient = await getClient();
 		const sessionId = context.sessionManager.getSessionId();
-		const agentId = `branchlight-agent-${profileId}-${sessionId}`;
+		const agentId = `gradivus-agent-${profileId}-${sessionId}`;
 		if (attachedAgentId === agentId && attachedSessionId === sessionId) return;
 		if (attachedAgentId) await detach(false);
 		const workspaceId = workspaceIdFromEnvironment ?? currentClient.document?.activeWorkspaceId;
-		if (!workspaceId) throw new Error("Branchlight workspace runtime has no active workspace");
+		if (!workspaceId) throw new Error("Gradivus workspace runtime has no active workspace");
 		const command: WorkspaceCommandV1 = {
 			version: 1,
 			commandId: `cmd-attach-${crypto.randomUUID()}`,
@@ -149,8 +149,8 @@ export function createBranchlightLifecycleExtension(): ExtensionFactory | undefi
 
 	const reportFailure = (api: ExtensionAPI, context: ExtensionContext, error: unknown): void => {
 		const message = error instanceof Error ? error.message : String(error);
-		api.logger.error(`Branchlight runtime attachment failed: ${message}`);
-		if (context.hasUI) context.ui.notify(`Branchlight attachment failed: ${message}`, "error");
+		api.logger.error(`Gradivus runtime attachment failed: ${message}`);
+		if (context.hasUI) context.ui.notify(`Gradivus attachment failed: ${message}`, "error");
 	};
 
 	return api => {
@@ -172,6 +172,6 @@ export function createBranchlightLifecycleExtension(): ExtensionFactory | undefi
 		api.on("session_shutdown", async () => {
 			await detach(true);
 		});
-		unregisterPostmortem = postmortem.register("branchlight-agent-detach", () => detach(true));
+		unregisterPostmortem = postmortem.register("gradivus-agent-detach", () => detach(true));
 	};
 }

@@ -595,7 +595,7 @@ export async function applyWorkspaceEditWithLsp(
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {
-		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change)));
+		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change), signal));
 	} catch (err) {
 		// Best-effort: overlays for the mutated prefix must not stay stale, but
 		// reconciliation problems must not mask the original apply failure.

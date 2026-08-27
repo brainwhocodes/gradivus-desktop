@@ -1,0 +1,48 @@
+// Layout tokens: typography, motion, spacing, dimensions, stacking order.
+:root {
+	--font-sans: "Departure Mono", ui-monospace, monospace;
+	--font-display: "Departure Mono", ui-monospace, monospace;
+	--font-mono: "Departure Mono", ui-monospace, monospace;
+	--ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+	--radius-small: 5px;
+	--radius-medium: 8px;
+	--radius-large: 12px;
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--control-height: 36px;
+	--session-rail-width: clamp(228px, 18vw, 264px);
+	--inspector-width: clamp(288px, 22vw, 340px);
+	--chat-content-width: 900px;
+	--settings-sidebar-width: 216px;
+	--settings-content-width: 1040px;
+	--chat-message-width: 72ch;
+
+	// Stacking order scale — the only sanctioned source of z-index values.
+	--z-raised: 1;
+	--z-overlay: 2;
+	--z-sticky: 6;
+	--z-header: 8;
+	--z-drawer: 20;
+	--z-popover: 50;
+	--z-backdrop: 90;
+	--z-modal: 100;
+	--z-toast: 100;
+}
+
+:root[data-density="compact"] {
+	--space-1: 3px;
+	--space-2: 6px;
+	--space-3: 9px;
+	--space-4: 12px;
+	--control-height: 32px;
+}
+
+:root[data-density="comfortable"] {
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--control-height: 36px;
+}

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="packages/desktop/resources/icon.png" width="132" alt="Mars Kommander logo">
+  <img src="packages/desktop/resources/icon.png" width="132" alt="Gradivus logo">
 </p>
 
-<h1 align="center">Mars Kommander</h1>
+<h1 align="center">Gradivus</h1>
 
 <p align="center">
   A self-contained desktop command center for Oh My Pi.
@@ -11,10 +11,12 @@
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-111111?logo=apple" alt="macOS Apple Silicon and Intel">
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white" alt="Windows 10 and 11">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/brainwhocodes/branchlight-repo" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-111111" alt="MIT License"></a>
 </p>
 
-Mars Kommander turns the OMP runtime into a focused Electron workspace. Chat with the agent, review its technical record, inspect changed files, follow subagents, and keep a real browser beside the conversation without installing a separate terminal harness.
+Gradivus turns the OMP runtime into a focused Electron workspace. Chat with the agent, review its technical record, inspect changed files, follow subagents, and keep a real browser beside the conversation without installing a separate terminal harness.
+
+[**Gradivus**](https://atlas.perseus.tufts.edu/dictionaries/entry/urn:cite2:scaife-viewer:dictionary-entries.atlas_v1:lat.ls.perseus-eng2-n19800/) is a Latin surname of Mars, probably from *gradior*: 'he who steps forth, marches out.' The name suits software that moves technical work forward.
 
 The packaged application contains Electron, the renderer, the local workspace runtime, and a compiled OMP executable. End users do not need Bun, Node.js, or a separate OMP installation.
 
@@ -30,11 +32,11 @@ The packaged application contains Electron, the renderer, the local workspace ru
 
 ## Build locally
 
-Mars Kommander uses Bun 1.3.14 and Electron Forge.
+Gradivus uses Bun 1.4.0 and Electron Forge.
+
+From the repository root:
 
 ```sh
-git clone https://github.com/brainwhocodes/branchlight-repo.git
-cd branchlight-repo
 bun install --frozen-lockfile
 ```
 
@@ -49,9 +51,9 @@ The local packaging command creates the following outputs:
 
 | Platform | Output |
 | --- | --- |
-| macOS Apple Silicon | `Mars-Kommander-macOS-arm64.zip` |
-| macOS Intel | `Mars-Kommander-macOS-x64.zip` |
-| Windows 10/11 x64 | `MarsKommanderSetup.exe` and a portable ZIP |
+| macOS Apple Silicon | `Gradivus-macOS-arm64.zip` |
+| macOS Intel | `Gradivus-macOS-x64.zip` |
+| Windows 10/11 x64 | `GradivusSetup.exe` and a portable ZIP |
 
 Generated files live in `packages/desktop/dist`.
 
@@ -73,16 +75,14 @@ bun run desktop:test
 
 ## Architecture
 
-Mars Kommander is intentionally thin around OMP:
+Gradivus is intentionally thin around OMP:
 
 1. Electron owns the native window, security boundaries, file dialogs, browser views, and lifecycle.
 2. The Svelte renderer presents OMP Chat, session history, settings, diffs, and browser workspaces.
-3. A shared Mars theme supplies the shell and chat surfaces, foregrounds, borders, focus states, and accents for light and dark mode.
+3. A shared Gradivus theme supplies the shell and chat surfaces, foregrounds, borders, focus states, and accents for light and dark mode.
 4. A local workspace runtime persists tabs, panes, profiles, and browser state.
 5. The packaged OMP executable runs RPC sessions and streams events back into the desktop application.
 
-The existing Branchlight-prefixed internal protocol and environment names remain implementation details so stored workspaces and test fixtures continue to work.
-
 ## Project status
 
-Mars Kommander is under active development. Local packaging produces contained macOS and Windows builds with the OMP executable bundled into the application. Code signing, Apple notarization, automatic updates, store distribution, and hosted release automation remain separate release-engineering work.
+Gradivus is under active development. Local packaging produces contained macOS (`Gradivus.app`, packaged as a `Gradivus-<platform>-<arch>` root) and Windows builds with the OMP executable bundled into the application. Code signing, Apple notarization, automatic updates, store distribution, and hosted release automation remain separate release-engineering work.

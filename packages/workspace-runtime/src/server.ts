@@ -22,6 +22,7 @@ import {
 	type WorkspacePrincipalV1,
 } from "@oh-my-pi/pi-wire";
 import { WorkspaceApplication } from "./application";
+import { WORKSPACE_RUNTIME_VERSION } from "./constants";
 import { buildChildEnvironment } from "./env";
 import { reduceWorkspace } from "./reducer";
 import { parseWorkspaceCommandInputV1, rejectedSchemaResult } from "./schema";
@@ -40,7 +41,12 @@ import type {
 	WorkspaceCommandResultV1,
 	WorkspaceEffectIntentV1,
 	WorkspaceOperationV1,
+	WorkspaceReducerStateV1,
 } from "./types";
+
+type EffectDisposition =
+	| { kind: "server-owned"; effects: readonly WorkspaceEffectIntentV1[] }
+	| { kind: "unsupported"; message: string };
 
 export interface WorkspaceServerOptions {
 	runtimeRoot: string;
@@ -238,7 +244,63 @@ export class WorkspaceServer {
 		return removed;
 	}
 
+	#classifyEffects(command: WorkspaceCommandV1, effects: readonly WorkspaceEffectIntentV1[]): EffectDisposition {
+		const serverOwned: WorkspaceEffectIntentV1[] = [];
+		for (const effect of effects) {
+			switch (effect.kind) {
+				case "terminal":
+					if (
+						effect.operation !== "terminal.open" &&
+						effect.operation !== "terminal.input" &&
+						effect.operation !== "terminal.resize" &&
+						effect.operation !== "terminal.close" &&
+						effect.operation !== "tab.close"
+					) {
+						throw new Error(
+							`invariant violation: terminal effect ${effect.operation} is not executable by the workspace server`,
+						);
+					}
+					serverOwned.push(effect);
+					break;
+				case "browser":
+				case "agent":
+					throw new Error(
+						`invariant violation: ${effect.kind} effect for ${command.type} must be document-reconciled or adapter-owned`,
+					);
+				case "provider":
+				case "service":
+				case "worktree":
+				case "remote":
+				case "cleanup":
+					return {
+						kind: "unsupported",
+						message: `workspace server does not support ${effect.operation} effects`,
+					};
+				default: {
+					const exhaustive: never = effect.kind;
+					throw new Error(`invariant violation: unknown workspace effect kind ${String(exhaustive)}`);
+				}
+			}
+		}
+		return { kind: "server-owned", effects: serverOwned };
+	}
+
+	#unsupportedEffectResult(state: WorkspaceReducerStateV1, message: string): WorkspaceCommandResultV1 {
+		return {
+			status: "rejected",
+			state,
+			document: state.document,
+			events: [],
+			effects: [],
+			error: {
+				code: "unsupported_command",
+				message,
+			},
+		};
+	}
+
 	async executeCommand(command: unknown, authorization: WorkspaceAuthorizationV1): Promise<WorkspaceCommandResultV1> {
+		let queuedEffects: Promise<void>[] = [];
 		const result = await this.#withTransaction(async () => {
 			let parsed: WorkspaceCommandV1;
 			try {
@@ -250,15 +312,21 @@ export class WorkspaceServer {
 			const currentState = this.#app.state;
 			const result = reduceWorkspace(currentState, parsed, authorization);
 			if (result.status === "accepted") {
+				const disposition = this.#classifyEffects(parsed, result.effects);
+				if (disposition.kind === "unsupported") {
+					return this.#unsupportedEffectResult(currentState, disposition.message);
+				}
 				this.#revokeTokensBeforeCommit(parsed, currentState.document);
 				await this.#store.commitResult(parsed, result);
 				this.#app.installState(result.state);
 				if (result.events.length > 0) this.#broadcastEvents(result.events, result.document.revision);
+				// Establish resource chains before releasing command-order serialization.
+				queuedEffects = disposition.effects.map(effect => this.#queueEffect(effect));
 			}
 			return result;
 		});
 		if (result.status !== "accepted") return result;
-		for (const effect of result.effects) await this.#queueEffect(effect);
+		await Promise.all(queuedEffects);
 		return {
 			...result,
 			state: this.#app.state,
@@ -447,6 +515,7 @@ export class WorkspaceServer {
 				};
 				this.#sendFrame(session.socket, {
 					type: "auth.ok",
+					runtimeVersion: WORKSPACE_RUNTIME_VERSION,
 					principal,
 					document: this.#app.document,
 				});
@@ -469,6 +538,7 @@ export class WorkspaceServer {
 				session.authorization = matchedAuth;
 				this.#sendFrame(session.socket, {
 					type: "auth.ok",
+					runtimeVersion: WORKSPACE_RUNTIME_VERSION,
 					principal: matchedAuth.principal,
 					document: this.#app.document,
 				});
@@ -574,51 +644,66 @@ export class WorkspaceServer {
 		}
 	}
 	async #queueEffect(effect: WorkspaceEffectIntentV1): Promise<void> {
-		const previous = this.#effectChains.get(effect.intentId) ?? Promise.resolve();
+		if (effect.kind !== "terminal") throw new Error(`invariant violation: unsupported queued effect ${effect.kind}`);
+		const terminalId = effect.payload.id;
+		if (typeof terminalId !== "string" || terminalId.length === 0)
+			throw new Error(`invariant violation: terminal effect ${effect.operation} has no terminal id`);
+		const resourceKey = `terminal:${terminalId}`;
+		const previous = this.#effectChains.get(resourceKey) ?? Promise.resolve();
 		const next = previous.catch(() => {}).then(() => this.#executeEffect(effect));
-		this.#effectChains.set(effect.intentId, next);
+		this.#effectChains.set(resourceKey, next);
 		try {
 			await next;
 		} finally {
-			if (this.#effectChains.get(effect.intentId) === next) this.#effectChains.delete(effect.intentId);
+			if (this.#effectChains.get(resourceKey) === next) this.#effectChains.delete(resourceKey);
 		}
 	}
 
 	async #executeEffect(effect: WorkspaceEffectIntentV1): Promise<void> {
-		if (effect.kind !== "terminal") return;
-		const id = typeof effect.payload.id === "string" ? effect.payload.id : undefined;
-		if (!id) return;
+		if (effect.kind !== "terminal") {
+			throw new Error(`invariant violation: unsupported workspace effect ${effect.kind}`);
+		}
+		const id = effect.payload.id;
+		if (typeof id !== "string" || id.length === 0) {
+			throw new Error(`invariant violation: terminal effect ${effect.operation} has no terminal id`);
+		}
 		try {
-			if (effect.operation === "terminal.open") {
-				await this.#startTerminal(effect, id);
-				return;
-			}
-			if (effect.operation === "terminal.input") {
-				const data = effect.payload.data;
-				if (typeof data !== "string") throw new Error("terminal input data is invalid");
-				this.#terminalManager.write(id, data);
-				return;
-			}
-			if (effect.operation === "terminal.resize") {
-				const columns = effect.payload.columns;
-				const rows = effect.payload.rows;
-				if (
-					typeof columns !== "number" ||
-					!Number.isSafeInteger(columns) ||
-					typeof rows !== "number" ||
-					!Number.isSafeInteger(rows) ||
-					columns < TERMINAL_MIN_DIMENSION ||
-					columns > TERMINAL_MAX_DIMENSION ||
-					rows < TERMINAL_MIN_DIMENSION ||
-					rows > TERMINAL_MAX_DIMENSION
-				)
-					throw new Error("invalid terminal dimensions");
-				this.#terminalManager.resize(id, columns, rows);
-				return;
-			}
-			if (effect.operation === "terminal.close" || effect.operation === "tab.close") {
-				this.#revokeTerminalToken(id);
-				await this.#terminalManager.close(id);
+			switch (effect.operation) {
+				case "terminal.open":
+					await this.#startTerminal(effect, id);
+					return;
+				case "terminal.input": {
+					const data = effect.payload.data;
+					if (typeof data !== "string") throw new Error("terminal input data is invalid");
+					this.#terminalManager.write(id, data);
+					return;
+				}
+				case "terminal.resize": {
+					const columns = effect.payload.columns;
+					const rows = effect.payload.rows;
+					if (
+						typeof columns !== "number" ||
+						!Number.isSafeInteger(columns) ||
+						typeof rows !== "number" ||
+						!Number.isSafeInteger(rows) ||
+						columns < TERMINAL_MIN_DIMENSION ||
+						columns > TERMINAL_MAX_DIMENSION ||
+						rows < TERMINAL_MIN_DIMENSION ||
+						rows > TERMINAL_MAX_DIMENSION
+					)
+						throw new Error("invalid terminal dimensions");
+					this.#terminalManager.resize(id, columns, rows);
+					return;
+				}
+				case "terminal.close":
+				case "tab.close":
+					this.#revokeTerminalToken(id);
+					await this.#terminalManager.close(id);
+					return;
+				default:
+					throw new Error(
+						`invariant violation: terminal effect ${effect.operation} is not executable by the workspace server`,
+					);
 			}
 		} catch (error) {
 			await this.#updateTerminalStatus(id, "failed", {
@@ -642,11 +727,11 @@ export class WorkspaceServer {
 				COLORTERM: "truecolor",
 			},
 			scopedDescriptor: {
-				BRANCHLIGHT_TERMINAL: "1",
-				BRANCHLIGHT_TERMINAL_ID: terminal.id,
-				BRANCHLIGHT_PANE_ID: terminal.paneId ?? "",
-				BRANCHLIGHT_WORKSPACE_ID: effect.workspaceId,
-				...(terminal.profileId ? { BRANCHLIGHT_PROFILE_ID: terminal.profileId } : {}),
+				GRADIVUS_TERMINAL: "1",
+				GRADIVUS_TERMINAL_ID: terminal.id,
+				GRADIVUS_PANE_ID: terminal.paneId ?? "",
+				GRADIVUS_WORKSPACE_ID: effect.workspaceId,
+				...(terminal.profileId ? { GRADIVUS_PROFILE_ID: terminal.profileId } : {}),
 				PI_RUNTIME_DIR: this.#runtimeRoot,
 				PI_RUNTIME_TOKEN: tokenRecord.token,
 				PI_BROWSER_CDP_URL: "http://127.0.0.1:9222",

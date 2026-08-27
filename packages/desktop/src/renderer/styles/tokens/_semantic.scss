@@ -1,0 +1,99 @@
+// Semantic tokens: the stable naming contract consumed by components,
+// native surfaces, and e2e/theme-contrast.ts. Computed values are identical
+// to the pre-token-system palettes byte-for-byte.
+:root,
+:root[data-theme="dark"] {
+	color-scheme: dark;
+	color: var(--foreground);
+	background: var(--window-background);
+
+	--window-background: var(--gray-950);
+	--shell: var(--gray-900);
+	--shell-raised: var(--gray-850);
+	--shell-hover: var(--gray-800);
+	--chat-canvas: var(--gray-925);
+	--browser: var(--gray-950);
+	--line: var(--gray-450);
+	--line-soft: var(--gray-650);
+	--foreground: var(--gray-000);
+	--foreground-strong: var(--gray-000);
+	--foreground-muted: var(--gray-250);
+	--foreground-disabled: var(--gray-300);
+	--accent: var(--crimson-600);
+	--accent-hover: var(--crimson-500);
+	--accent-surface: var(--crimson-900);
+	--accent-boundary: var(--crimson-300);
+	--accent-foreground: var(--gray-000);
+	--danger: var(--crimson-600);
+	--danger-surface: var(--crimson-900);
+	--danger-boundary: var(--crimson-300);
+	--danger-foreground: var(--gray-000);
+	--success: var(--green-800);
+	--success-surface: var(--green-950);
+	--success-boundary: var(--green-300);
+	--success-foreground: var(--gray-000);
+	--warning: var(--amber-800);
+	--warning-surface: var(--amber-950);
+	--warning-boundary: var(--amber-300);
+	--warning-foreground: var(--gray-000);
+	--code-surface: var(--gray-875);
+	--selection-surface: var(--crimson-950);
+	--selection-foreground: var(--gray-000);
+	--focus-inner: var(--gray-000);
+	--focus-outer: var(--gray-ink);
+	--shadow-color: var(--black-a72);
+	--backdrop: var(--black-a78);
+}
+
+:root[data-theme="light"] {
+	color-scheme: light;
+	color: var(--foreground);
+	background: var(--window-background);
+
+	--window-background: var(--gray-000);
+	--shell: var(--gray-050);
+	--shell-raised: var(--gray-000);
+	--shell-hover: var(--gray-100);
+	--chat-canvas: var(--gray-000);
+	--browser: var(--gray-000);
+	--line: var(--gray-400);
+	--line-soft: var(--gray-200);
+	--foreground: var(--gray-ink);
+	--foreground-strong: var(--gray-ink);
+	--foreground-muted: var(--gray-700);
+	--foreground-disabled: var(--gray-600);
+	--accent: var(--crimson-600);
+	--accent-hover: var(--crimson-700);
+	--accent-surface: var(--crimson-050);
+	--accent-boundary: var(--crimson-600);
+	--accent-foreground: var(--gray-000);
+	--danger: var(--crimson-600);
+	--danger-surface: var(--crimson-050);
+	--danger-boundary: var(--crimson-600);
+	--danger-foreground: var(--gray-000);
+	--success: var(--green-800);
+	--success-surface: var(--green-050);
+	--success-boundary: var(--green-800);
+	--success-foreground: var(--gray-000);
+	--warning: var(--amber-800);
+	--warning-surface: var(--amber-050);
+	--warning-boundary: var(--amber-800);
+	--warning-foreground: var(--gray-000);
+	--code-surface: var(--gray-075);
+	--selection-surface: var(--crimson-050);
+	--selection-foreground: var(--gray-ink);
+	--focus-inner: var(--gray-000);
+	--focus-outer: var(--gray-ink);
+	--shadow-color: var(--black-a18);
+	--backdrop: var(--black-a46);
+}
+
+// Theme-independent aliases over semantic tokens.
+:root {
+	--placeholder: var(--foreground-muted);
+	--focus-ring: var(--focus-inner);
+	--focus-ring-contrast: var(--focus-outer);
+	--terminal-background: var(--window-background);
+	--terminal-foreground: var(--foreground);
+	--terminal-shadow: var(--shadow-color);
+}

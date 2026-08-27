@@ -6,7 +6,7 @@ const desktopRoot = path.resolve(import.meta.dir, "..");
 const outRoot = path.join(desktopRoot, "out");
 const distRoot = path.join(desktopRoot, "dist");
 const platform = process.platform;
-const arch = process.env.MARS_DESKTOP_ARCH?.trim() || process.arch;
+const arch = process.env.GRADIVUS_DESKTOP_ARCH?.trim() || process.arch;
 
 if (platform !== "darwin" && platform !== "win32") {
 	throw new Error(`Contained desktop artifacts can only be built on macOS or Windows, not ${platform}`);
@@ -15,7 +15,7 @@ if (arch !== "x64" && arch !== "arm64") {
 	throw new Error(`Unsupported desktop architecture: ${arch}`);
 }
 if (platform === "win32" && arch !== "x64") {
-	throw new Error("Mars Kommander currently ships Windows 10/11 as an x64 build");
+	throw new Error("Gradivus currently ships Windows 10/11 as an x64 build");
 }
 
 async function run(command: string[], cwd = desktopRoot): Promise<void> {
@@ -47,12 +47,12 @@ await fs.rm(distRoot, { recursive: true, force: true });
 await fs.mkdir(distRoot, { recursive: true });
 await run([process.execPath, "run", "backend:build"]);
 
-const packageId = `Mars Kommander-${platform}-${arch}`;
+const packageId = `Gradivus-${platform}-${arch}`;
 const packageRoot = path.join(outRoot, packageId);
 
 if (platform === "darwin") {
 	await run([process.execPath, "run", "package", "--", "--platform=darwin", `--arch=${arch}`]);
-	const appPath = path.join(packageRoot, "Mars Kommander.app");
+	const appPath = path.join(packageRoot, "Gradivus.app");
 	const backendPath = path.join(appPath, "Contents", "Resources", "omp");
 	await assertPath(appPath, "directory");
 	await assertPath(backendPath, "file");
@@ -63,7 +63,7 @@ if (platform === "darwin") {
 	await run(["codesign", "--force", "--deep", "--sign", "-", appPath]);
 	await run(["codesign", "--verify", "--deep", "--strict", appPath]);
 
-	const archive = path.join(distRoot, `Mars-Kommander-macOS-${arch}.zip`);
+	const archive = path.join(distRoot, `Gradivus-macOS-${arch}.zip`);
 	await run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", appPath, archive]);
 	const digest = await checksum(archive);
 	await fs.writeFile(path.join(distRoot, "SHA256SUMS.txt"), `${digest}  ${path.basename(archive)}\n`, "utf8");
@@ -75,11 +75,11 @@ if (platform === "darwin") {
 	await assertPath(backendPath, "file");
 	await run([backendPath, "--version"]);
 
-	const portable = path.join(distRoot, "Mars-Kommander-Windows-10-11-x64-portable.zip");
+	const portable = path.join(distRoot, "Gradivus-Windows-10-11-x64-portable.zip");
 	await run(["tar.exe", "-a", "-c", "-f", portable, "-C", packageRoot, "."]);
 
 	const makeRoot = path.join(outRoot, "make", "squirrel.windows", "x64");
-	const setup = path.join(makeRoot, "MarsKommanderSetup.exe");
+	const setup = path.join(makeRoot, "GradivusSetup.exe");
 	const releases = path.join(makeRoot, "RELEASES");
 	await assertPath(setup, "file");
 	await assertPath(releases, "file");

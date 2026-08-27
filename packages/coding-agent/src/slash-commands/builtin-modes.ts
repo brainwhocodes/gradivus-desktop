@@ -9,10 +9,11 @@ import type { SettingPath } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import { parseConfiguredThinkingLevel } from "../thinking";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
@@ -198,6 +199,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "plan",
 		description: "Toggle plan mode (agent plans before executing)",
+		acpDescription: "Toggle plan mode",
+		acpInputHint: "[prompt|on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable plan mode" },
+			{ name: "off", description: "Disable plan mode" },
+			{ name: "status", description: "Show plan mode status" },
+		],
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -209,6 +217,83 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (runtime.ctx.goalModeEnabled) return "Plan: blocked by goal mode";
 			return "Plan: off";
 		},
+		handle: async (command, runtime) => {
+			const arg = command.args.trim();
+			const lower = arg.toLowerCase();
+			const currentState = runtime.session.getPlanModeState?.();
+			if (lower === "status") {
+				await runtime.output(
+					currentState?.enabled
+						? `Plan mode is on (${currentState.planFilePath || "local://PLAN.md"}).`
+						: "Plan mode is off.",
+				);
+				return commandConsumed();
+			}
+			if (lower === "off") {
+				if (!currentState?.enabled) {
+					await runtime.output("Plan mode is already off.");
+					return commandConsumed();
+				}
+				runtime.session.setPlanModeState?.(undefined);
+				await runtime.output("Plan mode disabled.");
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+			if (lower === "on" || lower === "" || lower === "toggle") {
+				if (currentState?.enabled) {
+					if (lower === "on") {
+						await runtime.output("Plan mode is already on.");
+						return commandConsumed();
+					}
+					runtime.session.setPlanModeState?.(undefined);
+					await runtime.output("Plan mode disabled.");
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+				if (!runtime.settings.get("plan.enabled" as SettingPath)) {
+					return usage("Plan mode is disabled in settings (plan.enabled).", runtime);
+				}
+				const planFilePath = "local://PLAN.md";
+				const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
+				const planAugmentations: string[] = [];
+				if (runtime.session.hasBuiltInTool?.("write")) {
+					planAugmentations.push("write");
+				}
+				const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+				await runtime.session.setActiveToolsByName?.(uniquePlanTools);
+				runtime.session.setPlanModeState?.({
+					enabled: true,
+					planFilePath,
+					workflow: "parallel",
+				});
+				runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
+				await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+			if (!currentState?.enabled) {
+				if (!runtime.settings.get("plan.enabled" as SettingPath)) {
+					return usage("Plan mode is disabled in settings (plan.enabled).", runtime);
+				}
+				const planFilePath = "local://PLAN.md";
+				const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
+				const planAugmentations: string[] = [];
+				if (runtime.session.hasBuiltInTool?.("write")) {
+					planAugmentations.push("write");
+				}
+				const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+				await runtime.session.setActiveToolsByName?.(uniquePlanTools);
+				runtime.session.setPlanModeState?.({
+					enabled: true,
+					planFilePath,
+					workflow: "parallel",
+				});
+				runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
+				await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
+				await runtime.notifyConfigChanged?.();
+			}
+			return { prompt: arg };
+		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedModeDraft(command, runtime, () =>
 				runtime.ctx.handlePlanModeCommand(command.args || undefined, runtime.input),
@@ -218,8 +303,16 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "plan-review",
 		description: "Re-open the plan review for the latest plan (plan mode only)",
+		acpDescription: "Show status of the active plan",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
+		handle: async (_command, runtime) => {
+			const state = runtime.session.getPlanModeState?.();
+			if (!state?.enabled) {
+				return usage("Plan mode is not active.", runtime);
+			}
+			return commandConsumed();
+		},
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
 			runtime.ctx.editor.setText("");
@@ -228,6 +321,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "vibe",
 		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
+		acpDescription: "Toggle vibe mode",
+		acpInputHint: "[prompt|on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable vibe mode" },
+			{ name: "off", description: "Disable vibe mode" },
+			{ name: "status", description: "Show vibe mode status" },
+		],
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -235,6 +335,47 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
 			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
 			return "Vibe: off";
+		},
+		handle: async (command, runtime) => {
+			const arg = command.args.trim();
+			const lower = arg.toLowerCase();
+			const currentState = runtime.session.getVibeModeState?.();
+			if (lower === "status") {
+				await runtime.output(`Vibe mode is ${currentState?.enabled ? "on" : "off"}.`);
+				return commandConsumed();
+			}
+			if (lower === "off") {
+				if (!currentState?.enabled) {
+					await runtime.output("Vibe mode is already off.");
+					return commandConsumed();
+				}
+				runtime.session.setVibeModeState?.(undefined);
+				await runtime.output("Vibe mode disabled.");
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+			if (lower === "on" || lower === "" || lower === "toggle") {
+				if (currentState?.enabled) {
+					if (lower === "on") {
+						await runtime.output("Vibe mode is already on.");
+						return commandConsumed();
+					}
+					runtime.session.setVibeModeState?.(undefined);
+					await runtime.output("Vibe mode disabled.");
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+				runtime.session.setVibeModeState?.({ enabled: true });
+				await runtime.output("Vibe mode enabled.");
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+			if (!currentState?.enabled) {
+				runtime.session.setVibeModeState?.({ enabled: true });
+				await runtime.output("Vibe mode enabled.");
+				await runtime.notifyConfigChanged?.();
+			}
+			return { prompt: arg };
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedModeDraft(command, runtime, () =>
@@ -245,6 +386,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "goal",
 		description: "Toggle goal mode (persistent autonomous objective for this session)",
+		acpDescription: "Manage goal mode",
+		acpInputHint: "[set <objective>|show|pause|resume|drop|budget <N|off>|<objective>]",
 		subcommands: [
 			{ name: "set", description: "Set or replace the goal", usage: "<objective>" },
 			{ name: "show", description: "Show current goal details" },
@@ -260,6 +403,70 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
 			const state = runtime.ctx.session.getGoalModeState();
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
+		},
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			const state = runtime.session.getGoalModeState?.();
+			if (!verb || verb === "show") {
+				if (!state) {
+					await runtime.output("Goal mode is not active.");
+					return commandConsumed();
+				}
+				await runtime.output(
+					`Goal: ${state.goal.objective}\nStatus: ${state.goal.status}\nBudget: ${state.goal.tokenBudget ? state.goal.tokenBudget.toLocaleString() : "unlimited"}`,
+				);
+				return commandConsumed();
+			}
+			if (verb === "pause") {
+				if (state?.goal.status !== "active") {
+					return usage("No active goal to pause.", runtime);
+				}
+				runtime.session.setGoalModeState?.({
+					...state,
+					goal: { ...state.goal, status: "paused", updatedAt: Date.now() },
+				});
+				await runtime.output("Goal paused.");
+				return commandConsumed();
+			}
+			if (verb === "resume") {
+				if (state?.goal.status !== "paused") {
+					return usage("No paused goal to resume.", runtime);
+				}
+				runtime.session.setGoalModeState?.({
+					...state,
+					goal: { ...state.goal, status: "active", updatedAt: Date.now() },
+				});
+				await runtime.output("Goal resumed.");
+				return commandConsumed();
+			}
+			if (verb === "drop") {
+				if (!state) {
+					return usage("No goal to drop.", runtime);
+				}
+				runtime.session.setGoalModeState?.(undefined);
+				await runtime.output("Goal dropped.");
+				return commandConsumed();
+			}
+			const objective = verb === "set" ? rest : command.args.trim();
+			if (objective) {
+				const now = Date.now();
+				runtime.session.setGoalModeState?.({
+					enabled: true,
+					mode: "active",
+					goal: {
+						id: `goal_${now}`,
+						objective,
+						status: "active",
+						tokensUsed: 0,
+						timeUsedSeconds: 0,
+						createdAt: now,
+						updatedAt: now,
+					},
+				});
+				await runtime.output(`Goal set: ${objective}`);
+				return { prompt: `Begin working towards the goal: ${objective}` };
+			}
+			return usage("Usage: /goal [set <objective>|show|pause|resume|drop|budget <N|off>]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedModeDraft(command, runtime, () =>
@@ -282,6 +489,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "loop",
 		description:
 			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
+		acpDescription: "Toggle loop mode",
 		inlineHint: "[count|duration] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -291,12 +499,81 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (runtime.ctx.loopPrompt) return "Loop: on (repeating prompt)";
 			return "Loop: on (waiting for next prompt)";
 		},
+		handle: async (command, runtime) => {
+			const arg = command.args.trim();
+			if (arg) {
+				return { prompt: arg };
+			}
+			await runtime.output("Loop mode requires interactive TUI for execution iteration controls.");
+			return commandConsumed();
+		},
 		handleTui: async (command, runtime) => {
 			const prompt = await runtime.ctx.handleLoopCommand(command.args);
 			runtime.ctx.editor.setText("");
 			// Surface any inline prompt so the dispatcher returns it and the normal
 			// submit flow runs the first loop iteration (recording it as the loop prompt).
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "thinking",
+		aliases: ["think"],
+		description: "Set or show thinking/reasoning effort level",
+		acpDescription: "Configure thinking level",
+		acpInputHint: "[inherit|off|minimal|low|medium|high|xhigh|max]",
+		subcommands: [
+			{ name: "inherit", description: "Use session/model default" },
+			{ name: "off", description: "Disable reasoning" },
+			{ name: "minimal", description: "Minimal reasoning effort" },
+			{ name: "low", description: "Low reasoning effort" },
+			{ name: "medium", description: "Medium reasoning effort" },
+			{ name: "high", description: "High reasoning effort" },
+			{ name: "xhigh", description: "Extra-high reasoning effort" },
+			{ name: "max", description: "Maximum reasoning effort" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const level = runtime.ctx.session.thinkingLevel ?? "inherit";
+			return `Thinking: ${level}`;
+		},
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg) {
+				const current = runtime.session.thinkingLevel ?? "inherit";
+				await runtime.output(`Current thinking level: ${current}`);
+				return commandConsumed();
+			}
+			const parsed = parseConfiguredThinkingLevel(arg);
+			if (parsed === undefined && arg !== "inherit" && arg !== "default") {
+				return usage(
+					"Invalid thinking level. Valid options: inherit, off, minimal, low, medium, high, xhigh, max",
+					runtime,
+				);
+			}
+			runtime.session.setThinkingLevel(parsed);
+			await runtime.notifyConfigChanged?.();
+			await runtime.output(`Thinking level set to ${arg}.`);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg) {
+				runtime.ctx.showStatus(`Current thinking level: ${runtime.ctx.session.thinkingLevel ?? "inherit"}`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const parsed = parseConfiguredThinkingLevel(arg);
+			if (parsed === undefined && arg !== "inherit" && arg !== "default") {
+				runtime.ctx.showWarning(
+					"Invalid thinking level. Valid options: inherit, off, minimal, low, medium, high, xhigh, max",
+				);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.session.setThinkingLevel(parsed);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(`Thinking level set to ${arg}.`);
+			runtime.ctx.editor.setText("");
 		},
 	},
 	{

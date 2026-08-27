@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product Description"
+  short_description: "Document product behavior from the outside in"
+  default_prompt: "Use $product-description to document this product’s user experience from the outside in."

@@ -1,0 +1,65 @@
+// BrowserPane toolbar: navigation controls, target picker, pane actions.
+
+.browser-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 42px;
+	min-height: 42px;
+	padding: 0 10px;
+	border-bottom: 1px solid var(--line);
+	background: var(--shell-raised);
+}
+
+.browser-controls,
+.browser-pane-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.browser-toolbar button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	background: transparent;
+	color: var(--foreground-muted);
+	cursor: pointer;
+	transition:
+		color 140ms var(--ease-standard),
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard);
+
+	&:hover:not(:disabled) {
+		color: var(--foreground-strong);
+		background: var(--shell-hover);
+		border-color: var(--line-soft);
+	}
+
+	&:disabled {
+		color: var(--foreground-disabled);
+		border-color: var(--line-soft);
+		cursor: default;
+	}
+
+	&.target-button {
+		color: var(--foreground-muted);
+
+		&:hover:not(:disabled) {
+			color: var(--foreground-strong);
+			background: var(--shell-hover);
+		}
+
+		&.is-active {
+			color: var(--selection-foreground) !important;
+			background: var(--selection-surface) !important;
+			border-color: var(--accent-boundary) !important;
+			box-shadow: none;
+		}
+	}
+
+}

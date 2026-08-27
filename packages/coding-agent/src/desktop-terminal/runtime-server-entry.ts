@@ -14,20 +14,20 @@ function resolveSourceRuntimeServerEntry(): string | undefined {
 }
 
 export async function startRuntimeServerFromEnvironment(): Promise<void> {
-	const bootstrapRuntimeDir = process.env.BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR;
-	const tokenBasename = process.env.BRANCHLIGHT_BOOTSTRAP_TOKEN_BASENAME;
-	const endpointBasename = process.env.BRANCHLIGHT_BOOTSTRAP_ENDPOINT_BASENAME;
-	const executablePath = process.env.BRANCHLIGHT_BOOTSTRAP_EXECUTABLE_PATH;
+	const bootstrapRuntimeDir = process.env.GRADIVUS_BOOTSTRAP_RUNTIME_DIR;
+	const tokenBasename = process.env.GRADIVUS_BOOTSTRAP_TOKEN_BASENAME;
+	const endpointBasename = process.env.GRADIVUS_BOOTSTRAP_ENDPOINT_BASENAME;
+	const executablePath = process.env.GRADIVUS_BOOTSTRAP_EXECUTABLE_PATH;
 
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR;
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_TOKEN_BASENAME;
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_ENDPOINT_BASENAME;
-	delete process.env.BRANCHLIGHT_BOOTSTRAP_EXECUTABLE_PATH;
+	delete process.env.GRADIVUS_BOOTSTRAP_RUNTIME_DIR;
+	delete process.env.GRADIVUS_BOOTSTRAP_TOKEN_BASENAME;
+	delete process.env.GRADIVUS_BOOTSTRAP_ENDPOINT_BASENAME;
+	delete process.env.GRADIVUS_BOOTSTRAP_EXECUTABLE_PATH;
 
 	captureSanitizedUserEnvironment();
 
 	if (!bootstrapRuntimeDir) {
-		process.stderr.write("Fatal: missing BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR\n");
+		process.stderr.write("Fatal: missing GRADIVUS_BOOTSTRAP_RUNTIME_DIR\n");
 		process.exit(1);
 	}
 

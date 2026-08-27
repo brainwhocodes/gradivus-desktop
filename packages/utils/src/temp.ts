@@ -10,11 +10,15 @@ export class TempDir {
 	}
 
 	static createSync(prefix?: string): TempDir {
-		return new TempDir(fs.mkdtempSync(normalizePrefix(prefix)));
+		const normalizedPrefix = normalizePrefix(prefix);
+		fs.mkdirSync(path.dirname(normalizedPrefix), { recursive: true });
+		return new TempDir(fs.mkdtempSync(normalizedPrefix));
 	}
 
 	static async create(prefix?: string): Promise<TempDir> {
-		return new TempDir(await fsPromises.mkdtemp(normalizePrefix(prefix)));
+		const normalizedPrefix = normalizePrefix(prefix);
+		await fsPromises.mkdir(path.dirname(normalizedPrefix), { recursive: true });
+		return new TempDir(await fsPromises.mkdtemp(normalizedPrefix));
 	}
 
 	#removePromise: Promise<void> | null = null;

@@ -793,8 +793,8 @@ export class BrowserSelectionChannel {
 		const validatedPatch = validateDeclarativePreviewPatch(patch);
 
 		const previewResult = await this.#page.evaluate(p => {
-			const host = document.getElementById("__branchlight_preview_host__") || document.createElement("div");
-			host.id = "__branchlight_preview_host__";
+			const host = document.getElementById("__gradivus_preview_host__") || document.createElement("div");
+			host.id = "__gradivus_preview_host__";
 			host.style.display = "none";
 			if (!host.parentNode) document.documentElement.appendChild(host);
 
@@ -909,7 +909,7 @@ export class BrowserSelectionChannel {
 			}
 
 			if (p.css) {
-				const styleId = "__branchlight_preview_style__";
+				const styleId = "__gradivus_preview_style__";
 				let styleEl = document.getElementById(styleId);
 				if (!styleEl) {
 					styleEl = document.createElement("style");
@@ -940,7 +940,7 @@ export class BrowserSelectionChannel {
 
 		await this.#page
 			.evaluate(() => {
-				const host = document.getElementById("__branchlight_preview_host__") as
+				const host = document.getElementById("__gradivus_preview_host__") as
 					| (HTMLElement & {
 							__mutations?: Array<{
 								el: Element;
@@ -993,7 +993,7 @@ export class BrowserSelectionChannel {
 					host.remove();
 				}
 
-				const styleEl = document.getElementById("__branchlight_preview_style__");
+				const styleEl = document.getElementById("__gradivus_preview_style__");
 				if (styleEl) styleEl.remove();
 			})
 			.catch(() => {});

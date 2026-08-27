@@ -2,8 +2,9 @@ Drives a real Chromium tab through Playwright 1.62.1 over CDP; exposes the raw `
 
 <instruction>
 - Static content? `read` the URL. Browser only for JS execution, auth, interactive actions.
-- `open` → `run` — tabs survive calls and subagents, open once reuse.
-- `run` scope: `page`, `browser`, `tab`, `display`, `assert`, `wait` available. `wait(fn)` polls until truthy — use instead of polling inside `tab.evaluate`.
+- `open` → `run` — tabs survive calls and subagents, open once reuse. Omitted names use `main` for the top-level agent and `agent:<agentId>:main` for named subagents; explicit names are process-global collaboration handles.
+- `run` calls on the same tab are serialized FIFO. Queue wait counts against the original timeout; cancellation removes a queued call. Different tabs run concurrently.
+- `list` returns a bounded, sorted inventory of managed tab names, backend, URL/title, non-sensitive owner labels, and active/queued run counts. Use it before intentionally sharing an explicit tab.
 
   - Tab helpers (drop to the raw Playwright `page` for anything uncovered):
     Element handles: `tab.ref("e5")` / `tab.id(n)` return a handle you call methods on directly — `(await tab.id(n)).click()`. Handles are NOT selectors: `tab.click`/`type`/`fill`/`waitFor*` take STRING selectors only. Snapshot refs work in any selector slot: `tab.click("e5")` ≡ `tab.click("aria-ref=e5")`.
@@ -19,7 +20,7 @@ Drives a real Chromium tab through Playwright 1.62.1 over CDP; exposes the raw `
   - Stalled actions fail fast with named error, never whole-cell timeout.
   - Raw request interception is run-scoped: run end removes `request` handlers, disables interception, releases held requests.
 
-- Branchlight terminal? If no explicit app backend or configured relay/CDP/cmux backend is selected, browser automation fails closed until the authenticated pane-scoped runtime broker is connected. Never fall back to a global Electron CDP endpoint, title/URL matching, or an implicit pane-name target. Explicit `app.cdp_url`, `app.path`, `app.relay`, or cmux configuration remains subject to the tool's backend rules.
+- Gradivus terminal? If no explicit app backend or configured relay/CDP/cmux backend is selected, browser automation fails closed until the authenticated pane-scoped runtime broker is connected. Never fall back to a global Electron CDP endpoint, title/URL matching, or an implicit pane-name target. Explicit `app.cdp_url`, `app.path`, `app.relay`, or cmux configuration remains subject to the tool's backend rules.
 - `app.path` → NEVER tamper with a real desktop app (no stealth patches).
 - `app.relay: true` → drive the user's own external Chrome tabs via the omp browser relay (auto-started; needs the OMP Browser Relay extension installed). `app.target` picks a tab by URL/title substring; without it the visible tab is adopted without stealing focus.
 - `close` releases the named tool session. It closes tool-owned headless pages and owned cmux surfaces, but NEVER closes pages in CDP-connected or relay browsers. Spawned-browser pages remain open unless `kill: true` terminates their process.

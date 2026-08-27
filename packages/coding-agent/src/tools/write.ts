@@ -15,6 +15,7 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { editMutationCoordinator, withMutation } from "../edit/mutation";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
@@ -833,7 +834,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	 * is re-validated on disk before splicing so an out-of-band edit
 	 * surfaces as a clear error instead of corrupting the file.
 	 */
-	async #resolveConflict(
+	async #resolveConflictUnlocked(
 		entry: ConflictEntry,
 		replacementContent: string,
 		stripped: boolean,
@@ -893,6 +894,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
+	async #resolveConflict(
+		entry: ConflictEntry,
+		replacementContent: string,
+		stripped: boolean,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<WriteToolDetails>> {
+		return withMutation(
+			[entry.absolutePath],
+			() => this.#resolveConflictUnlocked(entry, replacementContent, stripped, signal),
+			signal,
+		);
+	}
+
 	/**
 	 * Look up a single conflict entry by id and dispatch to {@link #resolveConflict}.
 	 * Throws a clear `not found` error when the id has been invalidated.
@@ -927,7 +941,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	 * still written. The result text reports per-file counts so the agent
 	 * can re-read the failed files and retry.
 	 */
-	async #resolveAllConflicts(
+	async #resolveAllConflictsUnlocked(
 		replacementContent: string,
 		stripped: boolean,
 		signal: AbortSignal | undefined,
@@ -1091,6 +1105,22 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
+	async #resolveAllConflicts(
+		replacementContent: string,
+		stripped: boolean,
+		signal: AbortSignal | undefined,
+		rawContent: string = replacementContent,
+	): Promise<AgentToolResult<WriteToolDetails>> {
+		const paths = getConflictHistory(this.session)
+			.entries()
+			.map(entry => entry.absolutePath);
+		return withMutation(
+			paths,
+			() => this.#resolveAllConflictsUnlocked(replacementContent, stripped, signal, rawContent),
+			signal,
+		);
+	}
+
 	async execute(
 		_toolCallId: string,
 		{ path: rawPath, content }: WriteParams,
@@ -1225,7 +1255,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await withMutation(
+					[resolvedArchivePath.absolutePath],
+					() => this.#writeArchiveEntry(cleanContent, resolvedArchivePath),
+					signal,
+				);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1260,26 +1294,56 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
+			const lease = await editMutationCoordinator.acquire([{ kind: "exact", path: absolutePath }], signal);
+			try {
+				// Check if file exists and is auto-generated before overwriting
+				if (await fs.exists(absolutePath)) {
+					await assertEditableFile(absolutePath, path, this.session.settings);
+				}
 
-			// Check if file exists and is auto-generated before overwriting
-			if (await fs.exists(absolutePath)) {
-				await assertEditableFile(absolutePath, path, this.session.settings);
-			}
+				const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+				emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
+				// Try ACP bridge first for editor-visible filesystem paths. Internal
+				// artifacts such as local:// plans are owned by OMP, not the editor.
+				const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+				if (bridgeWrite) {
+					// `write` always replaces the whole file, so (unlike hashline's
+					// hunk-scoped diff) there's no size cost to keying the header/
+					// executable-bit check on the verified post-write content —
+					// use it so a drifted write (e.g. client format-on-save) still
+					// hands back a tag that matches what's actually on disk.
+					const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
+					const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+					const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+					let resultText = header ? `${header}\n${writeLine}` : writeLine;
+					if (stripped) {
+						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+					}
+					if (madeExecutable) {
+						resultText += `\n${EXECUTABLE_NOTICE}`;
+					}
+					return {
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					};
+				}
 
-			// Try ACP bridge first for editor-visible filesystem paths. Internal
-			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
-			if (bridgeWrite) {
-				// `write` always replaces the whole file, so (unlike hashline's
-				// hunk-scoped diff) there's no size cost to keying the header/
-				// executable-bit check on the verified post-write content —
-				// use it so a drifted write (e.g. client format-on-save) still
-				// hands back a tag that matches what's actually on disk.
-				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+				const diagnostics = await this.#writethrough(
+					absolutePath,
+					cleanContent,
+					signal,
+					undefined,
+					batchRequest,
+					dst => this.#deferredDiagnostics?.begin(dst),
+				);
+				invalidateFsScanAfterWrite(absolutePath);
+				if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
+					this.session.bumpFileMutationVersion?.(absolutePath);
+				}
+				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
+
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
 				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
@@ -1288,53 +1352,27 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
 				}
+				if (!diagnostics) {
+					return {
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					};
+				}
+
 				return {
 					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					details: {
+						resolvedPath: absolutePath,
+						diagnostics,
+						madeExecutable: madeExecutable || undefined,
+						meta: outputMeta()
+							.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
+							.get(),
+					},
 				};
+			} finally {
+				lease.release();
 			}
-
-			const diagnostics = await this.#writethrough(
-				absolutePath,
-				cleanContent,
-				signal,
-				undefined,
-				batchRequest,
-				dst => this.#deferredDiagnostics?.begin(dst),
-			);
-			invalidateFsScanAfterWrite(absolutePath);
-			if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
-				this.session.bumpFileMutationVersion?.(absolutePath);
-			}
-			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
-
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-			const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
-			let resultText = header ? `${header}\n${writeLine}` : writeLine;
-			if (stripped) {
-				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-			}
-			if (madeExecutable) {
-				resultText += `\n${EXECUTABLE_NOTICE}`;
-			}
-			if (!diagnostics) {
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
-				};
-			}
-
-			return {
-				content: [{ type: "text", text: resultText }],
-				details: {
-					resolvedPath: absolutePath,
-					diagnostics,
-					madeExecutable: madeExecutable || undefined,
-					meta: outputMeta()
-						.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
-						.get(),
-				},
-			};
 		});
 	}
 }

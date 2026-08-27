@@ -31,7 +31,7 @@ describe("WorkspaceHost settings integration", () => {
 	let settingsStore: AppSettingsStore;
 
 	beforeEach(async () => {
-		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "bl-settings-test-"));
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "gradivus-settings-test-"));
 		settingsStore = new AppSettingsStore(tempDir, "/custom/default/workspace");
 		await settingsStore.load();
 	});

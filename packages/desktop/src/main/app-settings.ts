@@ -7,13 +7,18 @@ function isEnoent(error: unknown): boolean {
 	);
 }
 
-import type { BranchlightSettings, UpdateBranchlightSettingsInput } from "../shared/contracts";
+import type { GradivusSettings, UpdateGradivusSettingsInput } from "../shared/contracts";
 import { defaultWorkspacePath } from "./backend-path";
 
-export function defaultBranchlightSettings(defaultPath = defaultWorkspacePath()): BranchlightSettings {
+export function defaultGradivusSettings(defaultPath = defaultWorkspacePath()): GradivusSettings {
 	return {
 		theme: "dark",
 		confirmCloseTab: true,
+		ui: {
+			density: "comfortable",
+			reduceMotion: false,
+			showToolDetails: true,
+		},
 		terminal: {
 			shell:
 				process.platform === "win32"
@@ -37,10 +42,7 @@ export function defaultBranchlightSettings(defaultPath = defaultWorkspacePath())
 	};
 }
 
-function mergeBranchlightSettings(
-	base: BranchlightSettings,
-	updates: UpdateBranchlightSettingsInput,
-): BranchlightSettings {
+function mergeGradivusSettings(base: GradivusSettings, updates: UpdateGradivusSettingsInput): GradivusSettings {
 	return {
 		theme:
 			updates.theme === "light" || updates.theme === "system"
@@ -49,6 +51,14 @@ function mergeBranchlightSettings(
 					? "dark"
 					: base.theme,
 		confirmCloseTab: typeof updates.confirmCloseTab === "boolean" ? updates.confirmCloseTab : base.confirmCloseTab,
+		ui: {
+			...base.ui,
+			...(updates.ui?.density === "comfortable" || updates.ui?.density === "compact"
+				? { density: updates.ui.density }
+				: {}),
+			...(typeof updates.ui?.reduceMotion === "boolean" ? { reduceMotion: updates.ui.reduceMotion } : {}),
+			...(typeof updates.ui?.showToolDetails === "boolean" ? { showToolDetails: updates.ui.showToolDetails } : {}),
+		},
 		terminal: {
 			...base.terminal,
 			...(typeof updates.terminal?.shell === "string" && updates.terminal.shell.trim().length > 0
@@ -88,25 +98,49 @@ function mergeBranchlightSettings(
 	};
 }
 
+/**
+ * Read-only view of the persisted settings. Unlike AppSettingsStore.load(),
+ * this never repairs or writes the file; unreadable content yields defaults.
+ */
+export async function loadPersistedGradivusSettings(
+	userDataPath: string,
+	initialDefaultPath?: string,
+): Promise<GradivusSettings> {
+	const defaults = defaultGradivusSettings(initialDefaultPath);
+	try {
+		const content = await fsp.readFile(path.join(userDataPath, "settings.json"), "utf8");
+		const parsed = JSON.parse(content) as unknown;
+		if (typeof parsed === "object" && parsed !== null) {
+			return mergeGradivusSettings(defaults, parsed as UpdateGradivusSettingsInput);
+		}
+	} catch {
+		// Missing or corrupt settings file: fall back to defaults without writing.
+	}
+	return defaults;
+}
+
 export class AppSettingsStore {
 	readonly #filePath: string;
-	#settings: BranchlightSettings;
+	readonly #defaultWorkspacePath: string;
+	#settings: GradivusSettings;
+	#writeQueue: Promise<void> = Promise.resolve();
 
 	constructor(userDataPath: string, initialDefaultPath?: string) {
 		this.#filePath = path.join(userDataPath, "settings.json");
-		this.#settings = defaultBranchlightSettings(initialDefaultPath);
+		this.#defaultWorkspacePath = initialDefaultPath ?? defaultWorkspacePath();
+		this.#settings = defaultGradivusSettings(this.#defaultWorkspacePath);
 	}
 
-	get settings(): BranchlightSettings {
+	get settings(): GradivusSettings {
 		return structuredClone(this.#settings);
 	}
 
-	async load(): Promise<BranchlightSettings> {
+	async load(): Promise<GradivusSettings> {
 		try {
 			const content = await fsp.readFile(this.#filePath, "utf8");
 			const parsed = JSON.parse(content) as unknown;
 			if (typeof parsed === "object" && parsed !== null) {
-				this.#settings = mergeBranchlightSettings(this.#settings, parsed as UpdateBranchlightSettingsInput);
+				this.#settings = mergeGradivusSettings(this.#settings, parsed as UpdateGradivusSettingsInput);
 			}
 		} catch (error) {
 			if (!isEnoent(error)) {
@@ -117,22 +151,43 @@ export class AppSettingsStore {
 		return this.settings;
 	}
 
-	async update(updates: UpdateBranchlightSettingsInput): Promise<BranchlightSettings> {
-		this.#settings = mergeBranchlightSettings(this.#settings, updates);
-		await this.save();
-		return this.settings;
+	async update(updates: UpdateGradivusSettingsInput): Promise<GradivusSettings> {
+		return this.#enqueueWrite(async () => {
+			const snapshot = mergeGradivusSettings(this.#settings, updates);
+			await this.#writeSnapshot(snapshot);
+			this.#settings = snapshot;
+			return structuredClone(snapshot);
+		});
 	}
 
-	async reset(): Promise<BranchlightSettings> {
-		this.#settings = defaultBranchlightSettings();
-		await this.save();
-		return this.settings;
+	async reset(): Promise<GradivusSettings> {
+		return this.#enqueueWrite(async () => {
+			const snapshot = defaultGradivusSettings(this.#defaultWorkspacePath);
+			await this.#writeSnapshot(snapshot);
+			this.#settings = snapshot;
+			return structuredClone(snapshot);
+		});
 	}
 
 	async save(): Promise<void> {
+		await this.#enqueueWrite(async () => {
+			await this.#writeSnapshot(this.#settings);
+		});
+	}
+
+	#enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+		const queued = this.#writeQueue.then(operation);
+		this.#writeQueue = queued.then(
+			() => undefined,
+			() => undefined,
+		);
+		return queued;
+	}
+
+	async #writeSnapshot(snapshot: GradivusSettings): Promise<void> {
 		await fsp.mkdir(path.dirname(this.#filePath), { recursive: true });
 		const tempFile = `${this.#filePath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 7)}`;
-		await fsp.writeFile(tempFile, JSON.stringify(this.#settings, null, 2), "utf8");
+		await fsp.writeFile(tempFile, JSON.stringify(snapshot, null, 2), "utf8");
 		await fsp.rename(tempFile, this.#filePath);
 	}
 }

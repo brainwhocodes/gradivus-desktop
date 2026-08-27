@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { withMutation } from "../edit/mutation";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type {
@@ -17,7 +18,6 @@ import type {
 	WorkspaceEdit,
 } from "./types";
 import { uriToFile } from "./utils";
-
 // =============================================================================
 // Text Edit Application
 // =============================================================================
@@ -160,7 +160,7 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
  * Apply text edits to a file.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
  */
-export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
+async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
 	const content = await Bun.file(filePath).text();
 	const result = applyTextEditsToString(content, edits);
 	await Bun.write(filePath, result);
@@ -184,7 +184,7 @@ export interface RenameReferenceEdit {
  *
  * @throws the original `mkdir`/`rename` error, after rolling back the edits.
  */
-export async function applyEditsThenRename(
+async function applyEditsThenRenameUnlocked(
 	references: RenameReferenceEdit[],
 	source: string,
 	dest: string,
@@ -201,6 +201,15 @@ export async function applyEditsThenRename(
 		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
 		throw err;
 	}
+}
+
+export async function applyEditsThenRename(
+	references: RenameReferenceEdit[],
+	source: string,
+	dest: string,
+): Promise<void> {
+	const paths = [...references.map(reference => reference.filePath), source, dest];
+	return withMutation(paths, () => applyEditsThenRenameUnlocked(references, source, dest));
 }
 
 // =============================================================================
@@ -313,7 +322,7 @@ export interface WorkspaceEditResult {
  * reconcile external state (e.g. LSP overlays) rely on this because the
  * returned {@link WorkspaceEditResult} is lost on failure.
  */
-export async function applyWorkspaceEdit(
+async function applyWorkspaceEditUnlocked(
 	edit: WorkspaceEdit,
 	cwd: string,
 	onExecuted?: (change: ExecutedWorkspaceChange) => void,
@@ -449,4 +458,36 @@ export async function applyWorkspaceEdit(
 	}
 
 	return { applied, executed };
+}
+
+function workspaceEditMutationPaths(edit: WorkspaceEdit): string[] {
+	const paths: string[] = [];
+	const add = (uri: string) => paths.push(uriToFile(uri));
+	if (edit.changes) {
+		for (const uri of Object.keys(edit.changes)) add(uri);
+	}
+	if (edit.documentChanges) {
+		for (const change of edit.documentChanges) {
+			if ("textDocument" in change && change.textDocument) {
+				paths.push(uriToFile(change.textDocument.uri));
+			} else if ("kind" in change && change.kind === "rename") {
+				paths.push(uriToFile(change.oldUri), uriToFile(change.newUri));
+			} else if ("kind" in change && change.kind) {
+				paths.push(uriToFile(change.uri));
+			}
+		}
+	}
+	return paths;
+}
+
+/** Serialize every read/write/resource operation in one workspace edit. */
+export async function applyWorkspaceEdit(
+	edit: WorkspaceEdit,
+	cwd: string,
+	onExecuted?: (change: ExecutedWorkspaceChange) => void,
+	signal?: AbortSignal,
+): Promise<WorkspaceEditResult> {
+	const paths = workspaceEditMutationPaths(edit);
+	if (paths.length === 0) return applyWorkspaceEditUnlocked(edit, cwd, onExecuted);
+	return withMutation(paths, () => applyWorkspaceEditUnlocked(edit, cwd, onExecuted), signal);
 }

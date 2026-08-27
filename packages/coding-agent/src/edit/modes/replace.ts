@@ -14,6 +14,7 @@ import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { generateDiffString, replaceText } from "../diff";
+import { withMutation } from "../mutation";
 import {
 	countLeadingWhitespace,
 	detectLineEnding,
@@ -1091,8 +1092,7 @@ export interface ExecuteReplaceOptions {
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
 }
-
-export async function executeReplace(
+async function executeReplaceUnlocked(
 	options: ExecuteReplaceOptions,
 ): Promise<AgentToolResult<EditToolDetails, ReplaceParams>> {
 	const {
@@ -1188,4 +1188,11 @@ export async function executeReplace(
 			newText: finalContent,
 		}),
 	};
+}
+
+export async function executeReplace(
+	options: ExecuteReplaceOptions,
+): Promise<AgentToolResult<EditToolDetails, ReplaceParams>> {
+	const absolutePath = resolvePlanPath(options.session, options.path);
+	return withMutation([absolutePath], () => executeReplaceUnlocked(options), options.signal);
 }

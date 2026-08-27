@@ -1,6 +1,6 @@
-Branchlight Desktop — third-party notices
+Gradivus Desktop — third-party notices
 
-Branchlight is distributed under the MIT license inherited from the oh-my-pi workspace.
+Gradivus is distributed under the MIT license inherited from the oh-my-pi workspace.
 
 Bulma 1.0.4
 Copyright (c) Jeremy Thomas

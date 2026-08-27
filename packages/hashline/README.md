@@ -81,3 +81,19 @@ when the live file diverged.
 The orchestration class. Reads, normalizes line endings + BOM, applies edits,
 restores line endings, and writes via the configured `Filesystem`. Multi-section
 patches are preflighted up front so a partial batch never lands.
+
+### Concurrency and external writers
+
+`Patcher.prepare()` captures the source and destination identities used by an
+edit. `Patcher.commit()` revalidates those identities while holding the
+process-local mutation lease, then records the resulting snapshot only after
+the filesystem write succeeds. A cooperating `Patcher` in the same process
+therefore cannot commit a stale prepared section over another cooperating
+mutation.
+
+The lease does not lock arbitrary writers outside the process. Editors,
+formatters, filesystem watchers, or other processes can still change a target
+without participating in the coordinator. Such drift is detected by the final
+source/destination revalidation when possible and returns a typed no-write
+conflict; it cannot be prevented or rolled back by hashline. Callers should
+re-read the affected file and prepare a new patch after any conflict.

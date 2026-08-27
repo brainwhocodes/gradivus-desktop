@@ -75,7 +75,7 @@ function appendAddedRun(output: string[], run: string[], edgeLines: number): voi
 
 export function buildCompactDiffPreview(diff: string, options: CompactDiffOptions = {}): CompactDiffPreview {
 	const lines = diff.length === 0 ? [] : diff.split("\n");
-	const addedRunContext = normalizeAddedRunContext(options.maxAddedRunContext ?? options.maxUnchangedRun);
+	const addedRunContext = normalizeAddedRunContext(options.maxAddedRunContext);
 	let addedLines = 0;
 	let removedLines = 0;
 	const formatted: string[] = [];

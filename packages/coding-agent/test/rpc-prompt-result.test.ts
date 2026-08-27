@@ -1,332 +1,116 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
 	RpcExtensionUserMessageTracker,
-	reportLocalOnlyPromptResult,
-	watchAndReportLocalOnlyPromptResult,
+	reportPromptResult,
+	watchAndReportPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import type { ExtensionActions } from "../src/extensibility/extensions/types";
-import { initializeExtensions } from "../src/modes/runtime-init";
-import type { AgentSession } from "../src/session/agent-session";
 
-async function waitForPromptHandlers(prompt: Promise<unknown>): Promise<void> {
+async function settle(prompt: Promise<unknown>): Promise<void> {
 	await prompt.catch(() => undefined);
 	await Promise.resolve();
-}
-
-async function waitForTrackedPromptHandlers(trackedPrompt: {
-	prompt: Promise<unknown>;
-	waitForAgentMessageTasks: () => Promise<void>;
-}): Promise<void> {
-	await trackedPrompt.prompt.catch(() => undefined);
-	await trackedPrompt.waitForAgentMessageTasks();
-	await Promise.resolve();
 	await Promise.resolve();
 }
 
-describe("reportLocalOnlyPromptResult", () => {
-	test("emits prompt_result when prompt resolves without invoking the agent or extension user message", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => Promise.resolve(false));
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-		});
-		await waitForPromptHandlers(trackedPrompt.prompt);
-
-		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: false }]);
-	});
-
-	test("does not emit false prompt_result when an extension command schedules a user message", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
-			extensionUserMessages.markAgentMessageTask();
-			return Promise.resolve(false);
-		});
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-		});
-		await waitForPromptHandlers(trackedPrompt.prompt);
-
-		expect(output).toEqual([]);
-	});
-
-	test("does not emit false prompt_result when an extension command schedules a triggerTurn custom message", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
-			extensionUserMessages.markAgentMessageTask();
-			return Promise.resolve(false);
-		});
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-		});
-		await waitForPromptHandlers(trackedPrompt.prompt);
-
-		expect(output).toEqual([]);
-	});
-
-	test("ignores extension user messages scheduled before the watched prompt", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		extensionUserMessages.markAgentMessageTask();
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => Promise.resolve(false));
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-		});
-		await waitForPromptHandlers(trackedPrompt.prompt);
-
-		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: false }]);
-	});
-
-	test("marks triggerTurn extension custom messages as agent work", async () => {
-		let extensionActions: ExtensionActions | undefined;
-		let markCount = 0;
-		let sentOptions: { triggerTurn?: boolean } | undefined;
-		const session = {
-			extensionRunner: {
-				initialize: (actions: ExtensionActions) => {
-					extensionActions = actions;
-				},
-				onError: () => {},
-				emit: async () => {},
-			},
-			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
-				sentOptions = options;
-			},
-		} as unknown as AgentSession;
-
-		await initializeExtensions(session, {
-			reportSendError: (_action, error) => {
-				throw error;
-			},
-			reportRuntimeError: error => {
-				throw error.error;
-			},
-			markAgentInvokingMessage: () => {
-				markCount += 1;
-			},
-		});
-		extensionActions?.sendMessage(
-			{
-				customType: "test",
-				content: "context",
-				display: true,
-				details: "context",
-				attribution: "user",
-			},
-			{ triggerTurn: true },
-		);
-
-		expect(markCount).toBe(1);
-		expect(sentOptions).toEqual({ triggerTurn: true });
-	});
-
-	test("suppresses prompt_result when extension sendUserMessage succeeds", async () => {
-		let extensionActions: ExtensionActions | undefined;
-		let sentContent: unknown;
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		const session = {
-			extensionRunner: {
-				initialize: (actions: ExtensionActions) => {
-					extensionActions = actions;
-				},
-				onError: () => {},
-				emit: async () => {},
-			},
-			sendUserMessage: async (content: unknown) => {
-				sentContent = content;
-			},
-		} as unknown as AgentSession;
-
-		await initializeExtensions(session, {
-			reportSendError: (_action, error) => {
-				throw error;
-			},
-			reportRuntimeError: error => {
-				throw error.error;
-			},
-			trackAgentInvokingMessage: task => {
-				extensionUserMessages.trackAgentMessageTask(task);
-			},
-		});
-
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
-			if (!extensionActions) throw new Error("extensions not initialized");
-			extensionActions.sendUserMessage("start work");
-			return Promise.resolve(false);
-		});
-		reportLocalOnlyPromptResult({
-			id: "req_success",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
-		});
-		await waitForTrackedPromptHandlers(trackedPrompt);
-
-		expect(sentContent).toBe("start work");
-		expect(output).toEqual([]);
-	});
-
-	test("emits prompt_result when extension sendUserMessage rejects", async () => {
-		let extensionActions: ExtensionActions | undefined;
-		const output: object[] = [];
-		const reportedErrors: Error[] = [];
-		const thrown = new Error("missing model");
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-		const session = {
-			extensionRunner: {
-				initialize: (actions: ExtensionActions) => {
-					extensionActions = actions;
-				},
-				onError: () => {},
-				emit: async () => {},
-			},
-			sendUserMessage: async () => {
-				throw thrown;
-			},
-		} as unknown as AgentSession;
-
-		await initializeExtensions(session, {
-			reportSendError: (_action, error) => {
-				reportedErrors.push(error);
-			},
-			reportRuntimeError: error => {
-				throw error.error;
-			},
-			trackAgentInvokingMessage: task => {
-				extensionUserMessages.trackAgentMessageTask(task);
-			},
-		});
-
-		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
-			if (!extensionActions) throw new Error("extensions not initialized");
-			extensionActions.sendUserMessage("start work");
-			return Promise.resolve(false);
-		});
-		reportLocalOnlyPromptResult({
-			id: "req_rejected",
-			prompt: trackedPrompt.prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
-		});
-		await waitForTrackedPromptHandlers(trackedPrompt);
-
-		expect(reportedErrors).toEqual([thrown]);
-		expect(output).toEqual([{ type: "prompt_result", id: "req_rejected", agentInvoked: false }]);
-	});
-
-	test("does not emit when prompt invokes the agent", async () => {
-		const output: object[] = [];
-		const prompt = Promise.resolve(true);
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-		});
-		await waitForPromptHandlers(prompt);
-
-		expect(output).toEqual([]);
-	});
-
-	test("reports prompt rejection without emitting output", async () => {
-		const output: object[] = [];
-		const thrown = new Error("boom");
-		const prompt = Promise.reject(thrown);
-		let reported: Error | undefined;
-
-		reportLocalOnlyPromptResult({
-			id: "req_1",
-			prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				reported = error;
-			},
-		});
-		await waitForPromptHandlers(prompt);
-
-		expect(reported).toBe(thrown);
-		expect(output).toEqual([]);
-	});
+test("prompt_result reports local-only completion exactly once", async () => {
+	const output: object[] = [];
+	const prompt = Promise.resolve(false);
+	reportPromptResult({ id: "req-local", prompt, output: frame => output.push(frame) });
+	await settle(prompt);
+	expect(output).toEqual([{ type: "prompt_result", id: "req-local", agentInvoked: false }]);
 });
 
-describe("watchAndReportLocalOnlyPromptResult", () => {
-	test("reports builtin residual prompts that complete locally", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+test("prompt_result reports an agent-invoked completion", async () => {
+	const output: object[] = [];
+	const prompt = Promise.resolve(true);
+	reportPromptResult({ id: "req-agent", prompt, output: frame => output.push(frame) });
+	await settle(prompt);
+	expect(output).toEqual([{ type: "prompt_result", id: "req-agent", agentInvoked: true }]);
+});
 
-		const prompt = Promise.resolve(false);
-		watchAndReportLocalOnlyPromptResult({
-			id: "req_1",
-			startPrompt: () => prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			extensionUserMessageTracker: extensionUserMessages,
-		});
-		await waitForPromptHandlers(prompt);
+test("prompt_result reports provider failures without emitting a second response", async () => {
+	const output: object[] = [];
+	const error = Object.assign(new Error("No credentials for openai-codex"), { code: "AUTH_REQUIRED" });
+	const prompt = Promise.reject(error);
+	reportPromptResult({ id: "req-provider", prompt, output: frame => output.push(frame) });
+	await settle(prompt);
+	expect(output).toEqual([
+		{
+			type: "prompt_result",
+			id: "req-provider",
+			agentInvoked: false,
+			error: { message: "No credentials for openai-codex", code: "AUTH_REQUIRED" },
+		},
+	]);
+	const first = output[0];
+	expect(typeof first === "object" && first !== null && "type" in first && first.type === "response").toBe(false);
+});
 
-		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: false }]);
+test("prompt_result preserves unavailable-account and invalid-model errors", async () => {
+	const output: object[] = [];
+	const errors = [
+		Object.assign(new Error("The selected account is locked"), { code: "ACCOUNT_UNAVAILABLE" }),
+		Object.assign(new Error("Unknown model: invalid-model"), { code: "INVALID_MODEL" }),
+	];
+	for (const [index, error] of errors.entries()) {
+		const prompt = Promise.reject(error);
+		reportPromptResult({ id: `req-error-${index}`, prompt, output: frame => output.push(frame) });
+		await settle(prompt);
+	}
+	expect(output).toEqual([
+		{
+			type: "prompt_result",
+			id: "req-error-0",
+			agentInvoked: false,
+			error: { message: "The selected account is locked", code: "ACCOUNT_UNAVAILABLE" },
+		},
+		{
+			type: "prompt_result",
+			id: "req-error-1",
+			agentInvoked: false,
+			error: { message: "Unknown model: invalid-model", code: "INVALID_MODEL" },
+		},
+	]);
+});
+
+test("prompt_result reports AgentBusyError with its runtime message", async () => {
+	const output: object[] = [];
+	const prompt = Promise.reject(
+		Object.assign(new Error("Agent is already processing a prompt"), { code: "AGENT_BUSY" }),
+	);
+	reportPromptResult({ id: "req-busy", prompt, output: frame => output.push(frame) });
+	await settle(prompt);
+	expect(output).toEqual([
+		{
+			type: "prompt_result",
+			id: "req-busy",
+			agentInvoked: false,
+			error: { message: "Agent is already processing a prompt", code: "AGENT_BUSY" },
+		},
+	]);
+});
+
+test("watched prompt correlates local-only completion and extension-triggered work", async () => {
+	const output: object[] = [];
+	const tracker = new RpcExtensionUserMessageTracker();
+	const local = tracker.watchPrompt(() => Promise.resolve(false));
+	watchAndReportPromptResult({
+		id: "req-watched-local",
+		startPrompt: () => local.prompt,
+		output: frame => output.push(frame),
+		extensionUserMessageTracker: tracker,
 	});
+	await settle(local.prompt);
+	expect(output).toEqual([{ type: "prompt_result", id: "req-watched-local", agentInvoked: false }]);
 
-	test("does not report builtin residual prompts that invoke the agent", async () => {
-		const output: object[] = [];
-		const extensionUserMessages = new RpcExtensionUserMessageTracker();
-
-		const prompt = Promise.resolve(true);
-		watchAndReportLocalOnlyPromptResult({
-			id: "req_1",
-			startPrompt: () => prompt,
-			output: frame => output.push(frame),
-			onError: error => {
-				throw error;
-			},
-			extensionUserMessageTracker: extensionUserMessages,
-		});
-		await waitForPromptHandlers(prompt);
-
-		expect(output).toEqual([]);
+	watchAndReportPromptResult({
+		id: "req-watched-agent",
+		startPrompt: () => {
+			tracker.markAgentMessageTask();
+			return Promise.resolve(false);
+		},
+		output: frame => output.push(frame),
+		extensionUserMessageTracker: tracker,
 	});
+	await settle(Promise.resolve());
+	expect(output.at(-1)).toEqual({ type: "prompt_result", id: "req-watched-agent", agentInvoked: true });
 });
