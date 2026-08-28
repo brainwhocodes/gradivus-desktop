@@ -10,6 +10,13 @@ export function formatProfileName(profileId: string): string {
 	return clean.charAt(0).toUpperCase() + clean.slice(1);
 }
 
+export function isDeliverableWorkspaceAgent(agent: WorkspaceAgent, workspaceId: string): boolean {
+	const status = String(agent.status).toLowerCase();
+	const active = status !== "stopped" && status !== "failed" && status !== "exited" && status !== "error";
+	const sameWorkspace = !agent.workspaceId || agent.workspaceId === workspaceId;
+	return active && sameWorkspace && agent.deliverable && Boolean(agent.sessionId);
+}
+
 export function reconcileWorkspaceAgents(
 	doc: WorkspaceDocumentV1 | undefined,
 	currentAgents: WorkspaceAgent[],
@@ -20,6 +27,8 @@ export function reconcileWorkspaceAgents(
 	const paneMap = new Map((doc.panes ?? []).map(p => [p.id, p]));
 	const tabMap = new Map((doc.tabs ?? []).map(t => [t.id, t]));
 	const terminalMap = new Map((doc.terminals ?? []).map(t => [t.id, t]));
+	const sessionMap = new Map((doc.sessions ?? []).map(session => [session.id, session]));
+	const workspaceMap = new Map((doc.workspaces ?? []).map(workspace => [workspace.id, workspace]));
 
 	const activeDocAgents = (doc.agents ?? []).filter(agent => {
 		const s = String(agent.status).toLowerCase();
@@ -67,6 +76,15 @@ export function reconcileWorkspaceAgents(
 			agentWorkspaceId = doc.activeWorkspaceId ?? activeWorkspaceId;
 		}
 
+		const session = docAgent.sessionId ? sessionMap.get(docAgent.sessionId) : undefined;
+		const workspace = agentWorkspaceId ? workspaceMap.get(agentWorkspaceId) : undefined;
+		const deliverable = Boolean(
+			session &&
+				session.actorId === docAgent.id &&
+				session.status === "active" &&
+				(!workspace || session.locationId === workspace.locationId),
+		);
+
 		mappedAgents.push({
 			id: docAgent.id,
 			name,
@@ -74,7 +92,8 @@ export function reconcileWorkspaceAgents(
 			status,
 			swatch: existing?.swatch || getAgentSwatch(docAgent.id),
 			workspaceId: agentWorkspaceId,
-			deliverable: true,
+			sessionId: docAgent.sessionId,
+			deliverable,
 			task: existing?.task,
 			assignment: existing?.assignment,
 			lastIntent: existing?.lastIntent,

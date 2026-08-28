@@ -1,4 +1,6 @@
 <script lang="ts">
+	import AltArrowDown from "@solar-icons/svelte/linear/alt-arrow-down";
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import type { ThinkingLevel } from "../../../shared/contracts";
 	import type { DropdownOption } from "../../settings-types";
 	import LabeledSelect from "./LabeledSelect.svelte";
@@ -92,14 +94,14 @@
 			<span class="runtime-picker-divider" aria-hidden="true">/</span>
 			<span class="runtime-picker-thinking">{thinkingLabel}</span>
 		</span>
-		<span class="runtime-picker-chevron" aria-hidden="true">⌄</span>
+		<span class="runtime-picker-chevron" aria-hidden="true"><AltArrowDown size={14} /></span>
 	</button>
 
 	{#if open}
 		<div id={panelId} class="runtime-picker-panel" role="region" aria-label="Runtime settings" tabindex="-1">
 			<div class="runtime-picker-panel-heading">
 				<span>Runtime settings</span>
-				<button type="button" class="runtime-picker-close" aria-label="Close runtime settings" onclick={toggle}>×</button>
+				<button type="button" class="runtime-picker-close" aria-label="Close runtime settings" onclick={toggle}><CloseCircle size={16} aria-hidden="true" /></button>
 			</div>
 			<div class="runtime-picker-controls">
 				<LabeledSelect

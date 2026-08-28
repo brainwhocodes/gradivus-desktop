@@ -12,6 +12,8 @@ import {
 	MAX_TEMP_PROMPT_BYTES,
 	type PromptAttachmentUpload,
 	type PromptAttachmentView,
+	type PromptComposition,
+	type PromptCompositionPart,
 	type PromptImageContent,
 } from "../shared/contracts";
 
@@ -19,7 +21,7 @@ const MAX_NAME_CODE_POINTS = 160;
 const MAX_MIME_CODE_POINTS = 160;
 const MAX_RETAINED_BYTES = 64 * 1024 * 1024;
 
-export interface ResolvedPromptAttachments {
+export interface ResolvedPromptComposition {
 	text: string;
 	images: PromptImageContent[];
 	views: PromptAttachmentView[];
@@ -35,6 +37,7 @@ export class PromptAttachmentStore {
 	#tempDir: TempDir | undefined;
 	#attachments = new Map<string, StoredAttachment>();
 	#retainedBytes = 0;
+	#nextReference = 1;
 	#closed = false;
 
 	async stageUploads(value: unknown): Promise<PromptAttachmentView[]> {
@@ -50,11 +53,13 @@ export class PromptAttachmentStore {
 				const kind = metadata ? "image" : "file";
 				if (metadata && upload.data.byteLength > MAX_PROMPT_IMAGE_BYTES)
 					throw new RangeError("image attachment exceeds 20 MiB");
+				const name = displayName(upload.name);
 				const view: PromptAttachmentView = {
 					id: randomUUID(),
-					name: displayName(upload.name),
+					name,
 					size: upload.data.byteLength,
 					kind,
+					reference: this.#createReference(kind, name),
 				};
 				const stagedPath = tempDir.join(`${view.id}${extensionFor(upload.name, metadata?.mimeType)}`);
 				await fs.writeFile(stagedPath, upload.data);
@@ -88,6 +93,7 @@ export class PromptAttachmentStore {
 			name: "Pasted prompt",
 			size: bytes.byteLength,
 			kind: "prompt",
+			reference: this.#createReference("prompt", "Pasted prompt"),
 		};
 		const stagedPath = tempDir.join(`${view.id}.txt`);
 		await fs.writeFile(stagedPath, bytes);
@@ -97,26 +103,33 @@ export class PromptAttachmentStore {
 		return { ...view };
 	}
 
-	async resolve(attachmentIds: unknown, baseText: unknown): Promise<ResolvedPromptAttachments> {
+	async resolve(value: unknown): Promise<ResolvedPromptComposition> {
 		this.#assertOpen();
-		if (typeof baseText !== "string") throw new TypeError("prompt text must be text");
-		if (Buffer.byteLength(baseText, "utf8") > MAX_INLINE_PROMPT_BYTES) throw new RangeError("prompt exceeds 512 KiB");
-		const ids = validateAttachmentIds(attachmentIds);
-		const records = ids.map(id => {
-			const record = this.#attachments.get(id);
+		const composition = validateComposition(value);
+		const records: StoredAttachment[] = [];
+		let batchBytes = 0;
+		for (const part of composition.parts) {
+			if (part.type !== "attachment") continue;
+			const record = this.#attachments.get(part.id);
 			if (!record) throw new Error("unknown prompt attachment");
-			return record;
-		});
-		const batchBytes = records.reduce((total, record) => total + record.view.size, 0);
-		if (batchBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) throw new RangeError("attachment batch exceeds 32 MiB");
-		const envelope: string[] = [];
+			batchBytes += record.view.size;
+			if (batchBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) throw new RangeError("attachment batch exceeds 32 MiB");
+			records.push(record);
+		}
+
 		const images: PromptImageContent[] = [];
-		for (const record of records) {
-			const mention = formatMention(record.path);
-			if (record.view.kind === "prompt") {
-				envelope.push(`Full prompt: ${mention}. Read this file as the complete user request before responding.`);
-			} else if (record.view.kind === "image") {
-				envelope.push(`Image ${JSON.stringify(record.view.name)} is attached to this message.`);
+		const views: PromptAttachmentView[] = [];
+		const output: string[] = [];
+		let recordIndex = 0;
+		for (const part of composition.parts) {
+			if (part.type === "text") {
+				output.push(part.text);
+				continue;
+			}
+			const record = records[recordIndex++];
+			if (!record) throw new Error("prompt attachment resolution failed");
+			output.push(expandAttachment(record));
+			if (record.view.kind === "image") {
 				const metadata = parseImageMetadata(record.bytes);
 				if (!metadata) throw new Error("staged image is no longer valid");
 				images.push({
@@ -124,15 +137,14 @@ export class PromptAttachmentStore {
 					data: Buffer.from(record.bytes).toString("base64"),
 					mimeType: metadata.mimeType,
 				});
-			} else {
-				envelope.push(`File ${JSON.stringify(record.view.name)}: ${mention}. Read this attachment as needed.`);
 			}
+			views.push({ ...record.view });
 		}
-		const text = records.length === 0 ? baseText : [baseText.trim(), ...envelope].filter(Boolean).join("\n\n");
+		const text = output.join("");
 		if (!text) throw new RangeError("prompt cannot be empty");
 		if (Buffer.byteLength(text, "utf8") > MAX_INLINE_PROMPT_BYTES)
 			throw new RangeError("composed prompt exceeds 512 KiB");
-		return { text, images, views: records.map(record => ({ ...record.view })) };
+		return { text, images, views };
 	}
 
 	async release(attachmentIds: unknown): Promise<void> {
@@ -145,11 +157,7 @@ export class PromptAttachmentStore {
 			this.#retainedBytes -= record.view.size;
 			await fs.rm(record.path, { force: true }).catch(() => {});
 		}
-		if (this.#attachments.size === 0) {
-			const tempDir = this.#tempDir;
-			this.#tempDir = undefined;
-			await tempDir?.remove().catch(() => {});
-		}
+		await this.#removeTempDirIfEmpty();
 	}
 
 	async close(): Promise<void> {
@@ -173,6 +181,13 @@ export class PromptAttachmentStore {
 		return tempDir;
 	}
 
+	async #removeTempDirIfEmpty(): Promise<void> {
+		if (this.#attachments.size !== 0) return;
+		const tempDir = this.#tempDir;
+		this.#tempDir = undefined;
+		await tempDir?.remove().catch(() => {});
+	}
+
 	#assertOpen(): void {
 		if (this.#closed) throw new Error("prompt attachment store is closed");
 	}
@@ -181,6 +196,83 @@ export class PromptAttachmentStore {
 		if (this.#retainedBytes + bytes > MAX_RETAINED_BYTES)
 			throw new RangeError("prompt attachment storage quota exceeded");
 	}
+
+	#createReference(kind: PromptAttachmentView["kind"], name: string): string {
+		const category = kind === "image" ? "Image" : "Document";
+		return `[${category} A${this.#nextReference++}: ${JSON.stringify(name)}]`;
+	}
+}
+
+const MAX_RAW_COMPOSITION_PARTS = 1_024;
+
+function validateComposition(value: unknown): PromptComposition {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new TypeError("prompt composition must be an object");
+	const input = value as Record<string, unknown>;
+	if (Object.keys(input).length !== 1 || !Object.hasOwn(input, "parts"))
+		throw new TypeError("prompt composition is invalid");
+	if (!Array.isArray(input.parts)) throw new TypeError("prompt composition parts must be an array");
+	if (input.parts.length > MAX_RAW_COMPOSITION_PARTS) throw new RangeError("too many prompt composition parts");
+
+	const parts: PromptCompositionPart[] = [];
+	const attachmentIds = new Set<string>();
+	let inlineBytes = 0;
+	for (let index = 0; index < input.parts.length; index++) {
+		const candidate = input.parts[index];
+		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate))
+			throw new TypeError(`prompt composition part ${index + 1} is invalid`);
+		const part = candidate as Record<string, unknown>;
+		if (part.type === "text") {
+			if (
+				Object.keys(part).length !== 2 ||
+				!Object.hasOwn(part, "type") ||
+				!Object.hasOwn(part, "text") ||
+				typeof part.text !== "string"
+			)
+				throw new TypeError(`prompt composition text part ${index + 1} is invalid`);
+			inlineBytes += Buffer.byteLength(part.text, "utf8");
+			if (inlineBytes > MAX_INLINE_PROMPT_BYTES) throw new RangeError("prompt exceeds 512 KiB");
+			if (part.text.length === 0) continue;
+			const previous = parts.at(-1);
+			if (previous?.type === "text") previous.text += part.text;
+			else parts.push({ type: "text", text: part.text });
+			continue;
+		}
+		if (part.type !== "attachment") throw new TypeError(`prompt composition part ${index + 1} has an invalid type`);
+		if (
+			Object.keys(part).length !== 2 ||
+			!Object.hasOwn(part, "type") ||
+			!Object.hasOwn(part, "id") ||
+			typeof part.id !== "string" ||
+			part.id.length < 8 ||
+			part.id.length > 100
+		)
+			throw new TypeError(`prompt composition attachment part ${index + 1} is invalid`);
+		if (attachmentIds.has(part.id)) throw new RangeError("duplicate prompt attachment ID");
+		if (attachmentIds.size >= MAX_PROMPT_ATTACHMENT_COUNT) throw new RangeError("too many attachment IDs");
+		attachmentIds.add(part.id);
+		parts.push({ type: "attachment", id: part.id });
+	}
+	if (parts.length > MAX_PROMPT_ATTACHMENT_COUNT * 2 + 1) throw new RangeError("too many prompt composition parts");
+	return { parts };
+}
+
+function expandAttachment(record: StoredAttachment): string {
+	if (record.view.kind === "image") {
+		return `${record.view.reference}\nImage ${JSON.stringify(record.view.name)} is attached to this message.`;
+	}
+	const mention = formatMention(record.path);
+	if (record.view.kind === "prompt") {
+		return `${record.view.reference}\nPrompt text: ${mention}. Read the referenced UTF-8 text at this exact position in the request.`;
+	}
+	return `${record.view.reference}\nFile ${JSON.stringify(record.view.name)}: ${mention}. Read this attachment as needed.`;
+}
+
+const PROMPT_ATTACHMENT_DISPLAY_ENVELOPE =
+	/(\[Document A\d+: "(?:[^"\\]|\\.)*"\])\n(?:Prompt text:\s+@(?:"[^"\r\n]*gradivus-prompt-[^"\r\n]*"|'[^'\r\n]*gradivus-prompt-[^'\r\n]*')\. Read the referenced UTF-8 text at this exact position in the request\.|File\s+"(?:[^"\\]|\\.)*":\s+@(?:"[^"\r\n]*gradivus-prompt-[^"\r\n]*"|'[^'\r\n]*gradivus-prompt-[^'\r\n]*')\. Read this attachment as needed\.)/g;
+
+export function promptAttachmentDisplayText(value: string): string {
+	return value.replace(PROMPT_ATTACHMENT_DISPLAY_ENVELOPE, "$1");
 }
 
 function validateUploads(value: unknown): PromptAttachmentUpload[] {

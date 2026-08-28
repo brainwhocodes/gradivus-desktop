@@ -62,4 +62,31 @@
 		}
 	}
 
+
+	&.browser-agent-hub-button {
+		width: auto;
+		max-width: 168px;
+		gap: var(--space-1);
+		padding-inline: var(--space-2);
+		font-size: 14px;
+		white-space: nowrap;
+
+		&.is-active {
+			border-color: var(--accent-boundary);
+			color: var(--selection-foreground);
+			background: var(--selection-surface);
+		}
+	}
+
+	.browser-agent-hub-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.browser-agent-count {
+		min-width: 16px;
+		color: inherit;
+		font-variant-numeric: tabular-nums;
+		text-align: center;
+	}
 }

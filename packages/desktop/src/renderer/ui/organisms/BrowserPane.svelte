@@ -1,11 +1,16 @@
 <script lang="ts">
-	import type {
-		BrowserNavigationAction,
-		BrowserViewState,
-		ElementEditState,
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
+	import { tick } from "svelte";
+	import {
+		type BrowserNavigationAction,
+		type BrowserViewState,
+		type ElementEditState,
 	} from "../../../shared/contracts";
+	import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../../../shared/selection-agent";
+	import { isDeliverableWorkspaceAgent } from "../../agent-projection";
 	import BrowserSurface from "../atoms/BrowserSurface.svelte";
 	import BrowserToolbar from "../molecules/BrowserToolbar.svelte";
+	import IconButton from "../molecules/IconButton.svelte";
 	import SelectionQueuePane from "./SelectionQueuePane.svelte";
 	import type { WorkspaceAgent, WorkspaceLayout, WorkspacePane } from "../../workspace-types";
 
@@ -19,14 +24,13 @@
 		browserState: BrowserViewState | undefined;
 		selectionState: ElementEditState | undefined;
 		agents: WorkspaceAgent[];
-		selectedAgentId?: string;
 		isSelecting: boolean;
+		selectionPending: boolean;
 		defaultUrl: string;
 		onactivate: () => void;
 		onnavigate: (address: string) => void;
 		oncontrol: (action: BrowserNavigationAction) => void;
 		ontoggleselection: () => void;
-		onagentchange: (agentId: string) => void;
 		onrunqueue: () => void;
 		onclearqueue: () => void;
 		onsplit: (layout: WorkspaceLayout) => void;
@@ -45,14 +49,13 @@
 		browserState,
 		selectionState,
 		agents,
-		selectedAgentId,
 		isSelecting,
+		selectionPending,
 		defaultUrl,
 		onactivate,
 		onnavigate,
 		oncontrol,
 		ontoggleselection,
-		onagentchange,
 		onrunqueue,
 		onclearqueue,
 		onsplit,
@@ -65,16 +68,64 @@
 	const surfaceUrl = $derived(pane.url ?? defaultUrl);
 	const queuedTasks = $derived(selectionState?.queuedTasks ?? []);
 	const queueRunning = $derived(selectionState?.queueRunning ?? false);
+	const pageAgents = $derived(
+		agents.filter(
+			agent =>
+				agent.profileId === BROWSER_SELECTION_AGENT_PROFILE_ID &&
+				isDeliverableWorkspaceAgent(agent, workspaceId),
+		),
+	);
+	const agentHubId = $derived(`browser-agent-hub-${pane.id}`);
+	const agentHubTitleId = $derived(`${agentHubId}-title`);
+	let agentHubOpen = $state(false);
+	let agentHubPane = $state<HTMLElement>();
+	let agentHubReturnFocus = $state<HTMLElement>();
 	let queueOpen = $state(false);
 	let previousQueueCount = 0;
 
 	$effect(() => {
 		const queueCount = queuedTasks.length;
-		if (previousQueueCount === 0 && queueCount > 0) queueOpen = true;
-		else if (queueCount === 0) queueOpen = false;
+		if (previousQueueCount === 0 && queueCount > 0) {
+			agentHubOpen = false;
+			queueOpen = true;
+		} else if (queueCount === 0) {
+			queueOpen = false;
+		}
 		previousQueueCount = queueCount;
 	});
+
+
+	function closeAgentHub(restoreFocus = true): void {
+		if (!agentHubOpen) return;
+		const returnFocus = agentHubReturnFocus;
+		agentHubOpen = false;
+		agentHubReturnFocus = undefined;
+		if (restoreFocus) void tick().then(() => returnFocus?.focus());
+	}
+
+	function toggleAgentHub(trigger: HTMLButtonElement): void {
+		if (agentHubOpen) {
+			closeAgentHub();
+			return;
+		}
+		queueOpen = false;
+		agentHubReturnFocus = trigger;
+		agentHubOpen = true;
+		void tick().then(() => {
+			agentHubPane?.querySelector<HTMLElement>(".selection-queue-close")?.focus();
+		});
+	}
+
+
+	function handleAgentHubKeydown(event: KeyboardEvent): void {
+		if (!agentHubOpen || event.key !== "Escape") return;
+		event.preventDefault();
+		event.stopPropagation();
+		closeAgentHub();
+	}
 </script>
+<svelte:window onkeydown={handleAgentHubKeydown} />
+
 
 <div class="browser-pane" class:is-focused={focused} role="group" aria-label="Browser pane" onpointerdown={onactivate}>
 	<BrowserToolbar
@@ -82,17 +133,21 @@
 		canGoForward={browserState?.canGoForward}
 		loading={browserState?.loading}
 		isSelecting={isSelecting}
+		selectionPending={selectionPending}
 		addressValue={addressValue}
 		canSplit={canSplit}
-		agents={agents}
-		workspaceId={workspaceId}
-		selectedAgentId={selectedAgentId}
+		agentCount={pageAgents.length}
+		agentHubId={agentHubId}
+		agentHubOpen={agentHubOpen}
 		queueCount={queuedTasks.length}
 		queueOpen={queueOpen}
 		oncontrol={oncontrol}
 		ontoggleselection={ontoggleselection}
-		onagentchange={onagentchange}
-		onopenqueue={() => { queueOpen = true; }}
+		onopenagenthub={toggleAgentHub}
+		onopenqueue={() => {
+			closeAgentHub(false);
+			queueOpen = true;
+		}}
 		onnavigate={onnavigate}
 		onsplit={onsplit}
 		onclosepane={onclosepane}
@@ -111,7 +166,57 @@
 			/>
 		</div>
 
-		{#if queueOpen}
+		{#if agentHubOpen}
+			<aside
+				bind:this={agentHubPane}
+				id={agentHubId}
+				class="selection-queue-pane browser-agent-hub-pane"
+				aria-labelledby={agentHubTitleId}
+			>
+				<header class="selection-queue-header browser-agent-hub-header">
+					<div class="selection-queue-heading">
+						<div class="browser-agent-hub-heading-copy">
+							<span class="eyebrow">Page targeting</span>
+							<h2 id={agentHubTitleId}>Agent Hub</h2>
+						</div>
+						<IconButton class="selection-queue-close" icon={CloseCircle} size={15} label="Close browser Agent Hub" onclick={closeAgentHub} />
+					</div>
+					<p class="browser-agent-hub-target">
+						{#if pageAgents.length === 0}
+							Use the target tool to create the first Page Agent.
+						{:else}
+							{pageAgents.length} Page Agent{pageAgents.length === 1 ? "" : "s"} created by element targeting.
+						{/if}
+					</p>
+				</header>
+				<div class="browser-agent-hub-content">
+					{#if pageAgents.length === 0}
+						<div class="browser-agent-hub-empty" role="status">
+							<strong>No Page Agents yet</strong>
+							<p>Select a page element from the toolbar. Gradivus creates the Page Agent automatically.</p>
+						</div>
+					{:else}
+						<ul class="browser-page-agent-list" aria-label="Page Agents created by element targeting">
+							{#each pageAgents as agent (agent.id)}
+								<li class="browser-page-agent-row" class:is-current={selectionState?.agentId === agent.id}>
+									<span
+										class="browser-agent-swatch"
+										style={`--queue-agent-swatch: ${agent.swatch}`}
+										aria-hidden="true"
+									></span>
+									<span class="browser-page-agent-copy">
+										<strong>{agent.name}</strong>
+										<small>{agent.currentTool ?? agent.lastIntent ?? agent.assignment ?? agent.task ?? "Ready for page-element work"}</small>
+										<span>{agent.agent}</span>
+									</span>
+									<span class="browser-page-agent-status">{selectionState?.agentId === agent.id && isSelecting ? "targeting" : agent.status}</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+			</aside>
+		{:else if queueOpen}
 			<SelectionQueuePane
 				tasks={queuedTasks}
 				running={queueRunning}

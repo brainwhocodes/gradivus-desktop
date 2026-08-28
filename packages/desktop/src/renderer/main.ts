@@ -1,3 +1,4 @@
+import "@wterm/dom/css";
 import "./styles/app.scss";
 import { mount } from "svelte";
 import App from "./ui/pages/App.svelte";

@@ -1,9 +1,9 @@
 import AxeBuilder from "@axe-core/playwright";
-import * as net from "node:net";
-import { setTimeout as sleep } from "node:timers/promises";
 import { _electron as electron, expect, test } from "@playwright/test";
 import type { ElectronApplication, Page } from "@playwright/test";
 import type { GradivusSettings } from "../src/shared/contracts";
+import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../src/shared/selection-agent";
+import { getAgentSwatch } from "../src/shared/agent-swatch";
 import { DESKTOP_THEME_PALETTES } from "../src/shared/theme-palette";
 import type { WebContents } from "electron";
 import * as fs from "node:fs/promises";
@@ -61,21 +61,10 @@ async function prepare(userData: string, workspace: string, sessionId: string, t
 			terminals: [],
 			browsers: [],
 			previews: [],
-			agentProfiles: [{ id: "profile-fixture", name: "Fixture Agent", config: {}, capabilityIds: [] }],
-			agents: [{ id: "fixture-agent", profileId: "profile-fixture", sessionId, status: "running" }],
+			agentProfiles: [],
+			agents: [],
 			capabilities: [],
-			sessions: [
-				{
-					id: sessionId,
-					locationId: "location-default",
-					actorId: "fixture-agent",
-					kind: "agent",
-					status: "active",
-					capabilityIds: [],
-					startedAt: Date.now(),
-					lastSeenAt: Date.now(),
-				},
-			],
+			sessions: [],
 			sessionEvents: [],
 			deliveryReceipts: [],
 			services: [],
@@ -95,141 +84,6 @@ async function prepare(userData: string, workspace: string, sessionId: string, t
 		await teardownElectronTest(undefined, userData).catch(() => {});
 		throw error;
 	}
-}
-type RuntimeDocumentFixture = {
-	revision: number;
-	activeWorkspaceId?: string | null;
-	workspaces: Array<{ id: string }>;
-	agentProfiles: Array<{ id: string }>;
-	agents: Array<{ id: string }>;
-};
-
-async function provisionSelectionAgent(userData: string): Promise<void> {
-	const runtimeRoot = path.join(userData, "runtime");
-	let controlToken = "";
-	for (let attempt = 0; attempt < 100; attempt += 1) {
-		try {
-			controlToken = await fs.readFile(path.join(runtimeRoot, "control.token"), "utf8");
-			await fs.stat(path.join(runtimeRoot, "control.sock"));
-			break;
-		} catch {
-			await sleep(100);
-		}
-	}
-	if (!controlToken) throw new Error("Selection E2E runtime control token did not become available");
-	const sessionConfig = JSON.parse(await fs.readFile(path.join(userData, "sessions-v1.json"), "utf8")) as {
-		sessions?: Array<{ id?: string }>;
-	};
-	const sessionId = sessionConfig.sessions?.[0]?.id;
-	if (!sessionId) throw new Error("Selection E2E agent bootstrap has no session id");
-
-	await new Promise<void>((resolve, reject) => {
-		const socket = net.createConnection(path.join(runtimeRoot, "control.sock"));
-		let buffer = "";
-		let authenticated = false;
-		let settled = false;
-		let document: RuntimeDocumentFixture | undefined;
-		let activeRequestId: string | undefined;
-		let step = 0;
-
-		const fail = (error: unknown): void => {
-			if (settled) return;
-			settled = true;
-			socket.destroy();
-			reject(error instanceof Error ? error : new Error(String(error)));
-		};
-		const finish = (): void => {
-			if (settled) return;
-			settled = true;
-			socket.end();
-			resolve();
-		};
-		const issue = (type: "profile.create" | "agent.start", payload: Record<string, unknown>): void => {
-			if (!document || activeRequestId) return;
-			const workspaceId = document.activeWorkspaceId ?? document.workspaces[0]?.id;
-			if (!workspaceId) {
-				fail("Selection E2E agent bootstrap has no workspace");
-				return;
-			}
-			step += 1;
-			activeRequestId = `e2e-selection-agent-${step}`;
-			socket.write(
-				`${JSON.stringify({
-					type: "command",
-					requestId: activeRequestId,
-					command: {
-						version: 1,
-						commandId: `e2e-selection-${type}-${sessionId}`,
-						workspaceId,
-						expectedRevision: document.revision,
-						issuedAt: Date.now(),
-						type,
-						payload,
-					},
-				})}\n`,
-			);
-		};
-		const advance = (): void => {
-			if (!document || activeRequestId) return;
-			if (!document.agentProfiles.some(profile => profile.id === "profile-fixture")) {
-				issue("profile.create", {
-					id: "profile-fixture",
-					name: "Fixture Agent",
-					protocol: "omp",
-					config: {},
-					capabilityIds: [],
-				});
-				return;
-			}
-			if (!document.agents.some(agent => agent.id === "fixture-agent")) {
-				issue("agent.start", { id: "fixture-agent", profileId: "profile-fixture", sessionId });
-				return;
-			}
-			finish();
-		};
-		socket.setTimeout(10_000, () => fail("Selection E2E agent bootstrap timed out"));
-		socket.on("connect", () => {
-			socket.write(`${JSON.stringify({ type: "auth", token: controlToken })}\n`);
-		});
-		socket.on("data", chunk => {
-			buffer += chunk.toString("utf8");
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			for (const line of lines) {
-				if (!line) continue;
-				let message: Record<string, unknown>;
-				try {
-					message = JSON.parse(line) as Record<string, unknown>;
-				} catch (error) {
-					fail(error);
-					return;
-				}
-				if (!authenticated && message.type === "auth.ok") {
-					authenticated = true;
-					document = message.document as RuntimeDocumentFixture;
-					socket.write(`${JSON.stringify({ type: "subscribe" })}\n`);
-					advance();
-					continue;
-				}
-				if (typeof message.requestId !== "string" || message.requestId !== activeRequestId) continue;
-				const result = message.result as { status?: string; document?: RuntimeDocumentFixture; error?: { message?: string } };
-				if (
-					(result.status !== "accepted" && result.status !== "duplicate") ||
-					!result.document
-				) {
-					fail(result.error?.message ?? "Selection E2E agent bootstrap command failed");
-					return;
-				}
-				document = result.document;
-				activeRequestId = undefined;
-				advance();
-			}
-		});
-		socket.on("error", fail);
-		socket.on("close", () => {
-			if (!settled) fail("Selection E2E agent bootstrap connection closed");
-		});
-	});
 }
 
 
@@ -262,7 +116,6 @@ async function launch(userData: string, workspace: string, options: LaunchOption
 				...(options.captureFile ? { GRADIVUS_ATTACHMENT_CAPTURE_FILE: options.captureFile } : {}),
 			},
 		});
-		await provisionSelectionAgent(userData);
 		return app;
 	} catch (error) {
 		await teardownElectronTest(undefined, userData).catch(() => {});
@@ -288,6 +141,12 @@ type CardState = {
 	queue: string;
 	pinned: number;
 	states: string[];
+};
+type AgentCursorState = {
+	visible: boolean;
+	label: string;
+	transform: string;
+	color: string;
 };
 type InspectorColorSample = {
 	background: string;
@@ -432,6 +291,23 @@ async function cardState(app: ElectronApplication, paneIndex = 0): Promise<CardS
 	const [visible, role, target, selector, instruction, agent, capture, action, status, response, background, color, text, queue, pinned, states] = values;
 	return { visible: Boolean(visible), role: String(role), label: String(target), target: String(target), selector: String(selector), instruction: String(instruction), agent: String(agent), capture: String(capture), action: String(action), status: String(status), response: String(response), background: String(background), color: String(color), text: String(text), queue: String(queue), pinned: Number(pinned), states: Array.isArray(states) ? states.map(String) : [] };
 }
+async function agentCursorState(app: ElectronApplication, paneIndex = 0): Promise<AgentCursorState | undefined> {
+	return inspectShadow<AgentCursorState>(
+		app,
+		paneIndex,
+		".agent-cursor",
+		`function(cursor) {
+			const style = getComputedStyle(cursor);
+			return {
+				visible: style.display !== "none" && style.visibility !== "hidden",
+				label: cursor.querySelector(".agent-cursor-label")?.textContent?.trim() || "",
+				transform: cursor.style.transform || "",
+				color: style.color || "",
+			};
+		}`,
+	);
+}
+
 
 async function cardRootExists(app: ElectronApplication, paneIndex = 0): Promise<boolean> {
 	const root = await inspectShadow(app, paneIndex, "#does-not-exist", "function() { return true; }");
@@ -495,6 +371,56 @@ async function chooseAction(app: ElectronApplication, action: "inline" | "chat" 
 	await clickCard(app, `.split-action-item[data-action="${action}"]`, paneIndex);
 }
 
+async function hoverFixture(app: ElectronApplication, target = "#fixture-action", paneIndex = 0): Promise<void> {
+	await expect
+		.poll(
+			() =>
+				app.evaluate(
+					async ({ BrowserWindow }, payload: { target: string; paneIndex: number }) => {
+						const views = BrowserWindow.getAllWindows()[0]?.contentView.children.filter(candidate => {
+							if (!candidate || typeof candidate !== "object" || !("webContents" in candidate)) return false;
+							const contents = (candidate.webContents as WebContents | undefined) ?? undefined;
+							return Boolean(contents && !contents.isDestroyed() && contents.getURL().includes("browser-fixture.html"));
+						});
+						const view = views?.[payload.paneIndex] as { webContents: WebContents } | undefined;
+						if (!view || view.webContents.isLoading()) return false;
+						const debuggerInstance = view.webContents.debugger;
+						if (!debuggerInstance.isAttached()) debuggerInstance.attach("1.3");
+						const documentResult = (await debuggerInstance.sendCommand("DOM.getDocument", {
+							depth: -1,
+							pierce: true,
+						})) as { root?: { nodeId?: number } };
+						if (!documentResult.root?.nodeId) return false;
+						const nodeResult = (await debuggerInstance.sendCommand("DOM.querySelector", {
+							nodeId: documentResult.root.nodeId,
+							selector: payload.target,
+						})) as { nodeId?: number };
+						if (!nodeResult.nodeId) return false;
+						const boxResult = (await debuggerInstance.sendCommand("DOM.getBoxModel", {
+							nodeId: nodeResult.nodeId,
+						})) as { model?: { border?: number[] } };
+						const border = boxResult.model?.border;
+						if (!border || border.length < 8) return false;
+						const x = Math.round((border[0] + border[2]) / 2);
+						const y = Math.round((border[1] + border[5]) / 2);
+						await debuggerInstance.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+						await debuggerInstance.sendCommand("Runtime.evaluate", {
+							expression: "(() => { const { promise, resolve } = Promise.withResolvers(); requestAnimationFrame(resolve); return promise; })()",
+							awaitPromise: true,
+						});
+						const ready = (await debuggerInstance.sendCommand("Runtime.evaluate", {
+							expression: "Boolean(window.__gradivus_inspector_wait_for_action__)",
+							returnByValue: true,
+						})) as { result?: { value?: unknown } };
+						return ready.result?.value === true;
+					},
+					{ target, paneIndex },
+				),
+			{ timeout: 10_000 },
+		)
+		.toBe(true);
+}
+
 async function clickFixture(app: ElectronApplication, target = "#fixture-action", mode: FixtureClickMode = "normal", paneIndex = 0): Promise<void> {
 	await expect.poll(() => app.evaluate(async ({ BrowserWindow }, payload: { target: string; mode: FixtureClickMode; paneIndex: number }) => {
 		const views = BrowserWindow.getAllWindows()[0]?.contentView.children.filter(candidate => {
@@ -517,7 +443,7 @@ async function clickFixture(app: ElectronApplication, target = "#fixture-action"
 		const y = Math.round((border[1] + border[5]) / 2);
 		if (payload.mode === "stale-html") {
 			await debuggerInstance.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
-			await debuggerInstance.sendCommand("Runtime.evaluate", { expression: "new Promise(resolve => requestAnimationFrame(() => resolve()))", awaitPromise: true });
+			await debuggerInstance.sendCommand("Runtime.evaluate", { expression: "(() => { const { promise, resolve } = Promise.withResolvers(); requestAnimationFrame(resolve); return promise; })()", awaitPromise: true });
 		} else await debuggerInstance.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
 		await debuggerInstance.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
 		await debuggerInstance.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
@@ -559,9 +485,11 @@ async function appViewReady(page: Page, paneIndex: number): Promise<boolean> {
 async function selectElement(page: Page, app: ElectronApplication, target = "#fixture-action", paneIndex = 0, openBrowserTab = true, mode: FixtureClickMode = "normal"): Promise<void> {
 	await openFixture(page, app, paneIndex, browserUrl, openBrowserTab);
 	const pane = page.getByRole("group", { name: "Browser pane" }).nth(paneIndex);
-	const selectorButton = pane.getByRole("button", { name: "Select page element for agent" });
+	const selectorButton = pane.getByRole("button", { name: "Select page element with Page Agent" });
 	await expect(selectorButton).toBeEnabled({ timeout: 15_000 });
 	await selectorButton.click();
+	await expect(pane.getByRole("button", { name: "Cancel element selection" })).toBeEnabled({ timeout: 15_000 });
+	await hoverFixture(app, target, paneIndex);
 	await clickFixture(app, target, mode, paneIndex);
 	await expect.poll(() => cardRootExists(app, paneIndex), { timeout: 10_000 }).toBe(true);
 	await expect.poll(() => cardState(app, paneIndex), { timeout: 15_000 }).toMatchObject({ visible: true });
@@ -627,7 +555,53 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 	const app = await launch(userData, workspace);
 	try {
 		const page = await app.firstWindow();
-		await selectElement(page, app);
+		await openFixture(page, app);
+		const pane = page.getByRole("group", { name: "Browser pane" }).first();
+		const browserAgentHubButton = pane.getByRole("button", { name: "Open browser Agent Hub, 0 Page Agents" });
+		const fullBrowserView = await nativeView(app);
+		if (!fullBrowserView) throw new Error("Fixture browser view did not attach before opening browser Agent Hub");
+		await browserAgentHubButton.click();
+		const browserAgentHub = pane.getByRole("complementary", { name: "Agent Hub" });
+		await expect(browserAgentHub).toBeVisible();
+		await expect(browserAgentHub.getByText("No Page Agents yet", { exact: true })).toBeVisible();
+		await expect(browserAgentHub.getByRole("list", { name: "Page Agents created by element targeting" })).toHaveCount(0);
+		await expect.poll(async () => (await nativeView(app))?.bounds.width ?? 0).toBeLessThan(fullBrowserView.bounds.width);
+		await page.keyboard.press("Escape");
+		await expect(browserAgentHub).toBeHidden();
+		await expect(browserAgentHubButton).toBeFocused();
+		await expect.poll(async () => (await nativeView(app))?.bounds.width ?? 0).toBe(fullBrowserView.bounds.width);
+		const selectorButton = pane.getByRole("button", { name: "Select page element with Page Agent" });
+		await expect(selectorButton).toBeEnabled({ timeout: 15_000 });
+		await selectorButton.click();
+		await expect(pane.getByRole("button", { name: "Cancel element selection" })).toBeEnabled({ timeout: 15_000 });
+		await expect.poll(
+			() => page.evaluate(
+				async profileId =>
+					((await window.gradivus.getWorkspaceDocument())?.agents ?? []).filter(agent => agent.profileId === profileId).length,
+				BROWSER_SELECTION_AGENT_PROFILE_ID,
+			),
+			{ timeout: 15_000 },
+		).toBe(1);
+		const pageAgentId = await page.evaluate(
+			async profileId =>
+				((await window.gradivus.getWorkspaceDocument())?.agents ?? []).find(agent => agent.profileId === profileId)?.id,
+			BROWSER_SELECTION_AGENT_PROFILE_ID,
+		);
+		if (!pageAgentId) throw new Error("Target selector did not create a Page Agent");
+		expect(
+			await page.evaluate(async () => (await window.gradivus.bootstrap()).registry.sessions.map(session => session.id)),
+		).toEqual(["fixture-selection-card"]);
+		await hoverFixture(app);
+		await expect.poll(() => agentCursorState(app), { timeout: 10_000 }).toMatchObject({
+			visible: true,
+			label: "Page Agent",
+		});
+		const cursor = await agentCursorState(app);
+		expect(cursor?.transform).toMatch(/^translate3d\(-?\d+px,\s*-?\d+px,\s*0px\)$/);
+		expect(canonicalizeCssColor(cursor?.color ?? "")).toBe(canonicalizeCssColor(getAgentSwatch(pageAgentId)));
+		await clickFixture(app);
+		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(true);
+		await expect.poll(() => cardState(app), { timeout: 15_000 }).toMatchObject({ visible: true });
 		await expect.poll(() => page.evaluate(() => Boolean(window.gradivus)), { timeout: 10_000 }).toBe(true);
 		expect(await page.evaluate(() => location.origin)).toBe("gradivus://app");
 		const before = await nativeView(app);
@@ -644,6 +618,22 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 		await clickCard(app, ".btn-action-dropdown");
 		expect(await nativeView(app)).toEqual(before);
 		await clickCard(app, ".btn-action-dropdown");
+		await clickCard(app, ".btn-cancel");
+		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(false);
+		const populatedHubButton = pane.getByRole("button", { name: "Open browser Agent Hub, 1 Page Agent" });
+		await populatedHubButton.click();
+		const pageAgentList = browserAgentHub.getByRole("list", { name: "Page Agents created by element targeting" });
+		await expect(pageAgentList.getByRole("listitem")).toHaveCount(1);
+		await expect(pageAgentList).toContainText("Page Agent");
+		await expect(pageAgentList).not.toContainText("Fixture Verifier");
+		await page.keyboard.press("Escape");
+		await expect(populatedHubButton).toBeFocused();
+		await page.getByRole("tab", { name: /Gradivus/ }).click();
+		const chatAgentHubButton = page.locator(".transcript-actions").getByRole("button", { name: /Open Agent Hub/ });
+		await chatAgentHubButton.click();
+		const chatAgentHub = page.getByRole("complementary", { name: "Run inspector" });
+		await expect(chatAgentHub).toContainText("Fixture Verifier");
+		await expect(chatAgentHub).not.toContainText("Page Agent");
 	} finally {
 		await teardownElectronTest(app, userData);
 	}
@@ -801,14 +791,14 @@ test("cancel, restart, navigate and close leave no stale inspector root", async 
 		const pane = page.getByRole("group", { name: "Browser pane" }).nth(0);
 		await pane.getByRole("button", { name: "Cancel element selection" }).click();
 		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(false);
-		await pane.getByRole("button", { name: "Select page element for agent" }).click();
+		await pane.getByRole("button", { name: "Select page element with Page Agent" }).click();
 		await clickFixture(app, "#fixture-secondary");
 		await expect.poll(() => cardState(app), { timeout: 10_000 }).toMatchObject({ selector: "#fixture-secondary" });
 		await clickCard(app, ".btn-cancel");
 		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(false);
 		await clickFixture(app, "#fixture-secondary");
 		await expect.poll(() => fixtureOutput(app), { timeout: 10_000 }).toBe("Secondary connected");
-		await pane.getByRole("button", { name: "Select page element for agent" }).click();
+		await pane.getByRole("button", { name: "Select page element with Page Agent" }).click();
 		await clickFixture(app, "#fixture-action");
 		await expect.poll(() => cardState(app), { timeout: 10_000 }).toMatchObject({ selector: "#fixture-action" });
 		const address = pane.getByRole("textbox", { name: "Address" });

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import gradivusLogoUrl from "../../../../resources/icon.png?url";
+  import gradivusLogoUrl from "../../../../resources/titlebar-logo.png?url";
   export let size = 28;
 </script>
 

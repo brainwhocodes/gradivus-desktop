@@ -26,8 +26,9 @@ bottom section of the chat surface:
 - **Agent activity** shows a bounded, read-only command/status projection for
   the active chat. It does not expose arbitrary arguments, output, cwd,
   environment values, runtime tokens, or session IDs.
-- **Shell** opens an independent, workspace-rooted PTY rendered by Ghostty
-  WebAssembly. Its input and output stay local to the drawer and never enter
+- **Shell** opens an independent, workspace-rooted PTY rendered by the WTerm DOM
+  renderer with libghostty WebAssembly on Windows and Ghostty Web on macOS and
+  Linux. Its input and output stay local to the drawer and never enter
   OMP context or the chat transcript.
 - Hide/show, resize, and renderer reload preserve the shell session and use
   bounded monotonic output offsets. Switching workspaces, restarting the
@@ -125,7 +126,7 @@ The focused Vitest coverage verifies runtime-owned PTY startup, bounded terminal
 - the OMP Chat workspace with browser surfaces, the Local terminal drawer, and neutral black/white settings and terminal themes;
 - native image-generation and image-inspection settings persistence;
 - provider sign-in, account lock/unlock, sibling failover, removal, and sign-out;
-- runtime-owned shell startup through the workspace client and Ghostty WASM renderer;
+- runtime-owned shell startup through the workspace client and the cross-platform WTerm terminal renderer;
 - browser split invariants;
 - native right-click split and close actions for browser panes;
 - browser-local address bars, tab naming, durable navigation, and browser rehydration;

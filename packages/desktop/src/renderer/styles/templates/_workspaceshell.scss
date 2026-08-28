@@ -56,42 +56,6 @@
 	}
 }
 
-.shell-actions {
-	display: flex;
-	align-items: stretch;
-	height: 100%;
-	-webkit-app-region: no-drag;
-}
-
-.application-settings-button {
-	align-self: center;
-	margin-right: 8px;
-	padding: 5px 9px;
-	border: 1px solid var(--line-soft);
-	border-radius: var(--radius-small);
-	background: transparent;
-	color: var(--foreground-muted);
-	font-family: var(--font-sans);
-	font-size: 14px;
-	font-weight: 680;
-	cursor: pointer;
-	transition:
-		background-color 140ms var(--ease-standard),
-		border-color 140ms var(--ease-standard),
-		color 140ms var(--ease-standard);
-
-	&:hover {
-		border-color: var(--line);
-		background: var(--shell-hover);
-		color: var(--foreground-strong);
-	}
-
-	&[aria-pressed="true"] {
-		border-color: var(--accent-boundary);
-		background: var(--selection-surface);
-		color: var(--selection-foreground);
-	}
-}
 
 .window-controls {
 	display: flex;
@@ -235,6 +199,8 @@
 }
 
 .chat-glyph {
+	display: inline-flex;
+	align-items: center;
 	color: var(--foreground-muted);
 	font-size: 14px;
 	line-height: 1;

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { parseImageMetadata } from "@oh-my-pi/pi-utils/mime";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { WorkspaceDocumentV1, WorkspacePrincipalV1 } from "@oh-my-pi/pi-wire";
 import type { SelectionAuthScope, SelectionTargetAgent } from "@oh-my-pi/pi-workspace-runtime/selection";
-import { type BrowserWindow, dialog, shell } from "electron";
+import { type BrowserWindow, dialog, nativeImage, shell } from "electron";
 import { getAgentSwatch } from "../shared/agent-swatch";
 import { AUTH_DISCOVERY_PROVIDER } from "../shared/auth-events";
 import type {
@@ -19,6 +20,7 @@ import type {
 	AuthEvent,
 	BootstrapSnapshot,
 	ExtensionView,
+	FileChangeDisposition,
 	FileDiffView,
 	GradivusEvent,
 	InterruptMode,
@@ -39,7 +41,9 @@ import type {
 	ThinkingLevel,
 	TimelineItem,
 	TimelinePage,
+	WorkspaceImagePreview,
 } from "../shared/contracts";
+import { MAX_PROMPT_IMAGE_BYTES } from "../shared/contracts";
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "../shared/rpc-wire";
 import { loadPersistedGradivusSettings } from "./app-settings";
 import {
@@ -49,7 +53,7 @@ import {
 	resolveWorkspaceTarget,
 	safeExternalUrl,
 } from "./guards";
-import { PromptAttachmentStore, type ResolvedPromptAttachments } from "./prompt-attachments";
+import { PromptAttachmentStore, type ResolvedPromptComposition } from "./prompt-attachments";
 import type { RpcClient } from "./rpc-client";
 import { RpcProcess } from "./rpc-process";
 import { RuntimeSupervisor } from "./runtime-supervisor";
@@ -88,6 +92,32 @@ function selectionPromptImage(metadata?: Record<string, unknown>): PromptImageCo
 	return { type: "image", data, mimeType };
 }
 
+function writeDispositionForEvent(
+	cwd: string,
+	frame: Record<string, unknown>,
+): { toolCallId: string; disposition: FileChangeDisposition } | undefined {
+	if (frame.type !== "tool_execution_start" || frame.toolName !== "write" || typeof frame.toolCallId !== "string") {
+		return undefined;
+	}
+	const args = isRecord(frame.args) ? frame.args : undefined;
+	const target = typeof args?.path === "string" ? args.path.trim() : "";
+	const windowsAbsolute = path.win32.isAbsolute(target);
+	if (
+		!target ||
+		/^[a-z][a-z0-9+.-]*:\/\//i.test(target) ||
+		(/^[a-z][a-z0-9+.-]*:/i.test(target) && !windowsAbsolute)
+	) {
+		return undefined;
+	}
+	const workspace = path.resolve(cwd);
+	const resolved = path.resolve(workspace, target);
+	const relative = path.relative(workspace, resolved);
+	if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		return undefined;
+	}
+	return { toolCallId: frame.toolCallId, disposition: fs.existsSync(resolved) ? "edited" : "created" };
+}
+
 type RuntimeSession = {
 	record: SessionRecordV1;
 	process: RpcProcess;
@@ -118,6 +148,10 @@ type RuntimeSession = {
 
 type TimerHandle = NodeJS.Timeout;
 const FILE_DIFF_CACHE_TTL_MS = 1_000;
+const MAX_WORKSPACE_IMAGE_DIMENSION = 8_192;
+const MAX_WORKSPACE_IMAGE_PIXELS = 4_194_304;
+const MIN_IMAGE_PREVIEW_DIMENSION = 64;
+const MAX_IMAGE_PREVIEW_DIMENSION = 2_048;
 
 interface StateData {
 	sessionId: string;
@@ -229,7 +263,14 @@ export class DesktopHost {
 	}
 
 	bootstrap(): BootstrapSnapshot {
-		return { registry: this.#registry.value, warning: this.#warning };
+		const registry = this.#registry.value;
+		return {
+			registry: {
+				...registry,
+				sessions: registry.sessions.filter(record => record.surface !== "browser-selection"),
+			},
+			warning: this.#warning,
+		};
 	}
 	async getAuthStatus(): Promise<AuthAccountView[]> {
 		return this.#authAccounts();
@@ -335,7 +376,7 @@ export class DesktopHost {
 		try {
 			const saved = (await loadPersistedGradivusSettings(this.#userDataPath)).workspace.defaultPath.trim();
 			if (!saved) return undefined;
-			const stat = await fs.stat(saved).catch(() => undefined);
+			const stat = await fs.promises.stat(saved).catch(() => undefined);
 			return stat?.isDirectory() ? saved : undefined;
 		} catch {
 			return undefined;
@@ -354,25 +395,52 @@ export class DesktopHost {
 			cwd = result.filePaths[0];
 		} else {
 			const candidate = path.resolve(assertBoundedText(cwdInput, "workspace cwd"));
-			const stat = await fs.stat(candidate).catch(() => undefined);
+			const stat = await fs.promises.stat(candidate).catch(() => undefined);
 			if (!stat?.isDirectory()) throw new Error("Workspace folder is not a directory");
 			cwd = candidate;
 		}
+		return this.#createSession(kind, cwd);
+	}
+
+	async createBrowserSelectionSession(cwdInput: unknown): Promise<SessionRecordV1> {
+		const cwd = path.resolve(assertBoundedText(cwdInput, "browser selection workspace"));
+		const stat = await fs.promises.stat(cwd).catch(() => undefined);
+		if (!stat?.isDirectory()) throw new Error("Browser selection workspace folder is not a directory");
+		const snapshot = await this.#createSession("work", cwd, "browser-selection", "Page Agent", false);
+		return snapshot.record;
+	}
+
+	async discardBrowserSelectionSession(idInput: unknown): Promise<void> {
+		const record = this.#record(idInput);
+		if (record.surface !== "browser-selection") {
+			throw new Error("Only browser selection sessions can be discarded through this path");
+		}
+		await this.deleteSession(record.id);
+	}
+
+	async #createSession(
+		kind: SessionRecordV1["kind"],
+		cwd: string,
+		surface: NonNullable<SessionRecordV1["surface"]> = "chat",
+		title: string | null = null,
+		activate = true,
+	): Promise<SessionSnapshot> {
 		const now = new Date().toISOString();
 		const record: SessionRecordV1 = {
 			id: randomUUID(),
 			kind,
+			...(surface === "chat" ? {} : { surface }),
 			cwd,
 			ompSessionId: "",
 			sessionFile: "",
-			title: null,
+			title,
 			createdAt: now,
 			lastOpenedAt: now,
 		};
 		const runtime = this.#createRuntime(record);
 		try {
 			return await this.#supervisor.run(record.id, async () => {
-				await this.#registry.create(runtime.record);
+				await this.#registry.create(runtime.record, activate);
 				return this.#snapshot(runtime);
 			});
 		} catch (error) {
@@ -523,7 +591,7 @@ export class DesktopHost {
 		if (runtime) await runtime.attachments.close();
 		this.#runtimes.delete(record.id);
 		await this.#registry.remove(record.id);
-		return { registry: this.#registry.value, warning: this.#warning };
+		return this.bootstrap();
 	}
 
 	async stagePromptAttachments(idInput: unknown, uploadsInput: unknown): Promise<PromptAttachmentView[]> {
@@ -544,10 +612,9 @@ export class DesktopHost {
 		await runtime.attachments.release(attachmentIdsInput);
 	}
 
-	async prompt(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<string> {
-		const text = assertBoundedText(textInput, "prompt");
+	async prompt(id: unknown, compositionInput: unknown): Promise<string> {
 		return this.#runWithRuntime(id, async (runtime, client) => {
-			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
 			return client.prompt(resolved.text, resolved.images.length > 0 ? resolved.images : undefined);
 		});
 	}
@@ -786,10 +853,9 @@ export class DesktopHost {
 		return { scope, target };
 	}
 
-	async steer(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<void> {
-		const text = assertBoundedText(textInput, "steer");
+	async steer(id: unknown, compositionInput: unknown): Promise<void> {
 		await this.#runWithRuntime(id, async (runtime, client) => {
-			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
 			const response = await client.request({
 				type: "steer",
 				message: resolved.text,
@@ -799,10 +865,9 @@ export class DesktopHost {
 		});
 	}
 
-	async queueFollowUp(id: unknown, textInput: unknown, attachmentIdsInput?: unknown): Promise<void> {
-		const text = assertBoundedText(textInput, "follow-up");
+	async queueFollowUp(id: unknown, compositionInput: unknown): Promise<void> {
 		await this.#runWithRuntime(id, async (runtime, client) => {
-			const resolved: ResolvedPromptAttachments = await runtime.attachments.resolve(attachmentIdsInput, text);
+			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
 			const response = await client.request({
 				type: "follow_up",
 				message: resolved.text,
@@ -1050,6 +1115,61 @@ export class DesktopHost {
 		});
 	}
 
+	async loadWorkspaceImage(
+		idInput: unknown,
+		targetInput: unknown,
+		maxDimensionInput: unknown,
+	): Promise<WorkspaceImagePreview> {
+		const record = this.#record(idInput);
+		if (typeof targetInput !== "string") throw new TypeError("image path must be text");
+		if (
+			typeof maxDimensionInput !== "number" ||
+			!Number.isInteger(maxDimensionInput) ||
+			maxDimensionInput < MIN_IMAGE_PREVIEW_DIMENSION ||
+			maxDimensionInput > MAX_IMAGE_PREVIEW_DIMENSION
+		) {
+			throw new RangeError("invalid image preview dimension");
+		}
+		const resolved = await resolveWorkspaceTarget(record.cwd, targetInput);
+		const stat = await fs.promises.stat(resolved.target);
+		if (!stat.isFile()) throw new Error("Image preview target is not a file");
+		if (stat.size <= 0 || stat.size > MAX_PROMPT_IMAGE_BYTES) {
+			throw new RangeError("Image preview exceeds the 20 MiB limit");
+		}
+		const bytes = await fs.promises.readFile(resolved.target);
+		const metadata = parseImageMetadata(bytes);
+		if (!metadata) throw new Error("Image preview format is unsupported");
+		const width = metadata.width ?? 0;
+		const height = metadata.height ?? 0;
+		if (
+			width <= 0 ||
+			height <= 0 ||
+			width > MAX_WORKSPACE_IMAGE_DIMENSION ||
+			height > MAX_WORKSPACE_IMAGE_DIMENSION ||
+			width * height > MAX_WORKSPACE_IMAGE_PIXELS
+		) {
+			throw new RangeError("Image preview dimensions are unsupported");
+		}
+		const source = nativeImage.createFromBuffer(bytes);
+		if (source.isEmpty()) throw new Error("Image preview could not be decoded");
+		const scale = Math.min(1, maxDimensionInput / Math.max(width, height));
+		const image =
+			scale < 1
+				? source.resize({
+						width: Math.max(1, Math.round(width * scale)),
+						height: Math.max(1, Math.round(height * scale)),
+						quality: "good",
+					})
+				: source;
+		const previewSize = image.getSize();
+		return {
+			path: targetInput,
+			dataUrl: image.toDataURL(),
+			width: previewSize.width,
+			height: previewSize.height,
+		};
+	}
+
 	async openWorkspaceFile(idInput: unknown, targetInput: unknown): Promise<void> {
 		const record = this.#record(idInput);
 		if (typeof targetInput !== "string") throw new TypeError("target must be text");
@@ -1210,6 +1330,30 @@ export class DesktopHost {
 			cwd: path.resolve(record.cwd),
 			workspace: record.title?.trim() || path.basename(record.cwd) || "Workspace",
 		};
+	}
+
+	resolveChatSessionForBrowserAgent(idInput: unknown): string {
+		const source = this.#record(idInput);
+		const sourceCwd = path.resolve(source.cwd);
+		const registry = this.#registry.value;
+		const visibleSessions = registry.sessions.filter(
+			record => record.surface !== "browser-selection" && path.resolve(record.cwd) === sourceCwd,
+		);
+		const activeIds = new Set([registry.activeByKind.work, registry.activeByKind.code]);
+		const selected = visibleSessions
+			.filter(record => activeIds.has(record.id))
+			.sort(
+				(a, b) =>
+					new Date(b.lastOpenedAt || b.createdAt).getTime() - new Date(a.lastOpenedAt || a.createdAt).getTime(),
+			)[0];
+		const fallback =
+			selected ??
+			visibleSessions.sort(
+				(a, b) =>
+					new Date(b.lastOpenedAt || b.createdAt).getTime() - new Date(a.lastOpenedAt || a.createdAt).getTime(),
+			)[0];
+		if (!fallback) throw new Error("Open a chat for this workspace before sending a Page Agent task to chat");
+		return fallback.id;
 	}
 
 	#requiredRuntime(id: string): RuntimeSession {
@@ -1504,7 +1648,17 @@ export class DesktopHost {
 			this.#emitUrgent({ sessionId: runtime.record.id, type: "session", record: runtime.record });
 			return;
 		}
-		const items = runtime.timeline.applyChanges(event);
+		const writeDisposition = writeDispositionForEvent(runtime.record.cwd, frame);
+		let items = runtime.timeline.applyChanges(event);
+		if (writeDisposition) {
+			const updated = runtime.timeline.setWriteDisposition(
+				writeDisposition.toolCallId,
+				writeDisposition.disposition,
+			);
+			if (updated) {
+				items = items.map(item => (item.toolCallId === writeDisposition.toolCallId ? updated : item));
+			}
+		}
 		if (items.some(item => item.status === "complete" && item.isError !== true && item.files?.length)) {
 			runtime.fileDiffCache.clear();
 		}

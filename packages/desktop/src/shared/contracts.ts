@@ -1,3 +1,4 @@
+export type SessionSurface = "chat" | "browser-selection";
 export type SessionKind = "work" | "code";
 export type ProcessState = "stopped" | "starting" | "ready" | "running" | "stopping" | "error";
 export type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -18,11 +19,18 @@ export interface PromptAttachmentUpload {
 	data: Uint8Array;
 }
 
+export type PromptCompositionPart = { type: "text"; text: string } | { type: "attachment"; id: string };
+
+export interface PromptComposition {
+	parts: PromptCompositionPart[];
+}
+
 export type PromptAttachmentView = {
 	id: string;
 	name: string;
 	size: number;
 	kind: "file" | "image" | "prompt";
+	reference: string;
 };
 
 export interface PromptImageContent {
@@ -140,6 +148,7 @@ export interface SessionRuntimeConfig {
 export interface SessionRecordV1 {
 	id: string;
 	kind: SessionKind;
+	surface?: SessionSurface;
 	cwd: string;
 	ompSessionId: string;
 	sessionFile: string;
@@ -159,10 +168,12 @@ export interface TimelineImage {
 }
 
 export type FileChangeOperation = "write" | "edit";
+export type FileChangeDisposition = "created" | "edited";
 
 export interface TimelineFileChange {
 	path: string;
 	operation: FileChangeOperation;
+	disposition?: FileChangeDisposition;
 }
 export type TimelineToolActivity =
 	| {
@@ -198,6 +209,13 @@ export interface FileDiffView {
 	deletions: number;
 	truncated: boolean;
 	message?: string;
+}
+
+export interface WorkspaceImagePreview {
+	path: string;
+	dataUrl: string;
+	width: number;
+	height: number;
 }
 
 export type TimelineTone = "neutral" | "info" | "success" | "warning" | "error";
@@ -677,6 +695,7 @@ export interface ExtensionView {
 }
 
 export interface GradivusApi {
+	readonly platform: NodeJS.Platform;
 	getAuthStatus(): Promise<AuthAccountView[]>;
 	getOAuthAccounts(): Promise<OAuthAccountsView>;
 	setOAuthAccountLock(providerId: string, credentialId?: number): Promise<OAuthAccountsView>;
@@ -714,9 +733,9 @@ export interface GradivusApi {
 	stagePromptAttachments(id: string, uploads: PromptAttachmentUpload[]): Promise<PromptAttachmentStageResult>;
 	stagePromptText(id: string, text: string): Promise<PromptAttachmentView>;
 	releasePromptAttachments(id: string, attachmentIds: string[]): Promise<void>;
-	prompt(id: string, text: string, attachmentIds?: string[]): Promise<string>;
-	steer(id: string, text: string, attachmentIds?: string[]): Promise<void>;
-	queueFollowUp(id: string, text: string, attachmentIds?: string[]): Promise<void>;
+	prompt(id: string, composition: PromptComposition): Promise<string>;
+	steer(id: string, composition: PromptComposition): Promise<void>;
+	queueFollowUp(id: string, composition: PromptComposition): Promise<void>;
 	abort(id: string): Promise<void>;
 	setModel(id: string, provider: string, modelId: string): Promise<void>;
 	setThinking(id: string, level: ThinkingLevel): Promise<void>;
@@ -729,6 +748,8 @@ export interface GradivusApi {
 	extensionResponse(id: string, response: unknown): Promise<void>;
 	getSubagentMessages(id: string, subagentId: string, fromByte: number): Promise<unknown>;
 	loadFileDiff(id: string, target: string): Promise<FileDiffView>;
+	loadWorkspaceImage(id: string, target: string, maxDimension: number): Promise<WorkspaceImagePreview>;
+	writeClipboardText(text: string): Promise<void>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;
 	openExternal(url: string): Promise<void>;
 	getWorkspaceDocument(): Promise<WorkspaceDocumentV1 | null>;
@@ -754,7 +775,7 @@ export interface GradivusApi {
 	onAuthEvent(listener: (event: AuthEvent) => void): () => void;
 	onWorkspaceEvent(listener: (event: WorkspaceEvent) => void): () => void;
 	onWorkspaceDocument(listener: (doc: WorkspaceDocumentV1) => void): () => void;
-	startSelection(paneId: string, agentId?: string, captureMode?: SelectionCaptureMode): Promise<ElementEditState>;
+	startSelection(paneId: string, captureMode?: SelectionCaptureMode): Promise<ElementEditState>;
 	cancelSelection(paneId: string, reason?: string): Promise<ElementEditState>;
 	commitSelection(paneId: string, instruction?: string, action?: ElementTaskAction): Promise<ElementEditState>;
 	runQueuedTasks(paneId: string): Promise<ElementEditState>;

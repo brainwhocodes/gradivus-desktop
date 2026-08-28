@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from "svelte";
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import IconButton from "../molecules/IconButton.svelte";
 
 	interface Props {
@@ -34,7 +35,7 @@
         onclick={() => onTab("files")}
       >Files{#if fileActivityCount > 0}<span class="inspector-count">{fileActivityCount}</span>{/if}</button>
     </div>
-    <IconButton class="inspector-close" glyph="×" label="Close run inspector" onclick={onClose} />
+    <IconButton class="inspector-close" icon={CloseCircle} size={15} label="Close run inspector" onclick={onClose} />
   </header>
   <div class="inspector-panel">
     {@render children?.()}

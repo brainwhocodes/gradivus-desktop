@@ -42,6 +42,7 @@
     "@sveltejs/vite-plugin-svelte": "catalog:",
     "@types/bun": "catalog:",
     "ghostty-web": "catalog:",
+    "highlight.js": "catalog:",
     "electron": "43.3.0",
     "playwright": "catalog:",
     "sass": "catalog:",
@@ -53,7 +54,9 @@
     "vite": "catalog:",
     "vitest": "catalog:",
     "bulma": "catalog:",
-    "odiff-bin": "4.5.0"
+    "odiff-bin": "4.5.0",
+    "@wterm/dom": "catalog:",
+    "@wterm/ghostty": "catalog:"
   },
   "config": {
     "forge": "forge.config.ts"

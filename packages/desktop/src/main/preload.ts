@@ -25,6 +25,8 @@ import type {
 	OpenRouterModelRouting,
 	PromptAttachmentUpload,
 	PromptAttachmentView,
+	PromptComposition,
+	PromptCompositionPart,
 	QueueMode,
 	SessionSnapshot,
 	SlashCommand,
@@ -34,6 +36,7 @@ import type {
 	TimelinePage,
 	WorkspaceDocumentV1,
 	WorkspaceEvent,
+	WorkspaceImagePreview,
 } from "../shared/contracts";
 import {
 	MAX_INLINE_PROMPT_BYTES,
@@ -89,6 +92,52 @@ function promptText(value: unknown): string {
 	if (bytes === 0) throw new RangeError("prompt text cannot be empty");
 	if (bytes > MAX_TEMP_PROMPT_BYTES) throw new RangeError("prompt text exceeds 16 MiB");
 	return value;
+}
+
+function promptComposition(value: unknown): PromptComposition {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new TypeError("prompt composition must be an object");
+	const input = value as Record<string, unknown>;
+	if (Object.keys(input).length !== 1 || !Object.hasOwn(input, "parts") || !Array.isArray(input.parts))
+		throw new TypeError("prompt composition is invalid");
+	if (input.parts.length > 1_024) throw new RangeError("too many prompt composition parts");
+	const parts: PromptCompositionPart[] = [];
+	const attachmentIds = new Set<string>();
+	let inlineBytes = 0;
+	for (let index = 0; index < input.parts.length; index++) {
+		const candidate = input.parts[index];
+		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate))
+			throw new TypeError(`prompt composition part ${index + 1} is invalid`);
+		const part = candidate as Record<string, unknown>;
+		if (part.type === "text") {
+			if (
+				Object.keys(part).length !== 2 ||
+				!Object.hasOwn(part, "type") ||
+				!Object.hasOwn(part, "text") ||
+				typeof part.text !== "string"
+			)
+				throw new TypeError(`prompt composition text part ${index + 1} is invalid`);
+			inlineBytes += new TextEncoder().encode(part.text).byteLength;
+			if (inlineBytes > MAX_INLINE_PROMPT_BYTES) throw new RangeError("prompt exceeds 512 KiB");
+			parts.push({ type: "text", text: part.text });
+			continue;
+		}
+		if (
+			part.type !== "attachment" ||
+			Object.keys(part).length !== 2 ||
+			!Object.hasOwn(part, "type") ||
+			!Object.hasOwn(part, "id") ||
+			typeof part.id !== "string" ||
+			part.id.length < 8 ||
+			part.id.length > 100
+		)
+			throw new TypeError(`prompt composition attachment part ${index + 1} is invalid`);
+		if (attachmentIds.has(part.id)) throw new RangeError("duplicate prompt attachment ID");
+		if (attachmentIds.size >= MAX_PROMPT_ATTACHMENT_COUNT) throw new RangeError("too many attachment IDs");
+		attachmentIds.add(part.id);
+		parts.push({ type: "attachment", id: part.id });
+	}
+	return { parts };
 }
 
 function sessionName(value: unknown): string {
@@ -227,10 +276,6 @@ const interruptMode = (value: unknown): InterruptMode => {
 	if (value !== "immediate" && value !== "wait") throw new TypeError("invalid interrupt mode");
 	return value;
 };
-const optionalAgentId = (value: unknown): string | undefined => {
-	if (value === undefined || value === null) return undefined;
-	return text(value, "agent id");
-};
 const optionalReason = (value: unknown): string | undefined => {
 	if (value === undefined || value === null) return undefined;
 	return text(value, "cancel reason");
@@ -245,6 +290,7 @@ const optionalCaptureMode = (value: unknown): "dom" | "screenshot" | undefined =
 	return value;
 };
 const api: GradivusApi = {
+	platform: process.platform,
 	getAuthStatus: () => ipcRenderer.invoke("gradivus:auth-status") as Promise<AuthAccountView[]>,
 	getOAuthAccounts: () => ipcRenderer.invoke("gradivus:oauth-accounts") as Promise<OAuthAccountsView>,
 	setOAuthAccountLock: (provider, credential) =>
@@ -346,27 +392,12 @@ const api: GradivusApi = {
 			sessionId(id),
 			optionalAttachmentIds(attachmentIds) ?? [],
 		) as Promise<void>,
-	prompt: (id, value, attachmentIds) =>
-		ipcRenderer.invoke(
-			"gradivus:prompt",
-			sessionId(id),
-			text(value, "prompt"),
-			optionalAttachmentIds(attachmentIds),
-		) as Promise<string>,
-	steer: (id, value, attachmentIds) =>
-		ipcRenderer.invoke(
-			"gradivus:steer",
-			sessionId(id),
-			text(value, "steer"),
-			optionalAttachmentIds(attachmentIds),
-		) as Promise<void>,
-	queueFollowUp: (id, value, attachmentIds) =>
-		ipcRenderer.invoke(
-			"gradivus:queue",
-			sessionId(id),
-			text(value, "follow-up"),
-			optionalAttachmentIds(attachmentIds),
-		) as Promise<void>,
+	prompt: (id, composition) =>
+		ipcRenderer.invoke("gradivus:prompt", sessionId(id), promptComposition(composition)) as Promise<string>,
+	steer: (id, composition) =>
+		ipcRenderer.invoke("gradivus:steer", sessionId(id), promptComposition(composition)) as Promise<void>,
+	queueFollowUp: (id, composition) =>
+		ipcRenderer.invoke("gradivus:queue", sessionId(id), promptComposition(composition)) as Promise<void>,
 	abort: id => ipcRenderer.invoke("gradivus:abort", sessionId(id)) as Promise<void>,
 	setModel: (id, provider, modelId) =>
 		ipcRenderer.invoke(
@@ -434,6 +465,19 @@ const api: GradivusApi = {
 		ipcRenderer.invoke("gradivus:agent-hub-revive", sessionId(id), agentHubId(agentId)) as Promise<void>,
 	loadFileDiff: (id, target) =>
 		ipcRenderer.invoke("gradivus:file-diff", sessionId(id), text(target, "file diff path")) as Promise<FileDiffView>,
+	loadWorkspaceImage: (id, target, maxDimension) => {
+		if (!Number.isInteger(maxDimension) || maxDimension < 64 || maxDimension > 2_048) {
+			throw new RangeError("invalid image preview dimension");
+		}
+		return ipcRenderer.invoke(
+			"gradivus:workspace-image",
+			sessionId(id),
+			text(target, "workspace image path"),
+			maxDimension,
+		) as Promise<WorkspaceImagePreview>;
+	},
+	writeClipboardText: value =>
+		ipcRenderer.invoke("gradivus:clipboard-write", text(value, "clipboard text")) as Promise<void>,
 	openWorkspaceFile: (id, target) =>
 		ipcRenderer.invoke(
 			"gradivus:open-workspace-file",
@@ -522,11 +566,10 @@ const api: GradivusApi = {
 		ipcRenderer.on("gradivus:workspace-document", handler);
 		return () => ipcRenderer.removeListener("gradivus:workspace-document", handler);
 	},
-	startSelection: (id: string, agent?: string, captureMode?: "dom" | "screenshot") =>
+	startSelection: (id: string, captureMode?: "dom" | "screenshot") =>
 		ipcRenderer.invoke(
 			"gradivus:selection-start",
 			paneId(id),
-			optionalAgentId(agent),
 			optionalCaptureMode(captureMode),
 		) as Promise<ElementEditState>,
 	cancelSelection: (id, reason) =>

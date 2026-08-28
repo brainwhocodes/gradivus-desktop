@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AltArrowDown from "@solar-icons/svelte/linear/alt-arrow-down";
   import type { ModelOption, OpenRouterModelRouting } from "../../../shared/contracts";
   import ModelCapabilityIcons from "./ModelCapabilityIcons.svelte";
 
@@ -31,7 +32,7 @@
     <span class="model-option-meta">
       <ModelCapabilityIcons input={model.input} reasoning={model.reasoning} />
       {#if contextLabel}<span class="model-context-badge">{contextLabel}</span>{/if}
-      <span class="accordion-chevron" aria-hidden="true">⌄</span>
+      <span class="accordion-chevron" aria-hidden="true"><AltArrowDown size={14} /></span>
     </span>
   </button>
 

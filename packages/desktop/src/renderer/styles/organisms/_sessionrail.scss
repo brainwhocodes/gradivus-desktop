@@ -36,6 +36,7 @@
 
 .workspace-group-node {
 	display: flex;
+	flex: 0 0 auto;
 	flex-direction: column;
 	border-radius: var(--radius-medium);
 	background: var(--shell-raised);
@@ -216,6 +217,9 @@
 		}
 
 		.tree-status-dot {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
 			font-family: var(--font-mono);
 			font-size: 14px;
 			font-weight: 700;
@@ -225,8 +229,10 @@
 			}
 
 			&.unseen {
-				color: var(--success-boundary);
-				font-size: 14px;
+				width: 6px;
+				height: 6px;
+				border-radius: 50%;
+				background: var(--success-boundary);
 				animation: pulse 1.5s infinite;
 			}
 
@@ -235,7 +241,10 @@
 			}
 
 			&.idle {
-				color: var(--line-soft);
+				width: 4px;
+				height: 4px;
+				border-radius: 50%;
+				background: var(--line-soft);
 			}
 		}
 	}
@@ -311,6 +320,83 @@
 
 .rail-empty p {
 	margin: 0 0 9px;
+}
+
+.rail-utilities {
+	display: flex;
+	flex: 0 0 auto;
+	flex-direction: column;
+	gap: 4px;
+	border-top: 1px solid var(--line);
+	padding: 8px;
+	background: var(--shell);
+}
+
+.rail-utility-button {
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 36px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	padding: 6px 8px;
+	color: var(--foreground-muted);
+	background: transparent;
+	font: 650 12px/1.2 var(--font-sans);
+	text-align: left;
+	cursor: pointer;
+	transition:
+		background-color 140ms var(--ease-standard),
+		border-color 140ms var(--ease-standard),
+		color 140ms var(--ease-standard),
+		transform 100ms ease-out;
+
+	&:hover:not(:disabled) {
+		border-color: var(--line-soft);
+		color: var(--foreground-strong);
+		background: var(--shell-hover);
+	}
+
+	&:active:not(:disabled) {
+		transform: translateY(1px);
+	}
+
+	&:focus-visible {
+		outline: 2px solid var(--focus-inner);
+		outline-offset: -2px;
+		box-shadow: 0 0 0 2px var(--focus-outer);
+	}
+
+	&:disabled {
+		color: var(--foreground-disabled);
+		cursor: default;
+	}
+}
+
+.rail-theme-track {
+	position: relative;
+	width: 28px;
+	height: 16px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	background: var(--shell-raised);
+
+	> span {
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: var(--foreground-strong);
+		transition: transform 140ms var(--ease-standard);
+	}
+
+	&.is-dark > span {
+		transform: translateX(12px);
+	}
 }
 
 @media (max-width: 920px) {

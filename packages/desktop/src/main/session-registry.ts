@@ -55,12 +55,12 @@ export class SessionRegistry {
 		}
 	}
 
-	async create(record: SessionRecordV1): Promise<void> {
+	async create(record: SessionRecordV1, activate = true): Promise<void> {
 		if (this.#registry.sessions.some(existing => existing.id === record.id)) {
 			throw new Error(`Session ID already exists: ${record.id}`);
 		}
 		this.#registry.sessions = [...this.#registry.sessions, record];
-		this.#registry.activeByKind[record.kind] = record.id;
+		if (activate) this.#registry.activeByKind[record.kind] = record.id;
 		await this.#save();
 	}
 
@@ -74,7 +74,7 @@ export class SessionRegistry {
 	async setActive(kind: SessionKind, id: string | null): Promise<void> {
 		if (id !== null) {
 			const record = this.#registry.sessions.find(candidate => candidate.id === id);
-			if (record === undefined || record.kind !== kind) {
+			if (record === undefined || record.kind !== kind || record.surface === "browser-selection") {
 				throw new Error(`Cannot activate ${kind} session ${id}: session does not exist or has the wrong kind`);
 			}
 		}
@@ -87,7 +87,7 @@ export class SessionRegistry {
 		this.#registry.sessions = this.#registry.sessions.filter(candidate => candidate.id !== id);
 		if (this.#registry.activeByKind[record.kind] === id) {
 			const remaining = this.#registry.sessions
-				.filter(candidate => candidate.kind === record.kind)
+				.filter(candidate => candidate.kind === record.kind && candidate.surface !== "browser-selection")
 				.sort(
 					(a, b) =>
 						new Date(b.lastOpenedAt || b.createdAt).getTime() - new Date(a.lastOpenedAt || a.createdAt).getTime(),
@@ -140,6 +140,7 @@ function isSessionRecord(value: unknown): value is SessionRecordV1 {
 	return (
 		typeof candidate.id === "string" &&
 		(candidate.kind === "work" || candidate.kind === "code") &&
+		(candidate.surface === undefined || candidate.surface === "chat" || candidate.surface === "browser-selection") &&
 		typeof candidate.cwd === "string" &&
 		typeof candidate.ompSessionId === "string" &&
 		typeof candidate.sessionFile === "string" &&
@@ -166,7 +167,9 @@ function normalizeRegistry(registry: SessionRegistryV1): {
 		const activeId = activeByKind[kind];
 		if (activeId !== null) {
 			const record = sessions.find(session => session.id === activeId);
-			if (record === undefined || record.kind !== kind) activeByKind[kind] = null;
+			if (record === undefined || record.kind !== kind || record.surface === "browser-selection") {
+				activeByKind[kind] = null;
+			}
 		}
 	}
 	const changed =

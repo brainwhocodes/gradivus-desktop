@@ -161,10 +161,10 @@
 					<label class="settings-field"><span>Shell</span><small>Shell used for newly opened terminals.</small><input type="text" value={settings.terminal.shell} disabled={busy("terminal.shell")} onchange={(event) => update("terminal.shell", { terminal: { shell: event.currentTarget.value } }, "Shell")} /></label>
 				{/if}
 				{#if visible("terminal.fontFamily")}
-					<label class="settings-field"><span>Font family</span><small>Font stack used by the terminal drawer.</small><input type="text" value={settings.terminal.fontFamily} disabled={busy("terminal.fontFamily")} onchange={(event) => update("terminal.fontFamily", { terminal: { fontFamily: event.currentTarget.value } }, "Terminal font family")} /></label>
+					<label class="settings-field"><span>Font family</span><small>Font stack applied when the shell is next opened or restarted.</small><input type="text" value={settings.terminal.fontFamily} disabled={busy("terminal.fontFamily")} onchange={(event) => update("terminal.fontFamily", { terminal: { fontFamily: event.currentTarget.value } }, "Terminal font family")} /></label>
 				{/if}
 				{#if visible("terminal.fontSize")}
-					<label class="settings-field"><span>Font size</span><small>Terminal font size from 8 to 48.</small><input type="number" min="8" max="48" value={settings.terminal.fontSize} disabled={busy("terminal.fontSize")} onchange={(event) => update("terminal.fontSize", { terminal: { fontSize: Number(event.currentTarget.value) } }, "Terminal font size")} /></label>
+					<label class="settings-field"><span>Font size</span><small>Terminal font size from 8 to 48; applies when the shell is next opened or restarted.</small><input type="number" min="8" max="48" value={settings.terminal.fontSize} disabled={busy("terminal.fontSize")} onchange={(event) => update("terminal.fontSize", { terminal: { fontSize: Number(event.currentTarget.value) } }, "Terminal font size")} /></label>
 				{/if}
 				{#if visible("terminal.cursorStyle")}
 					<LabeledSelect
@@ -189,7 +189,7 @@
 					/>
 				{/if}
 				{#if visible("terminal.scrollback")}
-					<label class="settings-field"><span>Scrollback</span><small>Stored terminal lines from 500 to 100,000.</small><input type="number" min="500" max="100000" value={settings.terminal.scrollback} disabled={busy("terminal.scrollback")} onchange={(event) => update("terminal.scrollback", { terminal: { scrollback: Number(event.currentTarget.value) } }, "Terminal scrollback")} /></label>
+					<label class="settings-field"><span>Scrollback</span><small>Stored terminal lines from 500 to 100,000; applies when the shell is next opened or restarted.</small><input type="number" min="500" max="100000" value={settings.terminal.scrollback} disabled={busy("terminal.scrollback")} onchange={(event) => update("terminal.scrollback", { terminal: { scrollback: Number(event.currentTarget.value) } }, "Terminal scrollback")} /></label>
 				{/if}
 			</div>
 		</div>

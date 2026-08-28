@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ArrowRightUp from "@solar-icons/svelte/linear/arrow-right-up";
+  import CloseCircle from "@solar-icons/svelte/linear/close-circle";
   import type { FileDiffView } from "../../../shared/contracts";
 
   export let path: string;
@@ -33,8 +35,8 @@
         title="Open file"
         disabled={!diff || diff.status === "deleted" || diff.status === "unavailable"}
         onclick={onOpenFile}
-      >↗</button>
-      <button type="button" class="icon-button" aria-label="Close git diff" title="Close diff" onclick={onClose}>×</button>
+      ><ArrowRightUp size={16} aria-hidden="true" /></button>
+      <button type="button" class="icon-button" aria-label="Close git diff" title="Close diff" onclick={onClose}><CloseCircle size={16} aria-hidden="true" /></button>
     </div>
   </header>
 

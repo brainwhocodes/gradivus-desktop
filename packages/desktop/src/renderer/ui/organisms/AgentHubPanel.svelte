@@ -12,6 +12,7 @@
   export let messageError = "";
   export let draft = "";
   export let actionBusy = "";
+  let detailsOpen = false;
   export let onSelect: (agentId: string) => void;
   export let onLoadMessages: () => void;
   export let onSend: (message: string) => void;
@@ -217,58 +218,78 @@
     </nav>
 
     {#if selectedAgent}
-      <section class="agent-detail" aria-labelledby="selected-agent-title">
-        <header class="agent-detail-header">
-          <div class="agent-detail-title">
-            <span class="status-dot status-{selectedAgent.status}" aria-hidden="true"></span>
-            <div>
-              <h3 id="selected-agent-title">{selectedAgent.displayName}</h3>
-              <p>{selectedAgent.kind === "advisor" ? "Advisor transcript" : `${selectedAgent.status} agent`}</p>
-            </div>
-          </div>
-          <div class="agent-actions">
-            {#if selectedAgent.status === "parked" && selectedAgent.kind !== "advisor" && !selectedAgent.readOnly}
-              <button type="button" class="panel-button" disabled={busy} on:click={() => onRevive(selectedAgent.id)}>
-                Revive agent
-              </button>
-            {/if}
-            {#if selectedAgent.kind !== "advisor" && !selectedAgent.readOnly && selectedAgent.status !== "aborted"}
-              <button type="button" class="panel-button danger" disabled={busy} on:click={() => handleKill(selectedAgent)}>
-                Kill agent
-              </button>
-            {/if}
-          </div>
-        </header>
-
-        <dl class="selected-agent-metrics">
-          <div><dt>Status</dt><dd>{selectedAgent.status}</dd></div>
-          <div><dt>Model</dt><dd title={modelFor(selectedAgent)}>{modelFor(selectedAgent)}</dd></div>
-          <div><dt>Activity</dt><dd title={activityFor(selectedAgent)}>{activityFor(selectedAgent)}</dd></div>
-          {#if tokensFor(selectedAgent) !== undefined}<div><dt>Tokens</dt><dd>{compactNumber.format(tokensFor(selectedAgent) ?? 0)}</dd></div>{/if}
-          {#if contextFor(selectedAgent)}<div><dt>Context</dt><dd>{contextFor(selectedAgent)}</dd></div>{/if}
-          {#if selectedAgent.metrics?.requests !== undefined}<div><dt>Requests</dt><dd>{selectedAgent.metrics.requests}</dd></div>{/if}
-          {#if selectedAgent.metrics?.tools !== undefined}<div><dt>Tools</dt><dd>{selectedAgent.metrics.tools}</dd></div>{/if}
-          {#if costFor(selectedAgent) !== undefined}<div><dt>Cost</dt><dd>{currency.format(costFor(selectedAgent) ?? 0)}</dd></div>{/if}
-          {#if durationFor(selectedAgent) !== undefined}<div><dt>Duration</dt><dd>{formatDuration(durationFor(selectedAgent) ?? 0)}</dd></div>{/if}
-        </dl>
-
-        {#if selectedAgent.kind === "advisor" || selectedAgent.readOnly}
-          <p class="read-only-notice" role="note">This advisor is read only. You can review its transcript, but you cannot send messages or change its lifecycle.</p>
-        {:else if selectedAgent.status === "aborted"}
-          <p class="read-only-notice" role="note">This agent was aborted. Its transcript remains available as history.</p>
-        {/if}
-
+      <section class="agent-detail" aria-labelledby={`${messageInputId}-transcript-title`}>
         <div class="transcript-toolbar">
-          <strong>Transcript</strong>
-          <button
-            type="button"
-            class="text-button"
-            disabled={messagesLoading || !selectedAgent.transcriptAvailable}
-            on:click={onLoadMessages}
-          >
-            {messagesLoading ? "Refreshing…" : "Refresh transcript"}
-          </button>
+          <div class="transcript-heading">
+            <h3 id={`${messageInputId}-transcript-title`}>Transcript</h3>
+            {#if selectedIsReadOnly}
+              <span class="transcript-status-badge">{selectedAgent.status === "aborted" ? "History" : "Read only"}</span>
+            {/if}
+          </div>
+          <div class="transcript-toolbar-actions">
+            <button
+              type="button"
+              class="text-button"
+              aria-expanded={detailsOpen}
+              aria-controls={`${messageInputId}-details`}
+              on:click={() => detailsOpen = !detailsOpen}
+            >
+              {detailsOpen ? "Hide details" : "Show details"}
+            </button>
+            <button
+              type="button"
+              class="text-button"
+              disabled={messagesLoading || !selectedAgent.transcriptAvailable}
+              on:click={onLoadMessages}
+            >
+              {messagesLoading ? "Refreshing…" : "Refresh transcript"}
+            </button>
+          </div>
         </div>
+
+        <section
+          id={`${messageInputId}-details`}
+          class="agent-details-disclosure"
+          aria-label={`${selectedAgent.displayName} details`}
+          hidden={!detailsOpen}
+        >
+          <header class="agent-detail-header">
+            <div class="agent-detail-title">
+              <span class="status-dot status-{selectedAgent.status}" aria-hidden="true"></span>
+              <h3>{selectedAgent.displayName}</h3>
+            </div>
+            <div class="agent-actions">
+              {#if selectedAgent.status === "parked" && selectedAgent.kind !== "advisor" && !selectedAgent.readOnly}
+                <button type="button" class="panel-button" disabled={busy} on:click={() => onRevive(selectedAgent.id)}>
+                  Revive agent
+                </button>
+              {/if}
+              {#if selectedAgent.kind !== "advisor" && !selectedAgent.readOnly && selectedAgent.status !== "aborted"}
+                <button type="button" class="panel-button danger" disabled={busy} on:click={() => handleKill(selectedAgent)}>
+                  Kill agent
+                </button>
+              {/if}
+            </div>
+          </header>
+
+          <dl class="selected-agent-metrics">
+            <div><dt>Status</dt><dd>{selectedAgent.status}</dd></div>
+            <div><dt>Model</dt><dd title={modelFor(selectedAgent)}>{modelFor(selectedAgent)}</dd></div>
+            <div><dt>Activity</dt><dd title={activityFor(selectedAgent)}>{activityFor(selectedAgent)}</dd></div>
+            {#if tokensFor(selectedAgent) !== undefined}<div><dt>Tokens</dt><dd>{compactNumber.format(tokensFor(selectedAgent) ?? 0)}</dd></div>{/if}
+            {#if contextFor(selectedAgent)}<div><dt>Context</dt><dd>{contextFor(selectedAgent)}</dd></div>{/if}
+            {#if selectedAgent.metrics?.requests !== undefined}<div><dt>Requests</dt><dd>{selectedAgent.metrics.requests}</dd></div>{/if}
+            {#if selectedAgent.metrics?.tools !== undefined}<div><dt>Tools</dt><dd>{selectedAgent.metrics.tools}</dd></div>{/if}
+            {#if costFor(selectedAgent) !== undefined}<div><dt>Cost</dt><dd>{currency.format(costFor(selectedAgent) ?? 0)}</dd></div>{/if}
+            {#if durationFor(selectedAgent) !== undefined}<div><dt>Duration</dt><dd>{formatDuration(durationFor(selectedAgent) ?? 0)}</dd></div>{/if}
+          </dl>
+
+          {#if selectedAgent.kind === "advisor" || selectedAgent.readOnly}
+            <p class="read-only-notice" role="note">This advisor is read only. You can review its transcript, but you cannot send messages or change its lifecycle.</p>
+          {:else if selectedAgent.status === "aborted"}
+            <p class="read-only-notice" role="note">This agent was aborted. Its transcript remains available as history.</p>
+          {/if}
+        </section>
 
         <div class="transcript-region" role="log" aria-label={`${selectedAgent.displayName} transcript`} aria-live="polite">
           {#if messageError}
@@ -347,6 +368,7 @@
     display: none;
   }
 
+
   .agent-hub-panel.detail-only .agent-roster,
   .agent-hub-panel.detail-only > .panel-empty {
     display: none;
@@ -384,8 +406,7 @@
     line-height: 1.25;
   }
 
-  .panel-header p,
-  .agent-detail-header p {
+  .panel-header p {
     margin: 4px 0 0;
     color: var(--foreground-muted);
     font-size: 14px;
@@ -404,6 +425,12 @@
     border-bottom: 1px solid var(--line);
     padding: 8px;
     overscroll-behavior: contain;
+  }
+
+  .agent-hub-panel.roster-only .agent-roster {
+    max-height: none;
+    flex: 1 1 auto;
+    border-bottom: 0;
   }
 
   .agent-list,
@@ -602,9 +629,6 @@
     min-width: 0;
   }
 
-  .agent-detail-title > div {
-    min-width: 0;
-  }
 
   .agent-detail-header h3 {
     overflow: hidden;
@@ -620,13 +644,21 @@
     justify-content: flex-end;
   }
 
+  .agent-details-disclosure {
+    max-height: min(42%, 320px);
+    flex: 0 1 auto;
+    overflow: auto;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--shell);
+    overscroll-behavior: contain;
+  }
+
   .selected-agent-metrics {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     flex: 0 0 auto;
     gap: 1px;
     margin: 0;
-    border-bottom: 1px solid var(--line-soft);
     background: var(--line-soft);
   }
 
@@ -655,9 +687,7 @@
     line-height: 1.35;
   }
   .read-only-notice {
-    flex: 0 0 auto;
     margin: 0;
-    border-bottom: 1px solid var(--line-soft);
     padding: 8px 16px;
     color: var(--foreground-muted);
     background: var(--shell-raised);
@@ -671,11 +701,28 @@
     padding: 8px 16px;
   }
 
-  .transcript-toolbar strong,
+  .transcript-heading,
+  .transcript-toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .transcript-toolbar h3,
   .message-composer label {
+    margin: 0;
     color: var(--foreground-strong);
     font-size: 14px;
     line-height: 1.4;
+  }
+
+  .transcript-status-badge {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-small);
+    padding: 2px 5px;
+    color: var(--foreground-muted);
+    font-size: 14px;
+    line-height: 1;
   }
 
   .transcript-region {
@@ -784,7 +831,7 @@
   .message-composer textarea {
     width: 100%;
     min-height: 64px;
-    resize: vertical;
+    resize: none;
     border: 1px solid var(--line);
     border-radius: var(--radius-small);
     padding: 8px;

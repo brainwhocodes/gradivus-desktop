@@ -10,13 +10,10 @@
 
 	interface Props {
 		maximized: boolean;
-		settingsOpen: boolean;
 		hydrated: boolean;
 		activeTabId: string;
 		chatTabId: string;
 		browserTabs: WorkspaceTab[];
-		titleSettingsRef: (node: HTMLButtonElement) => void;
-		ontogglesettings: () => void;
 		onminimize: () => void;
 		ontogglemaximize: () => void;
 		onclose: () => void;
@@ -29,13 +26,10 @@
 
 	let {
 		maximized,
-		settingsOpen,
 		hydrated,
 		activeTabId,
 		chatTabId,
 		browserTabs,
-		titleSettingsRef,
-		ontogglesettings,
 		onminimize,
 		ontogglemaximize,
 		onclose,
@@ -50,23 +44,9 @@
 <header class="shell-titlebar" aria-label="Window bar">
 	<div class="shell-brand window-drag" aria-label="Gradivus">
 		<GradivusMark size={21} />
-		<strong>Gradivus</strong>
-		<span>OMP workspace</span>
 	</div>
-	<div class="shell-actions">
-		<button
-			use:titleSettingsRef
-			type="button"
-			class="application-settings-button"
-			aria-label={settingsOpen ? "Close settings" : "Open application settings"}
-			aria-pressed={settingsOpen}
-			onclick={ontogglesettings}
-		>
-			Application settings
-		</button>
-		<div class="window-controls">
-			<WindowControls maximized={maximized} onminimize={onminimize} ontogglemaximize={ontogglemaximize} onclose={onclose} />
-		</div>
+	<div class="window-controls">
+		<WindowControls maximized={maximized} onminimize={onminimize} ontogglemaximize={ontogglemaximize} onclose={onclose} />
 	</div>
 </header>
 

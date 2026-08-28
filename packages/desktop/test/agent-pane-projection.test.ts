@@ -1,6 +1,10 @@
 import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 import { describe, expect, it } from "vitest";
-import { findAgentForPane, reconcileWorkspaceAgents } from "../src/renderer/agent-projection";
+import {
+	findAgentForPane,
+	isDeliverableWorkspaceAgent,
+	reconcileWorkspaceAgents,
+} from "../src/renderer/agent-projection";
 import type { WorkspaceAgent } from "../src/renderer/workspace-types";
 
 function createMockDocument(agents: WorkspaceDocumentV1["agents"] = []): WorkspaceDocumentV1 {
@@ -88,6 +92,7 @@ describe("Agent pane projection and plain pane restoration", () => {
 			terminalId: "term-1",
 			paneId: "pane-1",
 			deliverable: true,
+			sessionId: "sess-1",
 		});
 
 		const activeAgentOnPane = findAgentForPane("pane-1", runningDoc, currentAgents);
@@ -112,6 +117,23 @@ describe("Agent pane projection and plain pane restoration", () => {
 		// Pane immediately restores to plain terminal
 		const plainPaneResult = findAgentForPane("pane-1", stoppedDoc, currentAgents);
 		expect(plainPaneResult).toBeUndefined();
+	});
+
+	it("only exposes session-authorized agents for browser element targeting", () => {
+		const document = createMockDocument([
+			{
+				id: "agent-1",
+				profileId: "profile-omp",
+				terminalId: "term-1",
+				paneId: "pane-1",
+				status: "running",
+			},
+		]);
+
+		const [agent] = reconcileWorkspaceAgents(document, [], "ws-1");
+		expect(agent).toBeDefined();
+		expect(agent?.deliverable).toBe(false);
+		expect(agent ? isDeliverableWorkspaceAgent(agent, "ws-1") : true).toBe(false);
 	});
 
 	it("preserves non-runtime subagents while unbinding detached runtime agents", () => {

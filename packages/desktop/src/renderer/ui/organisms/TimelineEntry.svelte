@@ -1,14 +1,17 @@
 <script lang="ts">
+  import CheckCircle from "@solar-icons/svelte/linear/check-circle";
+  import DangerCircle from "@solar-icons/svelte/linear/danger-circle";
+  import Stars from "@solar-icons/svelte/linear/stars";
   import type { SessionKind, TimelineImage, TimelineItem, TimelineToolActivity } from "../../../shared/contracts";
   import TimelinePresentation from "./TimelinePresentation.svelte";
-  import { renderMarkdown } from "../../markdown";
+  import MarkdownBody from "../molecules/MarkdownBody.svelte";
 
   export let item: TimelineItem;
   export let kind: SessionKind;
   export let reasoningLoading: Set<string>;
   export let openReasoning: Set<string>;
   export let onReasoning: (item: TimelineItem) => void;
-  export let onFile: (path: string) => void;
+  export let onCopyText: (text: string) => Promise<void>;
   export let showToolDetails = true;
   // Matches the desktop-host hydration cap for thinking records (dehydrateTimelineItem).
   const REASONING_PREVIEW_LIMIT = 64 * 1024;
@@ -146,7 +149,7 @@
             <span class="radar-dot"></span>
           </span>
         {:else}
-          <span class="activity-icon">{item.status === "error" || item.isError ? "!" : "✓"}</span>
+          <span class="activity-icon" aria-hidden="true">{#if item.status === "error" || item.isError}<DangerCircle size={14} />{:else}<CheckCircle size={14} />{/if}</span>
         {/if}
         <strong class="tool-name">{toolLabel(item)}</strong>
         <span class="activity-status" class:status-running={item.status === "running"}>{toolStatus(item)}</span>
@@ -186,23 +189,6 @@
           {/each}
         </div>
       {/if}
-      {#if item.files && item.files.length > 0}
-        <div class="file-change-list" aria-label="Changed files">
-          {#each item.files as file (file.path)}
-            <button
-              type="button"
-              class="file-change"
-              aria-label={`View git diff for ${file.path}`}
-              disabled={item.status !== "complete" || item.isError === true}
-              onclick={() => onFile(file.path)}
-            >
-              <span class="file-operation">{file.operation === "edit" ? "Edited" : "Wrote"}</span>
-              <code title={file.path}>{file.path}</code>
-              <span class="file-diff-action">View diff</span>
-            </button>
-          {/each}
-        </div>
-      {/if}
       {#if item.images && item.images.length > 0}
         <div class="tool-images" aria-label="Generated images">
           {#each item.images as image, index (image.mimeType + ":" + index)}
@@ -219,7 +205,7 @@
     {:else if item.kind === "thinking"}
       <details class="reasoning-details reasoning-card" class:is-running={item.status === "running"} open={openReasoning.has(item.id)}>
         <summary class="reasoning-summary" aria-busy={reasoningLoading.has(item.id) || item.status === "running"} onclick={() => onReasoning(item)}>
-          <span class="reasoning-sparkle" aria-hidden="true">✦</span>
+          <span class="reasoning-sparkle" aria-hidden="true"><Stars size={14} /></span>
           <span class="reasoning-label">Reasoning</span>
           <span class="reasoning-badge-pill" class:is-thinking={item.status === "running"} class:thinking={item.status === "running"}>{formatReasoningTokens(item)}</span>
           {#if item.status === "running"}
@@ -228,7 +214,7 @@
             <span class="reasoning-status-pill error has-error">error</span>
           {/if}
         </summary>
-        {#if item.text.length > REASONING_PREVIEW_LIMIT}<pre class="reasoning-copy">{item.text.slice(0, REASONING_PREVIEW_LIMIT)}{"\n\n[Preview truncated · showing first 64 KiB]"}</pre>{:else}<div class="reasoning-copy">{@html renderMarkdown(item.text)}</div>{/if}
+        {#if item.text.length > REASONING_PREVIEW_LIMIT}<pre class="reasoning-copy">{item.text.slice(0, REASONING_PREVIEW_LIMIT)}{"\n\n[Preview truncated · showing first 64 KiB]"}</pre>{:else}<MarkdownBody value={item.text} streaming={item.status === "running"} className="reasoning-copy" />{/if}
       </details>
     {:else if item.kind === "special"}
       <TimelinePresentation presentation={item.presentation} text={item.text} />
@@ -236,7 +222,16 @@
     {:else if item.kind === "raw"}
       <div class="timeline-special-fallback" aria-label="Unhandled event"><div class="marker-row"><span class="marker-label">LOG</span><span>{item.text}</span></div>{#if item.detail && kind === "code"}<details class="technical-details"><summary>Technical details</summary><pre>{item.detail}</pre></details>{/if}</div>
     {:else}
-      {#if item.text}<div class="message-copy">{@html renderMarkdown(item.text)}{#if item.kind === "assistant" && item.status === "running"}<span class="typing-cursor-blink" aria-hidden="true">▌</span>{/if}</div>{/if}
+      {#if item.text}
+        <MarkdownBody
+          value={item.text}
+          streaming={item.kind === "assistant" && item.status === "running"}
+          showResponseCopy={item.kind === "assistant" && item.status !== "running"}
+          onCopyText={item.kind === "assistant" ? onCopyText : undefined}
+          className="message-copy"
+        />
+        {#if item.kind === "assistant" && item.status === "running"}<span class="typing-cursor-blink" aria-hidden="true">▌</span>{/if}
+      {/if}
       {#if item.kind === "assistant" && item.presentation?.type === "assistant-outcome"}
         <TimelinePresentation presentation={item.presentation} text={item.detail ?? item.text} />
       {/if}

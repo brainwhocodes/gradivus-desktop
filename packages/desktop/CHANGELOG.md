@@ -31,6 +31,7 @@
 - Added per-chat draft ownership: drafts stay with their chat across session switches, are restored on return, and never persist to disk.
 - Added conversation deletion from the session rail with confirmation, active-chat fallback selection, and explicit disclosure that OMP transcript files remain on disk.
 - Added a persistent retry-exhausted workspace error state with a Retry action (`GradivusApi.reconnectRuntime`).
+- Added bounded explicit-language syntax highlighting plus raw Markdown and fenced-code copy actions to completed assistant responses.
 
 ### Changed
 
@@ -38,8 +39,15 @@
 
 - Changed the desktop theme to neutral black/white light and dark surfaces with restrained crimson selected, primary, destructive, error, brand, and inspector accents; green and amber remain semantic notice colors.
 - Changed theme text and state treatment to use AAA contrast across readable surfaces, configured terminal colors, selected states, and required boundaries while preserving live `dark`, `light`, and `system` updates.
-- Changed dark native and renderer neutral layers to the balanced charcoal ramp while preserving semantic colors, focus bands, and light-theme values.
-- Changed ordinary neutral borders and agent swatch outlines to use the shared contrast-balanced `line` role (`#747474` dark / `#858585` light) while retaining secondary borders, semantic boundaries, and focus bands.
+- Changed native and renderer surfaces to a softer Radix-informed gray/crimson ramp for lower-DPI legibility while retaining pure white dark-theme text and pure black light-theme text.
+- Changed ordinary neutral borders and agent swatch outlines to use the shared contrast-balanced `line` role (`#747474` dark / `#7f7f7f` light) while retaining secondary borders, semantic boundaries, and focus bands.
+- Changed the Workspaces sidebar to own the bottom-pinned Settings, About, and direct light/dark controls, replacing duplicate titlebar and chat-header utilities.
+- Changed the Gradivus mark to use the light cream treatment in the titlebar and packaged Windows and macOS app icons.
+- Centered Agent Hub session dialogs within the live chat pane with transcript-first content and opt-in agent details.
+- Changed the browser toolbar to open a dedicated Page Agent Hub from one compact button; it lists only agents created by browser element targeting and remains separate from the chat Agent Hub.
+- Changed Files to a whole-chat tree of successful creations and edits with truthful dispositions, per-turn change summaries, and an in-panel changed-image gallery.
+- Changed composer attachments to use broad document/image icons, render on a full-width shelf above the prompt while the runtime picker, context meter, and Send action stay right-aligned in the composer footer, insert readable references at the caret, and preserve contextual ordering through prompt, steer, follow-up, retry, and oversized spill paths.
+- Changed Agent Hub to use its available viewport height, retain transcript content during refresh, and close on outside clicks or workspace-tab switches.
 - Changed terminal PTYs, terminal output history, browser intent, and capability leases to be owned by one persistent workspace runtime daemon per Electron user-data root; normal desktop shutdown now disconnects presentation only.
 - Changed desktop agent supervision to use an authenticated gRPC bidirectional stream over loopback HTTP/2 instead of child-process stdin/stdout framing.
 - Limited native image generation to OpenAI API and ChatGPT/Codex subscription providers.
@@ -48,18 +56,24 @@
 - Changed OMP chat turn tracking to reconcile prompt acknowledgements, asynchronous prompt results, local commands, steering, follow-ups, and background completions per session.
 
 - Changed transcript history to render semantic, accessible system, IRC, advisor, activity, context, execution, and assistant-outcome entries, with severity-aware extension notifications.
-- Changed the chat terminal drawer to a single composer-controlled shell surface with persistent PTY state, native terminal styling, and configured font/cursor/scrollback options.
+- Changed the chat terminal drawer to select WTerm's DOM renderer with libghostty WebAssembly on Windows while retaining Ghostty Web on macOS and Linux, behind a shared lifecycle boundary that preserves PTY state.
 
+### Fixed
+
+- Fixed the Thinking selector in Runtime settings rendering as an unbounded text control instead of matching the aligned Provider and Model dropdowns.
+- Fixed Page Agent DOM targeting sending serialized element content; DOM mode now sends only the selector, page URL, and minimal routing metadata so the agent traverses the live page itself.
+- Fixed canonical user transcript reconciliation exposing expanded attachment envelopes and temporary filesystem paths instead of the authored attachment references.
+- Fixed browser element targeting requiring a preselected chat or workspace agent and losing its active latch to an idle workspace snapshot during setup; the target tool now provisions a hidden, session-authorized Page Agent automatically.
 - Fixed extension requests arriving while another chat is active being lost silently; pending requests now replay when returning to the originating chat.
 - Fixed shell-level reconnect notices, disconnects, and browser action errors never rendering; retry exhaustion now shows a persistent recoverable error instead of silence.
 - Fixed large reasoning disclosures implying a full record loads; previews disclose their 64 KiB bound and no longer double-truncate hydrated records.
 - Fixed Send, Steer, Queue, Enter, and attachment staging acting against non-composable or stale-session chats; one authoritative admission predicate guards controls and handlers.
-- Fixed successful steer and queue attachment batches being retained until teardown; they now release at admission acknowledgement and empty stores remove their temp directory.
+- Fixed successful steer and follow-up attachment batches being released before queued consumers could read them; leases now survive admission and release at turn completion.
 - Fixed the Default root directory setting having no effect on new-workspace creation; it now seeds the folder picker after validation.
 - Fixed auth provider discovery failures presenting a synthetic available provider; failures now show an explicit unavailable state with actionable copy and no sign-in affordance.
 - Fixed the desktop unit suite failing to complete: unified tests on Vitest with bounded workers and removed an inspector wait busy-loop that starved workers.
 
-### Fixed- Fixed RPC startup and reconnect ownership so dead children cannot publish ready, connect startup remains cancelable, and reconnect candidates close transactionally.
+- Fixed RPC startup and reconnect ownership so dead children cannot publish ready, connect startup remains cancelable, and reconnect candidates close transactionally.
 - Fixed packaged Electron journeys to launch the fused application through its DevTools endpoint without weakening production inspector fuses.
 - Fixed ordinary optimistic chat turns to reconcile one canonical user item and isolate composer attachments across successful new-session creation.
 - Fixed element-selection cancellation with generation-safe stale-result guards, transactional browser close behavior, and closed-pane cleanup.
@@ -88,7 +102,10 @@
 - Fixed live timeline updates stealing a manually scrolled viewport or entering a threshold dead zone while follow is paused.
 - Fixed browser element inspection to preserve native surface bounds, prefer the click-time target over stale hover state, and use translucent theme-aware page highlights.
 - Fixed BrowserView inspector cards, controls, queue dock, and state highlights following the shared dark/light theme palette instead of retaining stale dark-only colors.
+- Fixed the BrowserView multi-agent selection cursor by replacing the unreliable SVG CSS cursor with a DOM-tracked crosshair labeled and colored for the selected workspace agent.
 - Fixed OMP Chat composer, modal, responsive rail, terminal, eyebrow, and toast styling regressions to use the semantic token contract and remain visible at compact sizes.
+
+- Fixed modal backdrop dismissal to use a semantic labeled control instead of a static element click handler.
 
 ### Removed
 

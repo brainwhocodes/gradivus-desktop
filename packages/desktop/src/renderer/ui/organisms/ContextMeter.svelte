@@ -1,4 +1,5 @@
 <script lang="ts">
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import IconButton from "../molecules/IconButton.svelte";
 
 	interface Props {
@@ -74,7 +75,7 @@
 		<div id={panelId} class="context-popover" role="dialog" aria-label="Context window information">
 			<header class="context-popover-header">
 				<strong>Context Window</strong>
-				<IconButton class="context-popover-close" glyph="×" label="Close context details" onclick={() => close()} />
+				<IconButton class="context-popover-close" icon={CloseCircle} size={15} label="Close context details" onclick={() => close()} />
 			</header>
 
 			<div class="context-popover-body">

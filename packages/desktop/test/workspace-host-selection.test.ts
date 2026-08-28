@@ -213,6 +213,61 @@ describe("WorkspaceHost generation-safe selection lifecycle", () => {
 		await Promise.resolve();
 	});
 
+	it("delivers runtime Page Agent targets as live selector references without serialized DOM", async () => {
+		const { host, document } = createHost();
+		document.agents = [{ id: "agent", profileId: "profile", sessionId: "session", status: "running" }];
+		const deliveredCommands: unknown[] = [];
+		const executeCommandWithRetry = vi.fn(
+			async (createCommand: (currentDocument: WorkspaceDocumentV1) => unknown) => {
+				deliveredCommands.push(createCommand(document));
+				return { status: "accepted", document };
+			},
+		);
+		host.setClient({ isConnected: true, document, executeCommandWithRetry } as never);
+		let pendingAction = true;
+		electronMocks.executeJavaScript.mockImplementation(async script => {
+			if (typeof script !== "string") return null;
+			if (
+				script.startsWith("window.__gradivus_inspector_finish__") ||
+				script.startsWith("window.__gradivus_inspector_cleanup__")
+			) {
+				return true;
+			}
+			if (script.startsWith("window.__gradivus_inspector_wait_for_action__")) return { closed: true };
+			if (!pendingAction) return null;
+			pendingAction = false;
+			return {
+				selector: "#runtime-target",
+				tagName: "button",
+				outerHTML: '<button id="runtime-target">SERIALIZED_RUNTIME_NODE_SHOULD_NOT_LEAVE_PAGE</button>',
+				instruction: "Inspect the live target",
+				action: "chat",
+				captureMode: "dom",
+				bounds: { x: 10, y: 20, width: 100, height: 40 },
+			};
+		});
+
+		await host.startSelection(createScope());
+		await vi.waitFor(() => expect(executeCommandWithRetry).toHaveBeenCalled());
+
+		const delivered = deliveredCommands[0];
+		expect(delivered).toMatchObject({
+			type: "agent.message",
+			payload: {
+				selector: "#runtime-target",
+				url: expect.stringContaining("https://omp.sh"),
+			},
+		});
+		expect(delivered).not.toHaveProperty("payload.domSnapshot");
+		expect(delivered).toHaveProperty("payload.message", expect.stringContaining("#runtime-target"));
+		expect(delivered).not.toHaveProperty("payload.domHtml");
+		expect(delivered).not.toHaveProperty("payload.outerHTML");
+		expect(delivered).not.toHaveProperty(
+			"payload.message",
+			expect.stringContaining("SERIALIZED_RUNTIME_NODE_SHOULD_NOT_LEAVE_PAGE"),
+		);
+	});
+
 	it("preserves selection on rejected close and ends it after an accepted retry", async () => {
 		const { host, document } = createHost();
 		const rejectedClient = {

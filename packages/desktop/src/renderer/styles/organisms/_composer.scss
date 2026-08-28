@@ -15,13 +15,11 @@
 
 .composer-top-bar {
 	grid-area: top;
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--space-2);
+	display: grid;
+	align-items: start;
+	gap: var(--space-1);
 	min-width: 0;
-	min-height: 0;
-	overflow: hidden;
+	overflow: visible;
 	padding: var(--space-1) var(--space-2) 0;
 }
 
@@ -65,7 +63,8 @@
 }
 
 
-.model-select-item {
+.model-select-item,
+.thinking-select {
 	display: inline-flex;
 	align-items: center;
 	gap: 5px;
@@ -74,23 +73,24 @@
 	color: var(--foreground);
 	font-size: 12px;
 
-	.select-title {
+	.select-title,
+	.thinking-label {
+		flex-shrink: 0;
 		color: var(--foreground-muted);
 		font-family: var(--font-mono);
 		font-size: 12px;
 		font-weight: 700;
-		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		flex-shrink: 0;
+		text-transform: uppercase;
 	}
 
 	.custom-dropdown-trigger {
-		min-height: 24px;
 		height: 24px;
+		min-height: 24px;
+		border-radius: var(--radius-small);
 		padding: 0 6px;
 		font-size: 12px;
 		font-weight: 600;
-		border-radius: var(--radius-small);
 	}
 }
 
@@ -250,13 +250,16 @@
 
 .runtime-picker-controls .model-select-item,
 .runtime-picker-controls .thinking-select {
-	justify-content: space-between;
+	display: grid;
+	grid-template-columns: 76px minmax(0, 1fr);
+	align-items: center;
+	gap: var(--space-2);
 	width: 100%;
 }
 
 .runtime-picker-controls .model-select-item .custom-dropdown-trigger,
 .runtime-picker-controls .thinking-select .custom-dropdown-trigger {
-	max-width: 245px;
+	max-width: none;
 }
 
 .composer {
@@ -274,8 +277,8 @@
 	position: relative;
 	min-width: 0;
 	container: composer / inline-size;
-	--composer-textarea-min-height: 64px;
-	--composer-textarea-max-height: 200px;
+	--composer-textarea-min-height: 42px;
+	--composer-textarea-max-height: 160px;
 	--composer-input-padding-block: calc(var(--space-1) + 3px);
 	--composer-input-padding-inline: var(--space-2);
 	--composer-actions-gap: var(--space-2);
@@ -297,8 +300,8 @@
 }
 
 :root[data-density="compact"] .composer {
-	--composer-textarea-min-height: 56px;
-	--composer-textarea-max-height: 176px;
+	--composer-textarea-min-height: 36px;
+	--composer-textarea-max-height: 144px;
 	--composer-input-padding-block: var(--space-1);
 	--composer-input-padding-inline: var(--space-2);
 	--composer-actions-gap: var(--space-1);
@@ -307,15 +310,13 @@
 }
 .composer-attachment-bar {
 	display: flex;
-	flex: 1 1 0%;
+	width: 100%;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: var(--space-1);
 	min-width: 0;
 	max-width: 100%;
-	max-height: 58px;
-	overflow-y: auto;
-	overscroll-behavior: contain;
+	overflow: visible;
 	padding: 2px 0;
 	box-sizing: border-box;
 }
@@ -354,14 +355,13 @@
 
 .attachment-chip-list {
 	display: flex;
+	min-width: 0;
+	max-width: 100%;
 	flex: 1 1 180px;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 5px;
-	min-width: 0;
-	max-width: 100%;
-	max-height: 50px;
-	overflow-y: auto;
+	overflow: visible;
 }
 
 
@@ -459,11 +459,17 @@
 	font-family: var(--font-sans);
 	font-size: 14px;
 	line-height: 1.48;
+	letter-spacing: normal;
 	white-space: pre-wrap;
 	word-break: break-word;
 	overflow: hidden;
 	pointer-events: none;
 	user-select: none;
+
+	.magic-keyword {
+		padding: 0;
+		margin: 0;
+	}
 }
 .composer textarea {
 	min-width: 0;
@@ -480,8 +486,9 @@
 	color: var(--foreground);
 	background: transparent;
 	font-family: var(--font-sans);
-	font-size: 12.5px;
+	font-size: 14px;
 	line-height: 1.48;
+	letter-spacing: normal;
 	position: relative;
 	z-index: 1;
 
@@ -502,6 +509,7 @@
 	flex: 0 0 auto;
 	align-items: flex-end;
 	align-self: end;
+	justify-content: flex-end;
 	gap: var(--composer-actions-gap);
 	margin: 0 var(--composer-actions-margin-inline) 2px;
 	min-width: 0;
@@ -652,39 +660,6 @@
 	}
 }
 
-.thinking-select {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--space-2);
-	min-width: 0;
-	color: var(--foreground);
-	font-size: 12px;
-
-	.thinking-label {
-		color: var(--foreground-muted);
-		font-family: var(--font-mono);
-		font-size: 12px;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		flex-shrink: 0;
-	}
-
-	.custom-dropdown-trigger {
-		height: 24px;
-		min-height: 24px;
-		border: 1px solid transparent;
-		outline: 0;
-		background: transparent;
-		color: var(--foreground-strong);
-		font-family: var(--font-sans);
-		font-size: 12px;
-		font-weight: 600;
-		cursor: pointer;
-		padding: 0;
-		margin: 0;
-	}
-}
 
 // Composer controls respond to the usable composer width, not the viewport.
 @container composer (max-width: 899px) {
@@ -730,37 +705,18 @@
 	}
 }
 
-// Keep the attachment shelf distinct from the controls so the primary action
-// never gets pushed off-canvas in inspector-constrained panes.
+// The attachment shelf renders as its own row above the prompt, so the footer
+// holds only the runtime tools and the action rail at every usable width.
 @container composer (max-width: 680px) {
-	.composer-actions {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		grid-template-areas:
-			"shelf shelf"
-			"tools rail";
-		align-items: center;
-		column-gap: var(--composer-actions-gap);
-		row-gap: var(--space-1);
-	}
-
 	.composer-attachment-bar {
-		grid-area: shelf;
 		width: 100%;
-		flex: none;
 	}
 
 	.composer-tools {
-		grid-area: tools;
-		width: 100%;
+		flex: 0 1 auto;
 		min-width: 0;
 	}
 
-	.composer-action-rail {
-		grid-area: rail;
-		justify-self: end;
-		align-self: end;
-	}
 
 	.runtime-picker-summary {
 		display: none;

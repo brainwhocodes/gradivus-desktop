@@ -1,6 +1,6 @@
 // Semantic tokens: the stable naming contract consumed by components,
-// native surfaces, and e2e/theme-contrast.ts. Computed values are identical
-// to the pre-token-system palettes byte-for-byte.
+// native surfaces, and e2e/theme-contrast.ts. Computed values mirror the
+// shared desktop palette byte-for-byte.
 :root,
 :root[data-theme="dark"] {
 	color-scheme: dark;

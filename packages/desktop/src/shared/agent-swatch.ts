@@ -5,7 +5,7 @@ export const AGENT_SWATCH_PALETTE: readonly string[] = [
 	"#737373",
 	"#808080",
 	"#8a8a8a",
-	"#904c4c",
+	"#924e4e",
 	"#6f6f6f",
 ];
 

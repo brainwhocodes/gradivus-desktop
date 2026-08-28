@@ -2,7 +2,6 @@
 	import { onMount, tick } from "svelte";
 	import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 	import type {
-		GradivusEvent,
 		GradivusSettings,
 		BrowserNavigationAction,
 		BrowserViewState,
@@ -16,9 +15,7 @@
 	import OmpChat from "./OmpChat.svelte";
 	import { reconcileWorkspaceAgents } from "../../agent-projection";
 	import { projectWorkspaceTabs } from "../../workspace-projection";
-	import { getAgentSwatch } from "../../../shared/agent-swatch";
 	import {
-		type AgentProcessStatus,
 		type WorkspaceAgent,
 		type WorkspaceLayout,
 		type WorkspacePane,
@@ -38,14 +35,12 @@
 	let activeWorkspaceId = "";
 	let browserStates = new Map<string, BrowserViewState>();
 	let selectionStatesByPane = new Map<string, ElementEditState>();
-	let selectedAgentIdsByPane = new Map<string, string>();
 	type SelectorLatch = { paneId: string; operationToken: number; selectionId?: string };
 	let selectorLatch: SelectorLatch | undefined;
 	let selectionOperationSequence = 0;
 	let agents: WorkspaceAgent[] = [];
 	let settingsRoute: SettingsRoute = { open: false, activeCategory: "app-appearance", query: "" };
 	let settingsReturnFocus: HTMLElement | undefined;
-	let titleSettingsButton: HTMLButtonElement | undefined;
 	let visibilityWriteQueue: Promise<void> = Promise.resolve();
 	let visibilityRevision = 0;
 	let appSettings: GradivusSettings | undefined;
@@ -67,34 +62,7 @@
 	let maximized = false;
 	let unsubscribeWorkspace: (() => void) | undefined;
 	let unsubscribeWorkspaceDocument: (() => void) | undefined;
-	let unsubscribeEvents: (() => void) | undefined;
 	let unsubscribeSelection: (() => void) | undefined;
-	function deliverableAgentsForWorkspace(): WorkspaceAgent[] {
-		return agents.filter(agent => {
-			const status = String(agent.status).toLowerCase();
-			const isStatusActive = status !== "stopped" && status !== "error" && status !== "failed" && status !== "exited";
-			const matchesWorkspace = !agent.workspaceId || agent.workspaceId === activeWorkspaceId;
-			return isStatusActive && matchesWorkspace && agent.deliverable !== false;
-		});
-	}
-
-	function selectedAgentForPane(paneId: string): WorkspaceAgent | undefined {
-		const selectedId = selectedAgentIdsByPane.get(paneId);
-		return deliverableAgentsForWorkspace().find(agent => agent.id === selectedId);
-	}
-
-	function reconcileSelectedAgentIds(validPaneIds: ReadonlySet<string>): void {
-		const eligibleAgents = deliverableAgentsForWorkspace();
-		const eligibleIds = new Set(eligibleAgents.map(agent => agent.id));
-		const fallbackId = eligibleAgents[0]?.id;
-		const next = new Map<string, string>();
-		for (const paneId of validPaneIds) {
-			const selectedId = selectedAgentIdsByPane.get(paneId);
-			if (selectedId && eligibleIds.has(selectedId)) next.set(paneId, selectedId);
-			else if (fallbackId) next.set(paneId, fallbackId);
-		}
-		selectedAgentIdsByPane = next;
-	}
 
 	function mergeSelectionState(state: ElementEditState): void {
 		const paneId = state.paneId;
@@ -107,9 +75,9 @@
 		const latch = selectorLatch;
 		if (
 			state.phase === "idle" &&
-			latch !== undefined &&
+			latch?.selectionId !== undefined &&
 			latch.paneId === paneId &&
-			(!state.selectionId || !latch.selectionId || latch.selectionId === state.selectionId)
+			(!state.selectionId || latch.selectionId === state.selectionId)
 		) {
 			selectorLatch = undefined;
 		}
@@ -128,9 +96,6 @@
 		unsubscribeWorkspaceDocument = window.gradivus.onWorkspaceDocument(document => {
 			void applyWorkspaceDocument(document);
 		});
-		if (typeof window.gradivus.onEvent === "function") {
-			unsubscribeEvents = window.gradivus.onEvent(handleGradivusEvent);
-		}
 		if (typeof window.gradivus.onSelectionStateChanged === "function") {
 			unsubscribeSelection = window.gradivus.onSelectionStateChanged(mergeSelectionState);
 		}
@@ -290,7 +255,6 @@
 		selectionStatesByPane = new Map(
 			[...selectionStatesByPane].filter(([paneId]) => validPaneIds.has(paneId)),
 		);
-		reconcileSelectedAgentIds(validPaneIds);
 
 		await Promise.all(
 			[...validPaneIds].map(async paneId => {
@@ -313,11 +277,6 @@
 	}
 
 	async function toggleSelectionForPane(paneId: string): Promise<void> {
-		const targetAgent = selectedAgentForPane(paneId);
-		if (!targetAgent) {
-			showNotice("No deliverable workspace agent is available for selection");
-			return;
-		}
 
 		const current = selectorLatch;
 		if (current) {
@@ -332,7 +291,7 @@
 			if (typeof window.gradivus.startSelection !== "function") {
 				throw new Error("Element selection is unavailable");
 			}
-			const result = await window.gradivus.startSelection(paneId, targetAgent.id);
+			const result = await window.gradivus.startSelection(paneId);
 			mergeSelectionState(result);
 			if (!isCurrentSelectionOperation(paneId, operationToken)) return;
 			if (result.selectionId) selectorLatch = { paneId, operationToken, selectionId: result.selectionId };
@@ -359,16 +318,6 @@
 		return operationToken;
 	}
 
-	async function changeSelectionTarget(paneId: string, agentId: string): Promise<void> {
-		const eligible = deliverableAgentsForWorkspace().some(agent => agent.id === agentId);
-		if (!eligible) return;
-		const wasSelecting = selectorLatch?.paneId === paneId;
-		selectedAgentIdsByPane.set(paneId, agentId);
-		selectedAgentIdsByPane = new Map(selectedAgentIdsByPane);
-		if (!wasSelecting) return;
-		await cancelSelectionForPane(paneId);
-		if (selectedAgentIdsByPane.get(paneId) === agentId) await toggleSelectionForPane(paneId);
-	}
 
 	async function runSelectionQueue(paneId: string): Promise<void> {
 		try {
@@ -386,33 +335,6 @@
 		}
 	}
 
-	function handleGradivusEvent(event: GradivusEvent): void {
-		if (event.type !== "subagents") return;
-		const incomingIds = new Set((event.subagents ?? []).map(sub => sub.id));
-		const preservedAgents = agents.filter(
-			agent => !agent.sessionId || agent.sessionId !== event.sessionId || !incomingIds.has(agent.id),
-		);
-		const newSubagents: WorkspaceAgent[] = (event.subagents ?? []).map(sub => {
-			const status = (sub.status || "ready") as AgentProcessStatus;
-			const existing = agents.find(a => a.id === sub.id);
-			return {
-				id: sub.id,
-				name: existing?.name || (sub.agent ? `${sub.agent.charAt(0).toUpperCase() + sub.agent.slice(1)} Agent` : sub.id),
-				agent: sub.agent || existing?.agent || "task",
-				status,
-				swatch: existing?.swatch || getAgentSwatch(sub.id),
-				workspaceId: activeWorkspaceId,
-				sessionId: event.sessionId,
-				deliverable: true,
-				task: sub.task ?? existing?.task,
-				assignment: sub.assignment ?? existing?.assignment,
-				lastIntent: sub.progress?.lastIntent ?? existing?.lastIntent,
-				currentTool: sub.progress?.currentTool ?? existing?.currentTool,
-			};
-		});
-		agents = [...preservedAgents, ...newSubagents];
-		reconcileSelectedAgentIds(new Set(browserTabs.flatMap(tab => tab.panes.map(pane => pane.id))));
-	}
 
 
 	function activateChat(): void {
@@ -476,9 +398,6 @@
 		void syncVisibleBrowsers();
 	}
 
-	function openApplicationSettings(): void {
-		if (titleSettingsButton) openSettings("app-appearance", titleSettingsButton);
-	}
 
 	function updateSettingsRoute(updates: Partial<Pick<SettingsRoute, "activeCategory" | "query">>): void {
 		settingsRoute = { ...settingsRoute, ...updates };
@@ -489,8 +408,8 @@
 		settingsRoute = { ...settingsRoute, open: false };
 		void syncVisibleBrowsers();
 		void tick().then(() => {
-			const target = isFocusableTrigger(settingsReturnFocus) ? settingsReturnFocus : titleSettingsButton;
-			if (isFocusableTrigger(target)) target?.focus();
+			const target = isFocusableTrigger(settingsReturnFocus) ? settingsReturnFocus : undefined;
+			if (target) target.focus();
 			else document.querySelector<HTMLElement>(".workspace-tab.is-active")?.focus();
 			settingsReturnFocus = undefined;
 		});
@@ -577,6 +496,11 @@
 			if (tab) activatePane(tab, event.paneId);
 		} else if (event.type === "browser-new-window") {
 			void addBrowserTab(event.url);
+		} else if (event.type === "pane-context-action") {
+			const tab = browserTabs.find(item => item.panes.some(pane => pane.id === event.paneId));
+			if (!tab) return;
+			if (event.action === "close") void closeBrowserPane(tab, event.paneId);
+			else void splitBrowser(tab, event.paneId, event.action === "split-columns" ? "columns" : "rows");
 		} else if (event.type === "selection-state") {
 			mergeSelectionState(event.state);
 		} else if (event.type === "connection-state") {
@@ -664,6 +588,7 @@
 			}
 			return;
 		}
+		if (document.querySelector("dialog[open]")) return;
 		if (event.key === "Escape" && selectorLatch) {
 			event.preventDefault();
 			void cancelSelectionForPane(selectorLatch.paneId);
@@ -696,13 +621,10 @@
 <div class="workspace-app">
 	<WorkspaceShell
 		maximized={maximized}
-		settingsOpen={settingsRoute.open}
 		hydrated={hydrated}
 		activeTabId={activeTabId}
 		chatTabId={CHAT_TAB_ID}
 		browserTabs={browserTabs}
-		titleSettingsRef={(node) => { titleSettingsButton = node; }}
-		ontogglesettings={() => settingsRoute.open ? closeSettings() : openApplicationSettings()}
 		onminimize={minimizeWindow}
 		ontogglemaximize={() => void toggleMaximizeWindow()}
 		onclose={closeWindow}
@@ -743,8 +665,8 @@
 						{#each tab.panes as pane (pane.id)}
 							{@const state = browserStates.get(pane.id)}
 							{@const selectionState = selectionStatesByPane.get(pane.id)}
-							{@const selectedAgentId = selectedAgentIdsByPane.get(pane.id)}
-							{@const isSelecting = selectorLatch?.paneId === pane.id}
+							{@const selectionPending = selectorLatch?.paneId === pane.id && !selectorLatch.selectionId}
+							{@const isSelecting = selectorLatch?.paneId === pane.id && Boolean(selectorLatch.selectionId)}
 							<BrowserPane
 								pane={pane}
 								tabId={tab.id}
@@ -755,14 +677,13 @@
 								browserState={state}
 								selectionState={selectionState}
 								agents={agents}
-								selectedAgentId={selectedAgentId}
 								isSelecting={isSelecting}
+								selectionPending={selectionPending}
 								defaultUrl={DEFAULT_BROWSER_URL}
 								onactivate={() => activatePane(tab, pane.id)}
 								onnavigate={(address) => void navigateBrowser(pane.id, address)}
 								oncontrol={(action) => controlBrowser(pane.id, action)}
 								ontoggleselection={() => void toggleSelectionForPane(pane.id)}
-								onagentchange={(agentId) => void changeSelectionTarget(pane.id, agentId)}
 								onrunqueue={() => void runSelectionQueue(pane.id)}
 								onclearqueue={() => void clearSelectionQueue(pane.id)}
 								onsplit={(layout) => void splitBrowser(tab, pane.id, layout)}

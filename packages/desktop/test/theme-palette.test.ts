@@ -82,29 +82,29 @@ describe("desktop theme palette", () => {
 		expect(resolveTheme("system", true)).toBe("dark");
 	});
 
-	it("keeps the exact neutral native canvases and default foregrounds", () => {
+	it("keeps softened neutral canvases with explicit white and black foregrounds", () => {
 		const dark = DESKTOP_THEME_PALETTES.dark;
 		const light = DESKTOP_THEME_PALETTES.light;
 		const exactRoles = [
-			["windowBackground", "#0d0d0d", "#ffffff"],
-			["browserBackground", "#0d0d0d", "#ffffff"],
-			["shell", "#141414", "#fafafa"],
-			["shellRaised", "#1c1c1c", "#ffffff"],
-			["shellHover", "#292929", "#f2f2f2"],
-			["chatCanvas", "#101010", "#ffffff"],
-			["codeSurface", "#181818", "#f5f5f5"],
+			["windowBackground", "#111111", "#ffffff"],
+			["browserBackground", "#111111", "#ffffff"],
+			["shell", "#191919", "#f9f9f9"],
+			["shellRaised", "#202020", "#ffffff"],
+			["shellHover", "#2a2a2a", "#f0f0f0"],
+			["chatCanvas", "#141414", "#ffffff"],
+			["codeSurface", "#1c1c1c", "#f7f7f7"],
 			["foreground", "#ffffff", "#000000"],
 			["foregroundStrong", "#ffffff", "#000000"],
-			["foregroundMuted", "#d1d1d1", "#333333"],
-			["foregroundDisabled", "#b6b6b6", "#4b4b4b"],
-			["line", "#747474", "#858585"],
+			["foregroundMuted", "#d6d6d6", "#333333"],
+			["foregroundDisabled", "#bcbcbc", "#494949"],
+			["line", "#747474", "#7f7f7f"],
 			["lineSoft", "#454545", "#d4d4d4"],
 		] as const;
 		for (const [role, darkExpected, lightExpected] of exactRoles) {
 			expectPaletteValue(dark, "dark", role, darkExpected);
 			expectPaletteValue(light, "light", role, lightExpected);
 		}
-		expect(dark.terminal.background).toBe("#0d0d0d");
+		expect(dark.terminal.background).toBe("#111111");
 		expect(light.terminal.background).toBe("#ffffff");
 		expect(dark.terminal.foreground).toBe("#ffffff");
 		expect(dark.terminal.cursor).toBe("#ffffff");
@@ -224,9 +224,9 @@ describe("desktop theme palette", () => {
 			for (const role of achromaticRoles) {
 				expect(isAchromatic(palette[role]), `${theme}: ${role} must be achromatic`).toBe(true);
 			}
-			expect(palette.accent).toBe("#7f1d1d");
-			expect(palette.accentHover).toMatch(/^#(?:991b1b|641414)$/);
-			expect(palette.danger).toBe("#7f1d1d");
+			expect(palette.accent).toBe("#843a3f");
+			expect(palette.accentHover).toMatch(/^#(?:8c3f44|733136)$/);
+			expect(palette.danger).toBe("#843a3f");
 			expect(palette.success).toBe("#14532d");
 			expect(palette.warning).toBe("#5f3700");
 		}
@@ -235,13 +235,13 @@ describe("desktop theme palette", () => {
 	it("retains the raw dark-theme contrast diagnostics", () => {
 		const palette = DESKTOP_THEME_PALETTES.dark;
 		const diagnostics = [
-			["white text", palette.foreground, palette.shellHover, 14.55],
-			["muted text", palette.foregroundMuted, palette.shellHover, 9.53],
-			["disabled text", palette.foregroundDisabled, palette.shellHover, 7.17],
-			["required line", palette.line, palette.shellHover, 3.11],
-			["crimson boundary", palette.accentBoundary, palette.shellHover, 4.14],
-			["success boundary", palette.successBoundary, palette.shellHover, 8.24],
-			["warning boundary", palette.warningBoundary, palette.shellHover, 10.35],
+			["white text", palette.foreground, palette.shellHover, 14.35],
+			["muted text", palette.foregroundMuted, palette.shellHover, 9.88],
+			["disabled text", palette.foregroundDisabled, palette.shellHover, 7.56],
+			["required line", palette.line, palette.shellHover, 3.07],
+			["crimson boundary", palette.accentBoundary, palette.shellHover, 5.88],
+			["success boundary", palette.successBoundary, palette.shellHover, 8.13],
+			["warning boundary", palette.warningBoundary, palette.shellHover, 10.21],
 		] as const;
 		for (const [label, first, second, expected] of diagnostics) {
 			expect(contrastRatio(first, second), label).toBeCloseTo(expected, 2);
@@ -251,7 +251,7 @@ describe("desktop theme palette", () => {
 			.filter(([role]) => role !== "background" && role !== "cursorAccent" && role !== "selectionBackground")
 			.map(([, color]) => color);
 		const ansiWorst = Math.min(...ansiForegrounds.map(color => contrastRatio(color, palette.terminal.background)));
-		expect(ansiWorst, "configured ANSI foreground worst").toBeCloseTo(8.26, 2);
+		expect(ansiWorst, "configured ANSI foreground worst").toBeCloseTo(7.74, 2);
 	});
 
 	it("keeps every configured agent swatch at least 3:1 on both dark and light canvases", () => {
@@ -261,7 +261,7 @@ describe("desktop theme palette", () => {
 		}
 		expect(swatches.size).toBe(8);
 		for (const swatch of swatches) {
-			expectContrast("dark", "agent swatch", swatch, "dark canvas", "#0d0d0d", 3);
+			expectContrast("dark", "agent swatch", swatch, "dark canvas", "#111111", 3);
 			expectContrast("light", "agent swatch", swatch, "light canvas", "#ffffff", 3);
 		}
 	});

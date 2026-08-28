@@ -1,5 +1,12 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
-import type { TimelineFileChange, TimelineImage, TimelineItem, TimelineToolActivity } from "../shared/contracts";
+import type {
+	FileChangeDisposition,
+	TimelineFileChange,
+	TimelineImage,
+	TimelineItem,
+	TimelineToolActivity,
+} from "../shared/contracts";
+import { promptAttachmentDisplayText } from "./prompt-attachments";
 import { presentAssistantOutcome, presentEvent, presentMessage, stableMessageKey } from "./transcript-presentation";
 
 export class TranscriptStore {
@@ -31,6 +38,20 @@ export class TranscriptStore {
 	find(id: string): TimelineItem | undefined {
 		const item = this.#items.find(candidate => candidate.id === id);
 		return item ? { ...item } : undefined;
+	}
+
+	setWriteDisposition(toolCallId: string, disposition: FileChangeDisposition): TimelineItem | undefined {
+		const item = this.#toolById.get(toolCallId);
+		if (!item?.files) return undefined;
+		let changed = false;
+		const files = item.files.map(file => {
+			if (file.operation !== "write" || file.disposition === disposition) return file;
+			changed = true;
+			return { ...file, disposition };
+		});
+		if (!changed) return { ...item };
+		item.files = files;
+		return { ...item };
 	}
 
 	apply(event: unknown): TimelineItem | undefined {
@@ -216,7 +237,7 @@ export class TranscriptStore {
 		const projection = presentMessage(message);
 		if (projection.hidden) return [];
 		const key = stableMessageKey(message);
-		const text = projection.text;
+		const text = role === "user" ? promptAttachmentDisplayText(projection.text) : projection.text;
 		const content = Array.isArray(message.content) ? message.content : [];
 		const thinkingParts: string[] = [];
 		const toolCalls: Record<string, unknown>[] = [];

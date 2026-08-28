@@ -3,7 +3,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type BrowserWindow, dialog } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GradivusEvent, ProcessState, SessionRecordV1, TimelineItem } from "../src/shared/contracts";
+import type {
+	GradivusEvent,
+	ProcessState,
+	PromptCompositionPart,
+	SessionRecordV1,
+	TimelineItem,
+} from "../src/shared/contracts";
+
+function composition(...parts: PromptCompositionPart[]) {
+	return { parts };
+}
 
 interface MockTurnMetrics {
 	durationMs: number;
@@ -520,7 +530,7 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 
 		// 2. Dispatch user prompt
 		const promptText = "Please inspect packages/desktop/src/main.ts and describe what it exports";
-		await host.prompt(sessionId, promptText);
+		await host.prompt(sessionId, composition({ type: "text", text: promptText }));
 
 		expect(simulationResult).toBeDefined();
 		expect(simulationResult?.assembledDeltas).toBe(
@@ -605,7 +615,7 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 			});
 		});
 
-		await host.prompt(sessionId, "Read nonexistent.ts");
+		await host.prompt(sessionId, composition({ type: "text", text: "Read nonexistent.ts" }));
 
 		const page = await host.loadTimelinePage(sessionId, 100, 50);
 		const toolItem = page.items.find(item => item.toolCallId === "tool-fail-1");
@@ -648,13 +658,13 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 		});
 
 		// Turn 1
-		await host.prompt(sessionId, "First question");
+		await host.prompt(sessionId, composition({ type: "text", text: "First question" }));
 		let page = await host.loadTimelinePage(sessionId, 100, 50);
 		expect(page.items.filter(i => i.kind === "user")).toHaveLength(1);
 		expect(page.items.filter(i => i.kind === "assistant")).toHaveLength(1);
 
 		// Turn 2
-		await host.prompt(sessionId, "Second question");
+		await host.prompt(sessionId, composition({ type: "text", text: "Second question" }));
 		page = await host.loadTimelinePage(sessionId, 100, 50);
 		expect(page.items.filter(i => i.kind === "user")).toHaveLength(2);
 		expect(page.items.filter(i => i.kind === "assistant")).toHaveLength(2);
@@ -686,7 +696,7 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 			});
 		});
 
-		await host.prompt(sessionId, "Think deeply about this");
+		await host.prompt(sessionId, composition({ type: "text", text: "Think deeply about this" }));
 
 		const page = await host.loadTimelinePage(sessionId, 100, 50);
 		const thinkingItem = page.items.find(i => i.kind === "thinking");
@@ -713,7 +723,7 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 				assistantDeltas: ["Done"],
 			});
 		});
-		await host.prompt("session-alpha", "Ping");
+		await host.prompt("session-alpha", composition({ type: "text", text: "Ping" }));
 
 		// Clean teardown
 		await host.close();

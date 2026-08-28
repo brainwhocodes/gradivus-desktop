@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onDestroy, tick } from "svelte";
+	import AltArrowDown from "@solar-icons/svelte/linear/alt-arrow-down";
+	import CheckRead from "@solar-icons/svelte/linear/check-read";
 	import type { DropdownOption } from "../../settings-types";
 
 	type DropdownMode = "listbox" | "menu";
@@ -552,7 +554,7 @@
 		{#if internallyBusy || busy}
 			<span class="custom-dropdown-progress" aria-hidden="true"></span>
 		{:else}
-			<span class="custom-dropdown-chevron" aria-hidden="true">▾</span>
+			<span class="custom-dropdown-chevron" aria-hidden="true"><AltArrowDown size={14} /></span>
 		{/if}
 	</button>
 
@@ -598,7 +600,7 @@
 					onclick={() => choose(option)}
 					onkeydown={(event) => handleOptionKeydown(event, option)}
 				>
-					<span class="custom-dropdown-choice" aria-hidden="true">{isSelected ? "✓" : ""}</span>
+					<span class="custom-dropdown-choice" aria-hidden="true">{#if isSelected}<CheckRead size={14} />{/if}</span>
 					{#if option.icon}
 						<span class="custom-dropdown-icon" aria-hidden="true">{option.icon}</span>
 					{/if}

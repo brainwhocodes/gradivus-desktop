@@ -177,8 +177,8 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 		host.syncWithDocument(doc);
 		host.updateTheme();
 
-		expect(mockSetWindowBackgroundColor).toHaveBeenLastCalledWith("#0d0d0d");
-		expect(mockSetBackgroundColor.mock.calls.slice(-2)).toEqual([["#0d0d0d"], ["#0d0d0d"]]);
+		expect(mockSetWindowBackgroundColor).toHaveBeenLastCalledWith("#111111");
+		expect(mockSetBackgroundColor.mock.calls.slice(-2)).toEqual([["#111111"], ["#111111"]]);
 		store.settings.theme = "light";
 		host.updateTheme();
 		expect(mockSetWindowBackgroundColor).toHaveBeenLastCalledWith("#ffffff");
@@ -291,7 +291,7 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 					selector: "#target",
 					tagName: "button",
 					text: "Target",
-					outerHTML: '<button id="target">Target</button>',
+					outerHTML: '<button id="target">SERIALIZED_NODE_SHOULD_NOT_LEAVE_PAGE</button>',
 					instruction: "Inspect this target",
 					action: "chat",
 					captureMode: "screenshot",
@@ -311,6 +311,13 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 		const view = mockViewInstances[0];
 		expect(view).toBeDefined();
 		host.setBrowserBounds("pane-browser-1", { x: 40, y: 30, width: 800, height: 600 });
+		const deliverElementPrompt = vi.fn(
+			async (_promptText: string, _sessionId: string, _deliveryOptions: unknown) => undefined,
+		);
+		host.setDesktopHost({
+			resolveChatSessionForBrowserAgent: vi.fn((sessionId: string) => sessionId),
+			deliverElementPrompt,
+		} as never);
 		await host.startSelection({
 			principalId: "principal",
 			workspaceId: "ws_1",
@@ -323,6 +330,7 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			sessionId: "session",
 		});
 		await vi.waitFor(() => expect(mockCapturePage).toHaveBeenCalled());
+		await vi.waitFor(() => expect(deliverElementPrompt).toHaveBeenCalled());
 		expect(
 			mockExecuteJavaScript.mock.calls.some(
 				([script]) =>
@@ -335,6 +343,20 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 		expect(mockSetBounds).toHaveBeenLastCalledWith({ x: 60, y: 45, width: 1200, height: 900 });
 		expect(events.indexOf("hide")).toBeLessThan(events.indexOf("capture"));
 		expect(events.indexOf("capture")).toBeLessThan(events.indexOf("restore"));
+		const [promptText, , deliveryOptions] = deliverElementPrompt.mock.calls[0]!;
+		expect(promptText).toContain("https://omp.sh");
+		expect(promptText).toContain("#target");
+		expect(promptText).not.toContain("SERIALIZED_NODE_SHOULD_NOT_LEAVE_PAGE");
+		expect(deliveryOptions).toMatchObject({
+			selector: "#target",
+			captureMode: "screenshot",
+			screenshot: {
+				base64: Buffer.from("jpeg-bytes").toString("base64"),
+				mimeType: "image/jpeg",
+				width: 40,
+				height: 20,
+			},
+		});
 	});
 
 	it("notifies an active inspector overlay without canceling it", () => {
@@ -453,10 +475,11 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 
 		const snapshot = host.getSelectionState(paneId);
 		snapshot.queuedTasks![0]!.targetAgentName = "mutated";
-		snapshot.queuedTasks![0]!.domSnapshot!.attributes!.id = "mutated";
+		expect(snapshot.queuedTasks?.[0]).not.toHaveProperty("domHtml");
+		expect(snapshot.queuedTasks?.[0]).not.toHaveProperty("domSnapshot");
+		expect(snapshot.queuedTasks?.[0]).not.toHaveProperty("summary");
 		const unchanged = host.getSelectionState(paneId);
 		expect(unchanged.queuedTasks?.[0]?.targetAgentName).toBe(targetA.name);
-		expect(unchanged.queuedTasks?.[0]?.domSnapshot?.attributes?.id).toBe("first");
 
 		const completed = await host.runQueuedTasks(paneId);
 		expect(completed.queuedTasks?.map(task => task.status)).toEqual(["completed", "error"]);
@@ -466,6 +489,11 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			"session-agent-a",
 			"session-agent-b",
 		]);
+		const [firstPrompt] = executeInlinePrompt.mock.calls[0]!;
+		expect(firstPrompt).toContain("https://omp.sh");
+		expect(firstPrompt).toContain("#first");
+		expect(firstPrompt).not.toContain('<button id="first">First</button>');
+		expect(firstPrompt).not.toContain("Element DOM snippet");
 
 		const cleared = await host.clearQueuedTasks(paneId);
 		expect(cleared.queuedTasks).toEqual([]);

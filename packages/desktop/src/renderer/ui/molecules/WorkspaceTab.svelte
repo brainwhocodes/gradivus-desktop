@@ -1,6 +1,8 @@
 <script lang="ts">
 	import type { Component } from "svelte";
 	import type { SVGAttributes } from "svelte/elements";
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
+	import Stars from "@solar-icons/svelte/linear/stars";
 
 	type IconComponent = Component<SVGAttributes<SVGSVGElement> & { size?: number | string }>;
 
@@ -15,7 +17,8 @@
 		pill?: string;
 	}
 
-let { variant, active, title, onactivate, onclose, glyph = "✦", icon, pill, ...rest }: Props = $props();
+let { variant, active, title, onactivate, onclose, glyph, icon, pill, ...rest }: Props = $props();
+const DefaultChatIcon = Stars;
 
 	function handleKeydown(event: KeyboardEvent) {
 		if (event.key === "Enter" || event.key === " ") {
@@ -34,7 +37,14 @@ let { variant, active, title, onactivate, onclose, glyph = "✦", icon, pill, ..
 		onclick={onactivate}
 		{...rest}
 	>
-		<span class="chat-glyph" aria-hidden="true">{glyph}</span>
+		<span class="chat-glyph" aria-hidden="true">
+			{#if icon}
+				{@const Icon = icon}
+				<Icon size={14} />
+			{:else}
+				<DefaultChatIcon size={14} />
+			{/if}
+		</span>
 		{title}
 		{#if pill}<span class="runtime-pill">{pill}</span>{/if}
 	</button>
@@ -63,7 +73,7 @@ let { variant, active, title, onactivate, onclose, glyph = "✦", icon, pill, ..
 					event.stopPropagation();
 					onclose?.();
 				}}
-			>×</span>
+			><CloseCircle size={14} /></span>
 		{/if}
 	</div>
 {/if}

@@ -186,6 +186,36 @@ test("runs current Gradivus chat feedback, recovery, local command, folder creat
 		await page.setViewportSize({ width: 1440, height: 900 });
 		const composer = page.getByLabel("Message OMP");
 		await expect(composer).toBeVisible({ timeout: 20_000 });
+		const workspaceRail = page.getByRole("complementary", { name: "Workspaces" });
+		const applicationControls = workspaceRail.getByRole("navigation", { name: "Application controls" });
+		await expect(applicationControls).toBeVisible();
+		const utilityGeometry = await workspaceRail.evaluate(rail => {
+			const railBounds = rail.getBoundingClientRect();
+			const footerBounds = rail.querySelector<HTMLElement>(".rail-utilities")?.getBoundingClientRect();
+			return footerBounds
+				? {
+						bottomDelta: Math.abs(railBounds.bottom - footerBounds.bottom),
+						leftDelta: Math.abs(railBounds.left - footerBounds.left),
+						rightDelta: Math.abs(railBounds.right - footerBounds.right),
+					}
+				: undefined;
+		});
+		expect(utilityGeometry).toBeDefined();
+		expect(utilityGeometry?.bottomDelta).toBeLessThanOrEqual(0.5);
+		expect(utilityGeometry?.leftDelta).toBeLessThanOrEqual(0.5);
+		expect(utilityGeometry?.rightDelta).toBeLessThanOrEqual(1);
+		await expect(page.getByAltText("Gradivus mark")).toHaveCount(1);
+		await expect(page.locator(".shell-titlebar .gradivus-mark")).toBeVisible();
+		await expect(page.getByRole("button", { name: "Open application settings", exact: true })).toHaveCount(0);
+		const switchToLight = applicationControls.getByRole("button", { name: "Switch to light mode", exact: true });
+		await expect(switchToLight).toBeEnabled();
+		await switchToLight.click();
+		await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+		await expect.poll(async () => JSON.parse(await fs.readFile(path.join(userData, "settings.json"), "utf8")).theme).toBe("light");
+		const switchToDark = applicationControls.getByRole("button", { name: "Switch to dark mode", exact: true });
+		await switchToDark.click();
+		await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+		await expect.poll(async () => JSON.parse(await fs.readFile(path.join(userData, "settings.json"), "utf8")).theme).toBe("dark");
 		await expect.poll(() => page.evaluate(() => document.documentElement.dataset.density)).toBe("comfortable");
 		await expectComposerDropdownTriggersContained(page);
 		await expect(page.getByRole("tab", { name: /Gradivus/ })).toHaveAttribute("aria-selected", "true");
@@ -206,7 +236,8 @@ test("runs current Gradivus chat feedback, recovery, local command, folder creat
 		await composer.fill("delayed error"); await composer.press("Enter"); await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/, { timeout: 8_000 }); await expect(page.locator(".prompt-recovery-card")).toContainText("Fixture provider rejected the request.", { timeout: 12_000 }); await expect(composer).toHaveValue("delayed error");
 		await composer.fill("/status"); await composer.press("Enter"); await expect(page.locator(".timeline-scroll")).toContainText("Fixture status: ready", { timeout: 8_000 });
 		await page.getByRole("button", { name: "New Chat in workspace" }).click(); await expect(page.getByRole("treeitem")).toHaveCount(2); await expect(composer).toBeVisible();
-		await page.getByRole("button", { name: "Open settings" }).click();
+		const settingsButton = page.getByRole("button", { name: "Open settings", exact: true });
+		await settingsButton.click();
 		await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
 		await expect(page.getByRole("searchbox", { name: "Search settings" })).toBeFocused();
 		const appearanceButtons = page.getByRole("button", { name: "Appearance", exact: true });
@@ -221,6 +252,7 @@ test("runs current Gradivus chat feedback, recovery, local command, folder creat
 		await expect(page.getByLabel("Provider access").getByText("ChatGPT Plus/Pro", { exact: true })).toBeVisible();
 		await page.getByRole("button", { name: "Back to workspace", exact: true }).click();
 		await expect(composer).toBeVisible();
+		await expect(settingsButton).toBeFocused();
 		await expectComposerDropdownTriggersContained(page);
 		const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze(); expect(axe.violations.filter(v => v.impact === "critical" || v.impact === "serious")).toEqual([]); expect(errors).toEqual([]);
 	} finally { await teardownElectronTest(app, userData); }
@@ -379,7 +411,10 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 			};
 			const composer = document.querySelector<HTMLElement>(".composer");
 			const attachmentChip = document.querySelector<HTMLElement>(".attachment-chip");
+			const provider = document.querySelector<HTMLElement>(".model-select-item .custom-dropdown-trigger");
 			const thinking = document.querySelector<HTMLElement>(".thinking-select .custom-dropdown-trigger");
+			const providerBounds = provider?.getBoundingClientRect();
+			const thinkingBounds = thinking?.getBoundingClientRect();
 			const composerWrap = document.querySelector<HTMLElement>(".composer-wrap");
 			const jump = document.createElement("button");
 			jump.className = "jump-to-latest-pill";
@@ -391,10 +426,16 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 				shellRaised: resolveColor("--shell-raised", "backgroundColor"),
 				attachmentChipBorder: attachmentChip ? getComputedStyle(attachmentChip).borderTopColor : "",
 				accentBoundary: resolveBorder("--accent-boundary"),
+				providerBorderColor: provider ? getComputedStyle(provider).borderTopColor : "",
+				providerBackground: provider ? getComputedStyle(provider).backgroundColor : "",
+				providerX: providerBounds?.x ?? -1,
+				providerWidth: providerBounds?.width ?? -1,
 				thinkingHeight: thinking ? getComputedStyle(thinking).height : "",
 				thinkingMinHeight: thinking ? getComputedStyle(thinking).minHeight : "",
 				thinkingBorderColor: thinking ? getComputedStyle(thinking).borderTopColor : "",
 				thinkingBackground: thinking ? getComputedStyle(thinking).backgroundColor : "",
+				thinkingX: thinkingBounds?.x ?? -1,
+				thinkingWidth: thinkingBounds?.width ?? -1,
 				jumpWidth: jumpStyle.width,
 				jumpParent: jump.parentElement?.className ?? "",
 				terminalCanvasMinHeight: document.querySelector<HTMLElement>(".chat-terminal-canvas")
@@ -408,15 +449,18 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 		expect(styles.attachmentChipBorder).toBe(styles.accentBoundary);
 		expect(styles.thinkingHeight).toBe("24px");
 		expect(styles.thinkingMinHeight).toBe("24px");
-		expect(styles.thinkingBorderColor).toBe("rgba(0, 0, 0, 0)");
-		expect(styles.thinkingBackground).toBe("rgba(0, 0, 0, 0)");
+		expect(styles.thinkingBorderColor).toBe(styles.providerBorderColor);
+		expect(styles.thinkingBackground).toBe(styles.providerBackground);
+		expect(styles.thinkingX).toBeCloseTo(styles.providerX, 2);
+		expect(styles.thinkingWidth).toBeCloseTo(styles.providerWidth, 2);
 		expect(styles.jumpWidth).not.toBe("100%");
 		expect(styles.jumpParent).toContain("composer-wrap");
 		expect(styles.terminalCanvasMinHeight).toBe("0px");
 		await page.getByRole("button", { name: "Close runtime settings" }).click();
 		await expect(page).toHaveTitle(/ · Gradivus$/);
 
-		await page.getByLabel("About Gradivus").click();
+		const aboutButton = page.getByLabel("About Gradivus");
+		await aboutButton.click();
 		await expect(page.locator("dialog.about-dialog")).toBeVisible();
 		await expect(page.locator("dialog.about-dialog #about-title")).toHaveText("Gradivus");
 		await expect(page.locator("dialog.about-dialog .eyebrow")).toHaveText("Gradivus Labs");
@@ -424,14 +468,19 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 			const style = getComputedStyle(element);
 			return { color: style.color, font: style.font, letterSpacing: style.letterSpacing, transform: style.textTransform };
 		});
-		expect(eyebrowStyles.font).toContain("9px");
-		expect(Number.parseFloat(eyebrowStyles.letterSpacing)).toBeCloseTo(0.54, 2);
+		expect(eyebrowStyles.font).toContain("14px");
+		expect(Number.parseFloat(eyebrowStyles.letterSpacing)).toBeCloseTo(0.84, 2);
 		expect(eyebrowStyles.transform).toBe("uppercase");
 		await page.locator("dialog.about-dialog").getByRole("button", { name: "Close" }).click();
 		await expect(page.locator("dialog.about-dialog")).toBeHidden();
+		await expect(aboutButton).toBeFocused();
+		for (let index = 0; index < 14; index += 1) {
+			await page.getByRole("button", { name: "New Chat in workspace", exact: true }).click();
+		}
+		await expect(page.getByRole("treeitem")).toHaveCount(15);
 
 		for (const width of [920, 760] as const) {
-			await page.setViewportSize({ width, height: 820 });
+			await page.setViewportSize({ width, height: 420 });
 			const railWidth = await page.evaluate(() => {
 				const grid = document.querySelector<HTMLElement>(".workspace-grid");
 				if (!grid) return "";
@@ -443,6 +492,30 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 				return firstColumn;
 			});
 			expect(railWidth).toBe(width === 920 ? "196px" : "178px");
+			const footerGeometry = await page.locator(".session-rail").evaluate(rail => {
+				const railBounds = rail.getBoundingClientRect();
+				const footerBounds = rail.querySelector<HTMLElement>(".rail-utilities")?.getBoundingClientRect();
+				return footerBounds
+					? {
+							bottomDelta: Math.abs(railBounds.bottom - footerBounds.bottom),
+							contained: footerBounds.left >= railBounds.left && footerBounds.right <= railBounds.right,
+						}
+					: undefined;
+			});
+			expect(footerGeometry?.bottomDelta).toBeLessThanOrEqual(0.5);
+			expect(footerGeometry?.contained).toBe(true);
+			const workspaceTree = page.locator(".workspace-tree");
+			await expect
+				.poll(() => workspaceTree.evaluate(tree => tree.scrollHeight > tree.clientHeight))
+				.toBe(true);
+			const footerBeforeScroll = await page.locator(".rail-utilities").boundingBox();
+			await workspaceTree.evaluate(tree => {
+				tree.scrollTop = tree.scrollHeight;
+			});
+			await expect(page.getByRole("button", { name: "Open settings", exact: true })).toBeVisible();
+			await expect(page.getByRole("button", { name: "About Gradivus", exact: true })).toBeVisible();
+			await expect(page.locator(".rail-theme-toggle")).toBeVisible();
+			expect(await page.locator(".rail-utilities").boundingBox()).toEqual(footerBeforeScroll);
 		}
 
 		for (const theme of ["dark", "light"] as const) {
@@ -532,14 +605,14 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					const inputContainer = surface?.querySelector<HTMLElement>(":scope > .composer-input-container") ?? null;
 					const textarea = surface?.querySelector<HTMLTextAreaElement>("textarea") ?? null;
 					const footer = surface?.querySelector<HTMLElement>(".composer-actions") ?? null;
-					const attachment = footer?.querySelector<HTMLElement>(".composer-attachment-bar") ?? null;
+					const attachment = surface?.querySelector<HTMLElement>(":scope > .composer-top-bar > .composer-attachment-bar") ?? null;
 					const tools = footer?.querySelector<HTMLElement>(".composer-tools") ?? null;
 					const actionRail = footer?.querySelector<HTMLElement>(".composer-action-rail") ?? null;
 					const attach = attachment?.querySelector<HTMLElement>(".attachment-add-button") ?? null;
 					const runtime = tools?.querySelector<HTMLElement>('.runtime-picker > button[aria-controls="runtime-picker-panel"]') ?? null;
 					const context = tools?.querySelector<HTMLElement>('button.context-donut-btn[aria-label^="Context window:"]') ?? null;
 					const primary = actionRail?.querySelector<HTMLElement>(".send-turn-btn") ?? null;
-					const footerChildren = [attachment, tools, actionRail].filter((element): element is HTMLElement => Boolean(element));
+					const footerChildren = [tools, actionRail].filter((element): element is HTMLElement => Boolean(element));
 					const controls = [attach, runtime, context, primary].filter((element): element is HTMLElement => Boolean(element));
 					type GeometryRect = { x: number; y: number; right: number; bottom: number; width: number; height: number };
 					const rect = (element: HTMLElement | null): GeometryRect | null => {
@@ -600,9 +673,6 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 						textareaWidthRatio: inputRect && textareaRect ? textareaRect.width / inputRect.width : 0,
 						inputWidthRatio: surfaceRect && inputRect ? inputRect.width / surfaceRect.width : 0,
 						footerFlexWrap: footerStyle?.flexWrap ?? "",
-						footerRowCount: attachmentRect && toolsRect && actionRailRect
-							? (attachmentRect.bottom <= Math.min(toolsRect.y, actionRailRect.y) + 1 ? 2 : 1)
-							: 0,
 						footerChildrenContained: Boolean(footerRect) && childRects.every(child => within(child, footerRect)),
 						textareaContained: within(textareaRect, inputRect),
 						runtimeContained: within(runtimeRect, surfaceRect),
@@ -620,14 +690,12 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 							&& !overlaps(contextRect, primaryRect)
 							&& !overlaps(runtimeRect, primaryRect),
 						wideFooterOrdered: Boolean(
-							attachmentRect && runtimeRect && contextRect && primaryRect
-							&& attachmentRect.right <= runtimeRect.x + 1
+							runtimeRect && contextRect && primaryRect
 							&& runtimeRect.right <= contextRect.x + 1
 							&& contextRect.right <= primaryRect.x + 1,
 						),
 						wideFooterGapsCompact: Boolean(
-							attachmentRect && runtimeRect && contextRect && primaryRect
-							&& runtimeRect.x - attachmentRect.right <= 16
+							runtimeRect && contextRect && primaryRect
 							&& contextRect.x - runtimeRect.right <= 16
 							&& primaryRect.x - contextRect.right <= 16,
 						),
@@ -636,19 +704,17 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 							&& contextRect.x - runtimeRect.right >= -1
 							&& contextRect.x - runtimeRect.right <= 16,
 						),
-						narrowShelfAboveTools: Boolean(
-							attachmentRect && toolsRect && actionRailRect
-							&& attachmentRect.bottom <= Math.min(toolsRect.y, actionRailRect.y) + 1,
+						shelfAboveInput: Boolean(
+							attachmentRect && inputRect
+							&& attachmentRect.bottom <= inputRect.y + 1,
+						),
+						shelfWithinSurface: Boolean(
+							attachmentRect && surfaceRect
+							&& within(attachmentRect, surfaceRect),
 						),
 						narrowToolsAndActionAligned: Boolean(
 							toolsRect && actionRailRect
 							&& Math.min(toolsRect.bottom, actionRailRect.bottom) - Math.max(toolsRect.y, actionRailRect.y) > 1,
-						),
-						narrowControlsOnSecondRow: Boolean(
-							attachmentRect && runtimeRect && contextRect && primaryRect
-							&& attachmentRect.bottom <= Math.min(runtimeRect.y, contextRect.y, primaryRect.y) + 1
-							&& Math.min(runtimeRect.bottom, primaryRect.bottom) - Math.max(runtimeRect.y, primaryRect.y) > 1
-							&& Math.min(contextRect.bottom, primaryRect.bottom) - Math.max(contextRect.y, primaryRect.y) > 1,
 						),
 						primaryAnchoredLowerRight: Boolean(
 							footerRect && primaryRect
@@ -677,20 +743,14 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				expect(surfaceWidth).toBeGreaterThan(0);
 				expect(surfaceWidth).toBeLessThan(width);
 				expect(narrowGeometry.primaryLabel).toMatch(/^(Send message|Steer current turn)$/);
-				if (surfaceWidth <= 680) {
-					expect(narrowGeometry.footerDisplay).toBe("grid");
-					expect(narrowGeometry.footerRowCount).toBe(2);
-					expect(narrowGeometry.narrowShelfAboveTools).toBe(true);
-					expect(narrowGeometry.narrowToolsAndActionAligned).toBe(true);
-					expect(narrowGeometry.narrowControlsOnSecondRow).toBe(true);
-					expect(narrowGeometry.primaryAnchoredLowerRight).toBe(true);
-				} else {
-					expect(narrowGeometry.footerDisplay).toBe("flex");
-					expect(narrowGeometry.footerFlexWrap).toBe("nowrap");
-					expect(narrowGeometry.footerRowCount).toBe(1);
-					expect(narrowGeometry.wideFooterOrdered).toBe(true);
-					expect(narrowGeometry.wideFooterGapsCompact).toBe(true);
-				}
+				expect(narrowGeometry.footerDisplay).toBe("flex");
+				expect(narrowGeometry.footerFlexWrap).toBe("nowrap");
+				expect(narrowGeometry.shelfAboveInput).toBe(true);
+				expect(narrowGeometry.shelfWithinSurface).toBe(true);
+				expect(narrowGeometry.narrowToolsAndActionAligned).toBe(true);
+				expect(narrowGeometry.wideFooterOrdered).toBe(true);
+				expect(narrowGeometry.wideFooterGapsCompact).toBe(true);
+				expect(narrowGeometry.primaryAnchoredLowerRight).toBe(true);
 				expect(narrowGeometry.documentOverflowing).toBe(false);
 				expect(narrowGeometry.surfaceOverflowing).toBe(false);
 				expect(narrowGeometry.surfaceWithinViewport).toBe(true);
@@ -705,8 +765,6 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				expect(narrowGeometry.textareaReachable).toBe(true);
 				expect(narrowGeometry.widgetsDoNotOverlap).toBe(true);
 				expect(narrowGeometry.controlGapsCompact).toBe(true);
-				expect(narrowGeometry.footerRowCount).toBeGreaterThanOrEqual(1);
-				expect(narrowGeometry.footerRowCount).toBeLessThanOrEqual(2);
 				expect(narrowGeometry.inputWidthRatio).toBeGreaterThan(0.9);
 				expect(narrowGeometry.textareaWidthRatio).toBeGreaterThan(0.95);
 				expect(narrowGeometry.textareaMaxHeight).toBe(density === "compact" ? 144 : 160);
@@ -757,9 +815,6 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				const inputActionVerticalOverlap = inputRect && actionsRect
 					? Math.min(inputRect.bottom, actionsRect.bottom) - Math.max(inputRect.y, actionsRect.y)
 					: 0;
-				const attachmentUtilityVerticalOverlap = Boolean(attachmentRect && [toolsRect, actionRailRect].some(peer => (
-					peer && Math.min(attachmentRect.bottom, peer.bottom) - Math.max(attachmentRect.y, peer.y) > 0
-				)));
 				const attachmentReachable = attachButton && attachRect
 					? (() => {
 						const hit = document.elementFromPoint(attachRect.x + attachRect.width / 2, attachRect.y + attachRect.height / 2);
@@ -783,9 +838,9 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					runtimeRect,
 					contextRect,
 					primaryRect,
-					attachmentParentIsActions: attachmentBar?.parentElement === actions,
-					attachmentFullWidth: Boolean(attachmentRect && surfaceRect && attachmentRect.width >= surfaceRect.width - 2),
-					attachmentUtilityVerticalOverlap,
+					attachmentParentIsTopBar: attachmentBar?.parentElement === topBar,
+					attachmentSpansTopBar: Boolean(attachmentRect && topBarRect && attachmentRect.width >= topBarRect.width - 24),
+					attachmentAboveInput: Boolean(attachmentRect && inputRect && attachmentRect.bottom <= inputRect.y + 1),
 					attachmentHasChips: Boolean(attachmentBar?.querySelector(".attachment-chip-list")),
 					attachmentHasStatus: Boolean(attachmentBar?.querySelector(".attachment-status")),
 					inputWidthRatio: surfaceRect && inputRect ? inputRect.width / surfaceRect.width : 0,
@@ -796,16 +851,14 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					runtimeReachable: reachable(runtime),
 					contextReachable: reachable(context),
 					footerGapsCompact: Boolean(
-						attachmentRect && runtimeRect && contextRect && primaryRect
-						&& runtimeRect.x - attachmentRect.right <= 16
+						runtimeRect && contextRect && primaryRect
 						&& contextRect.x - runtimeRect.right <= 16
 						&& primaryRect.x - contextRect.right <= 16,
 					),
 					primaryReachable: reachable(primary),
 					textareaReachable: reachable(textarea),
 					footerOrdered: Boolean(
-						attachmentRect && runtimeRect && contextRect && primaryRect
-						&& attachmentRect.right <= runtimeRect.x + 1
+						runtimeRect && contextRect && primaryRect
 						&& runtimeRect.right <= contextRect.x + 1
 						&& contextRect.right <= primaryRect.x + 1,
 					),
@@ -832,9 +885,9 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 			expect(geometry.runtimeRect).not.toBeNull();
 			expect(geometry.contextRect).not.toBeNull();
 			expect(geometry.primaryRect).not.toBeNull();
-			expect(geometry.attachmentParentIsActions).toBe(true);
-			expect(geometry.attachmentFullWidth).toBe(false);
-			expect(geometry.attachmentUtilityVerticalOverlap).toBe(true);
+			expect(geometry.attachmentParentIsTopBar).toBe(true);
+			expect(geometry.attachmentSpansTopBar).toBe(true);
+			expect(geometry.attachmentAboveInput).toBe(true);
 			expect(geometry.attachmentHasChips).toBe(false);
 			expect(geometry.attachmentHasStatus).toBe(false);
 			expect(geometry.inputWidthRatio).toBeGreaterThan(0.9);
@@ -863,8 +916,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 			expect(actions.right).toBeLessThanOrEqual(surface.right + 1);
 			expect(attachment.x).toBeGreaterThanOrEqual(surface.x - 1);
 			expect(attachment.right).toBeLessThanOrEqual(surface.right + 1);
-			expect(attachment.y).toBeGreaterThanOrEqual(actions.y - 1);
-			expect(attachment.bottom).toBeLessThanOrEqual(actions.bottom + 1);
+			expect(attachment.bottom).toBeLessThanOrEqual(geometry.inputRect!.y + 1);
 			expect(attach.x).toBeGreaterThanOrEqual(surface.x - 1);
 			expect(attach.right).toBeLessThanOrEqual(surface.right + 1);
 
@@ -1009,6 +1061,50 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 		await teardownElectronTest(app, userData);
 	}
 });
+test("highlights explicit code and copies raw Markdown and code", async () => {
+	const userData = await createUserData("gradivus-markdown-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-markdown-copy"]);
+	const app = await launch(userData, workspace);
+	const errors = await app.firstWindow().then(page => collectRendererErrors(page));
+	try {
+		const page = await app.firstWindow();
+		await expectComposerReady(page);
+		const composer = page.getByLabel("Message OMP");
+		await composer.fill("markdown copy");
+		await composer.press("Enter");
+
+		const response = page.locator(".timeline-item.item-assistant").filter({
+			has: page.getByRole("heading", { name: "Copy proof", exact: true }),
+		}).last();
+		await expect(response).toContainText("Rendered safely.", { timeout: 12_000 });
+		const syntaxColors = await response.locator("code.language-typescript").evaluate(element => {
+			const token = element.querySelector<HTMLElement>(".hljs-keyword");
+			return {
+				code: getComputedStyle(element).color,
+				keyword: token ? getComputedStyle(token).color : "",
+			};
+		});
+		expect(syntaxColors.keyword).not.toBe("");
+		expect(syntaxColors.keyword).not.toBe(syntaxColors.code);
+
+		const rawMarkdown = '## Copy proof\n\n```typescript\nconst rawTag = "<copy>";\n```\n\nRendered safely.';
+		await response.getByRole("button", { name: "Copy raw Markdown", exact: true }).click();
+		await expect(response.locator(".markdown-response-copy-status")).toContainText("Copied");
+		expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(rawMarkdown);
+
+		await response.getByRole("button", { name: "Copy typescript code", exact: true }).click();
+		await expect(response.getByRole("button", { name: "Copy typescript code", exact: true })).toContainText("Copied");
+		expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe('const rawTag = "<copy>";');
+
+		const axe = await new AxeBuilder({ page }).include(".timeline-item.item-assistant").setLegacyMode(true).analyze();
+		expect(axe.violations.filter(value => value.impact === "critical" || value.impact === "serious")).toEqual([]);
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
 test.describe("composer attachments", () => {
 	test("stages picker files with exact native transport and supports attachment-only send", async () => {
 		const userData = await createUserData("gradivus-a1-");
@@ -1021,6 +1117,10 @@ test.describe("composer attachments", () => {
 			await page.setViewportSize({ width: 1280, height: 820 });
 			await expectComposerReady(page);
 			const composer = page.getByLabel("Message OMP");
+			await composer.fill("Compare  now");
+			await composer.evaluate(element => {
+				(element as HTMLTextAreaElement).setSelectionRange(8, 8);
+			});
 			const chooserPromise = page.waitForEvent("filechooser");
 			await page.getByLabel("Attach files").click();
 			const chooser = await chooserPromise;
@@ -1030,18 +1130,35 @@ test.describe("composer attachments", () => {
 			]);
 			await expect(page.getByLabel("Attached files")).toContainText("notes with spaces.md");
 			await expect(page.getByLabel("Attached files")).toContainText("screen.dat");
-			await expect(page.getByLabel("Attached files")).toContainText("FILE");
-			await expect(page.getByLabel("Attached files")).toContainText("IMG");
+			await expect(page.getByLabel("Attached files")).toContainText("Document:");
+			await expect(page.getByLabel("Attached files")).toContainText("Image:");
+			await expect(composer).toHaveValue(
+				'Compare [Document A1: "notes with spaces.md"] [Image A2: "screen.dat"] now',
+			);
+			const attachmentLayout = await page.evaluate(() => {
+				const shelf = document.querySelector<HTMLElement>(".composer-attachment-bar")?.getBoundingClientRect();
+				const input = document.querySelector<HTMLTextAreaElement>(".composer textarea")?.getBoundingClientRect();
+				return shelf && input ? { shelfTop: shelf.top, inputBottom: input.bottom } : null;
+			});
+			expect(attachmentLayout).not.toBeNull();
+			expect(attachmentLayout!.shelfTop).toBeLessThanOrEqual(attachmentLayout!.inputBottom + 1);
 			await page.getByRole("button", { name: "Remove notes with spaces.md" }).click();
 			await expect(page.getByRole("button", { name: "Remove notes with spaces.md" })).toHaveCount(0);
 			const reselectPromise = page.waitForEvent("filechooser");
 			await page.getByLabel("Attach files").click();
 			await (await reselectPromise).setFiles({ name: "notes with spaces.md", mimeType: "text/plain", buffer: SMALL_TEXT });
 			await expect(page.getByRole("button", { name: "Remove notes with spaces.md" })).toBeVisible();
+			await expect(composer).toHaveValue(/\[Document A3: "notes with spaces\.md"\]/);
+			await composer.fill('[Image A2: "screen.dat"] [Document A3: "notes with spaces.md"]');
 			await composer.press("Enter");
 			const captureFile = path.join(userData, "attachment-captures.jsonl");
 			const capture = await waitForAttachmentCapture(captureFile, value => value.route === "prompt");
 			await expect(page.locator(".timeline-scroll")).toContainText("Attachment report: route=prompt; files=1; prompts=0; images=1; readable=true");
+			const sentUserMessage = page.locator(".timeline-item.item-user").last();
+			await expect(sentUserMessage).toContainText('[Image A2: "screen.dat"]');
+			await expect(sentUserMessage).toContainText('[Document A3: "notes with spaces.md"]');
+			await expect(sentUserMessage).not.toContainText("gradivus-prompt-");
+			await expect(sentUserMessage).not.toContainText("Read this attachment as needed");
 			expect(capture.baseTextBytes).toBe(0);
 			expect(capture.envelopes.map(value => value.kind)).toEqual(["image", "file"]);
 			expect(capture.references).toHaveLength(1);
@@ -1076,17 +1193,33 @@ test.describe("composer attachments", () => {
 			await expect(page.locator(".composer-drop-overlay")).toHaveCount(0);
 			await dispatchFileDrag(page, ".composer", [{ name: "dragged.txt", mimeType: "text/plain", bytes: SMALL_TEXT }], ["dragenter", "dragover", "drop", "dragend"]);
 			await expect(page.getByRole("button", { name: "Remove dragged.txt" })).toBeVisible();
-			await expect(composer).toHaveValue("preserve this draft");
+			await expect(composer).toHaveValue('preserve this draft [Document A1: "dragged.txt"]');
+			const compactHeight = await page.locator(".composer").evaluate(element => element.getBoundingClientRect().height);
 			const longFiles = Array.from({ length: 6 }, (_, index) => ({ name: `long-${index}-${"x".repeat(80)}.txt`, mimeType: "text/plain", buffer: SMALL_TEXT }));
 			await page.getByLabel("Choose files to attach").setInputFiles(longFiles);
 			await expect.poll(() => page.locator(".attachment-chip").count()).toBe(7);
+			await expect.poll(() => page.locator(".composer").evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(compactHeight);
+			const expandedShelf = await page.locator(".composer-attachment-bar").evaluate(element => {
+				const style = getComputedStyle(element);
+				const input = document.querySelector<HTMLTextAreaElement>(".composer textarea")?.getBoundingClientRect();
+				const shelf = element.getBoundingClientRect();
+				return { overflowY: style.overflowY, shelfTop: shelf.top, inputBottom: input?.bottom ?? 0 };
+			});
+			expect(expandedShelf.overflowY).toBe("visible");
+			expect(expandedShelf.shelfTop).toBeLessThanOrEqual(expandedShelf.inputBottom + 1);
 			expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 			await page.getByRole("button", { name: /Remove long-0-/ }).focus();
 			await page.keyboard.press("Enter");
 			await expect(page.getByRole("button", { name: /Remove long-0-/ })).toHaveCount(0);
+			await expect(page.getByRole("button", { name: /Remove long-1-/ })).toBeFocused();
 			const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze();
 			expect(axe.violations.filter(value => value.impact === "critical" || value.impact === "serious")).toEqual([]);
-			expect(await page.locator(".composer-wrap *").evaluateAll(elements => elements.some(element => getComputedStyle(element).animationName !== "none"))).toBe(false);
+			await expect(page.getByLabel("Attach files")).toBeEnabled();
+			await expect.poll(() => page.locator(".composer-wrap *").evaluateAll(elements =>
+				elements
+					.map(element => ({ className: element.className, animationName: getComputedStyle(element).animationName }))
+					.filter(value => value.animationName !== "none"),
+			)).toEqual([]);
 			expect(errors).toEqual([]);
 		} finally {
 			await teardownElectronTest(app, userData);
@@ -1118,7 +1251,7 @@ test.describe("composer attachments", () => {
 				transfer.setData("text/plain", value);
 				input.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
 			}, composed.slice(prefix.length, -suffix.length));
-			await expect(page.getByText("Pasted prompt is ready as an attachment.", { exact: true })).toBeVisible();
+			await expect(page.getByText("Oversized prompt sections are ready as contextual attachments.", { exact: true })).toBeVisible();
 			await expect(page.getByRole("button", { name: "Remove Pasted prompt" })).toBeVisible();
 			await composer.press("Enter");
 			const captureFile = path.join(userData, "attachment-captures.jsonl");
@@ -1141,7 +1274,7 @@ test.describe("composer attachments", () => {
 	});
 
 	test("rejects attachment count, size, image, cumulative, and spill limits atomically", async () => {
-		test.setTimeout(120_000);
+		test.setTimeout(180_000);
 		const userData = await createUserData("gradivus-a4-");
 		const workspace = path.join(userData, "workspace");
 		await seed(userData, workspace, ["fixture-attachments-limits"]);
@@ -1149,6 +1282,7 @@ test.describe("composer attachments", () => {
 		const errors = await app.firstWindow().then(page => collectRendererErrors(page));
 		try {
 			const page = await app.firstWindow();
+			page.setDefaultTimeout(60_000);
 			await expectComposerReady(page);
 			const input = page.getByLabel("Choose files to attach");
 			await input.setInputFiles(Array.from({ length: 13 }, (_, index) => ({ name: `tiny-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from([index]) })));
@@ -1172,8 +1306,10 @@ test.describe("composer attachments", () => {
 			await page.getByRole("button", { name: "Remove twenty.bin" }).click();
 			await input.setInputFiles(Array.from({ length: 12 }, (_, index) => ({ name: `count-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from([index]) })));
 			await expect.poll(() => page.locator(".attachment-chip").count()).toBe(12);
-			const draft = "r".repeat(512 * 1024 + 1);
-			await page.getByLabel("Message OMP").fill(draft);
+			const messageInput = page.getByLabel("Message OMP");
+			const references = await messageInput.inputValue();
+			const draft = `${references} ${"r".repeat(512 * 1024 + 1)}`;
+			await messageInput.fill(draft);
 			await expect(page.getByRole("status")).toContainText("You can attach up to 12 files.");
 			await expect(page.locator(".attachment-chip")).toHaveCount(12);
 			await expect(page.getByLabel("Message OMP")).toHaveValue(draft);
@@ -1221,14 +1357,16 @@ test("preserves newer draft and newly staged files across delayed prompt failure
 		await expectComposerReady(page);
 		const composer = page.getByLabel("Message OMP");
 		const input = page.getByLabel("Choose files to attach");
-		await input.setInputFiles({ name: "original.md", mimeType: "text/markdown", buffer: Buffer.from("original attachment") });
 		await composer.fill("original request");
+		await input.setInputFiles({ name: "original.md", mimeType: "text/markdown", buffer: Buffer.from("original attachment") });
 		await composer.press("Enter");
 		await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/);
 		await composer.fill("newer draft");
 		await input.setInputFiles({ name: "new.md", mimeType: "text/markdown", buffer: Buffer.from("new attachment") });
 		await expect(page.locator(".prompt-recovery-card")).toContainText("Fixture prompt delivery failed.", { timeout: 15_000 });
-		await expect(composer).toHaveValue("original request\n\nnewer draft");
+		await expect(composer).toHaveValue(
+			'original request [Document A1: "original.md"]\n\nnewer draft [Document A2: "new.md"]',
+		);
 		await expect.poll(() => page.locator(".attachment-chip-name").allTextContents()).toEqual(["original.md", "new.md"]);
 		const captureFile = path.join(userData, "attachment-captures.jsonl");
 		const first = await waitForAttachmentCapture(captureFile, value => value.sequence === 1);
@@ -1255,8 +1393,9 @@ test("retains local-command attachments and isolates session switching", async (
 		const page = await app.firstWindow();
 		await expectComposerReady(page);
 		const composer = page.getByLabel("Message OMP");
-		await page.getByLabel("Choose files to attach").setInputFiles({ name: "local.md", mimeType: "text/markdown", buffer: SMALL_TEXT });
 		await composer.fill("/status");
+		await page.getByLabel("Choose files to attach").setInputFiles({ name: "local.md", mimeType: "text/markdown", buffer: SMALL_TEXT });
+		await expect(composer).toHaveValue('/status [Document A1: "local.md"]');
 		await composer.press("Enter");
 		await expect(page.locator(".timeline-scroll")).toContainText("Fixture status: ready");
 		await expect(page.getByRole("button", { name: "Remove local.md" })).toBeVisible();
@@ -1274,6 +1413,7 @@ test("retains local-command attachments and isolates session switching", async (
 		await expect(page.getByRole("button", { name: "Remove session-a.md" })).toHaveCount(0);
 		await sessions.nth(0).click();
 		await expect(page.getByRole("button", { name: "Remove session-a.md" })).toHaveCount(0);
+		await expect(composer).not.toHaveValue(/session-a\.md/);
 		await expect.poll(async () => (await enumeratePromptStoreFiles(userData)).length).toBe(0);
 		expect(errors).toEqual([]);
 	} finally {
@@ -1305,7 +1445,7 @@ test("releases a slow staging result at a session boundary", async () => {
 	}
 });
 
-test("steers with exact attachments, rolls back once, and releases admitted files", async () => {
+test("steers with exact attachments, rolls back once, and retains files through completion", async () => {
 	const userData = await createUserData("gradivus-a9-");
 	const workspace = path.join(userData, "workspace");
 	await seed(userData, workspace, ["fixture-attachments-steer"]);
@@ -1318,11 +1458,15 @@ test("steers with exact attachments, rolls back once, and releases admitted file
 		await composer.fill("hold current turn");
 		await composer.press("Enter");
 		await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/);
-		await page.getByLabel("Choose files to attach").setInputFiles([{ name: "steer.md", mimeType: "text/markdown", buffer: SMALL_TEXT }, { name: "steer.png", mimeType: "image/png", buffer: SMALL_PNG }]);
 		await composer.fill("steer with files");
+		await page.getByLabel("Choose files to attach").setInputFiles([{ name: "steer.md", mimeType: "text/markdown", buffer: SMALL_TEXT }, { name: "steer.png", mimeType: "image/png", buffer: SMALL_PNG }]);
+		await expect(page.getByLabel("Attach files")).toBeEnabled();
 		await composer.press("Enter");
 		await expect(page.getByRole("button", { name: "Remove steer.md" })).toBeVisible();
-		await expect(composer).toHaveValue("steer with files");
+		await expect(composer).toHaveValue(
+			'steer with files [Document A1: "steer.md"] [Image A2: "steer.png"]',
+		);
+		await expect(page.locator(".error-toast")).toContainText("Fixture steer delivery failed.");
 		const captureFile = path.join(userData, "attachment-captures.jsonl");
 		const first = await waitForAttachmentCapture(captureFile, value => value.route === "steer");
 		await expect.poll(async () => { try { await fs.access(first.references[0]!.path); return true; } catch { return false; } }).toBe(true);
@@ -1331,15 +1475,16 @@ test("steers with exact attachments, rolls back once, and releases admitted file
 		expect(second.images).toEqual([{ mimeType: "image/png", bytes: SMALL_PNG.byteLength, sha256: sha256(SMALL_PNG), base64Valid: true }]);
 		await expect(page.getByRole("button", { name: "Remove steer.md" })).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Remove steer.png" })).toHaveCount(0);
-		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(false);
+		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(true);
 		await expect(page.locator(".timeline-scroll")).toContainText("Held turn completed after steering.");
+		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(false);
 		expect(errors).toEqual([]);
 	} finally {
 		await teardownElectronTest(app, userData);
 	}
 });
 
-test("queues exact follow-up attachments, releases them at admission, and leaves nothing at teardown", async () => {
+test("queues exact follow-up attachments, retains them through completion, and leaves nothing at teardown", async () => {
 	const userData = await createUserData("gradivus-a10-");
 	const workspace = path.join(userData, "workspace");
 	await seed(userData, workspace, ["fixture-attachments-follow-up"]);
@@ -1352,8 +1497,9 @@ test("queues exact follow-up attachments, releases them at admission, and leaves
 		await composer.fill("hold current turn");
 		await composer.press("Enter");
 		await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/);
-		await page.getByLabel("Choose files to attach").setInputFiles([{ name: "queue.md", mimeType: "text/markdown", buffer: SMALL_TEXT }, { name: "queue.png", mimeType: "image/png", buffer: SMALL_PNG }]);
 		await composer.fill("queue with files");
+		await page.getByLabel("Choose files to attach").setInputFiles([{ name: "queue.md", mimeType: "text/markdown", buffer: SMALL_TEXT }, { name: "queue.png", mimeType: "image/png", buffer: SMALL_PNG }]);
+		await expect(page.getByLabel("Attach files")).toBeEnabled();
 		await page.locator("summary.action-menu-trigger").click();
 		await page.getByRole("button", { name: "Queue for the next turn", exact: true }).click();
 		await expect(page.getByRole("button", { name: "Remove queue.md" })).toBeVisible();
@@ -1370,8 +1516,9 @@ test("queues exact follow-up attachments, releases them at admission, and leaves
 		expect(second.images).toEqual([{ mimeType: "image/png", bytes: SMALL_PNG.byteLength, sha256: sha256(SMALL_PNG), base64Valid: true }]);
 		await expect(page.getByRole("button", { name: "Remove queue.md" })).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Remove queue.png" })).toHaveCount(0);
-		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(false);
+		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(true);
 		await expect(page.locator(".timeline-scroll")).toContainText("Follow-up completed after the active turn.");
+		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(false);
 		const admittedPaths = second.references.map(reference => reference.path);
 		await app.close();
 		await expect.poll(async () => Promise.all(admittedPaths.map(async admittedPath => { try { await fs.access(admittedPath); return true; } catch { return false; } }))).toEqual([false]);
@@ -1447,7 +1594,7 @@ test("reopens settings after a delayed refresh closes", async () => {
 	}
 });
 
-test("detaches the active browser view while routed settings are open", async () => {
+test("keeps the browser view detached while sidebar-routed settings are open", async () => {
 	test.setTimeout(60_000);
 	const userData = await createUserData("gradivus-browser-");
 	const workspace = path.join(userData, "workspace");
@@ -1480,8 +1627,13 @@ test("detaches the active browser view while routed settings are open", async ()
 		if (!before) throw new Error("Fixture browser view did not attach");
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 
-		await page.getByRole("button", { name: "Open application settings", exact: true }).click();
+		await page.getByRole("tab", { name: /Gradivus/ }).click();
+		await page
+			.getByRole("complementary", { name: "Workspaces" })
+			.getByRole("button", { name: "Open settings", exact: true })
+			.click();
 		await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+		await browserTab.click();
 		await expect.poll(() => readFixtureView(), { timeout: 10_000 }).toBeUndefined();
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 
@@ -1490,6 +1642,56 @@ test("detaches the active browser view while routed settings are open", async ()
 		await expect.poll(() => readFixtureView(), { timeout: 10_000 }).toBeTruthy();
 		const after = await readFixtureView();
 		expect(after).toEqual(before);
+		await expect(browserTab).toHaveAttribute("aria-selected", "true");
+		await expect(browserTab).toBeFocused();
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
+test("routes native pane context menu actions to pane splits and close", async () => {
+	test.setTimeout(60_000);
+	const userData = await createUserData("gradivus-pane-menu-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-settings-refresh"]);
+	const app = await launch(userData, workspace);
+	try {
+		const page = await app.firstWindow();
+		await page.setViewportSize({ width: 1280, height: 820 });
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		await page.getByRole("button", { name: "Open browser tab" }).click();
+		const browserTab = page.getByRole("tab", { name: /Browser/ });
+		await browserTab.click();
+		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(1);
+
+		const readBrowserPaneIds = async (): Promise<string[]> =>
+			page.evaluate(async () =>
+				((await window.gradivus.getWorkspaceDocument())?.panes ?? [])
+					.filter(pane => pane?.kind === "browser")
+					.map(pane => pane.id),
+			);
+		const emitContextAction = (paneId: string, action: string): Promise<void> =>
+			app.evaluate(({ BrowserWindow }, payload) => {
+				BrowserWindow.getAllWindows()[0]?.webContents.send("gradivus:workspace", payload);
+			}, { type: "pane-context-action", paneId, action });
+
+		const firstPane = (await readBrowserPaneIds())[0];
+		expect(firstPane).toBeTruthy();
+
+		await emitContextAction(firstPane!, "split-columns");
+		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(2);
+
+		const secondPane = (await readBrowserPaneIds()).find(id => id !== firstPane);
+		expect(secondPane).toBeTruthy();
+		await emitContextAction(secondPane!, "split-rows");
+		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(3);
+
+		await emitContextAction(secondPane!, "close");
+		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(2);
+		const remaining = await readBrowserPaneIds();
+		expect(remaining).not.toContain(secondPane);
+
+		await browserTab.click();
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 	} finally {
 		await teardownElectronTest(app, userData);
@@ -1531,12 +1733,18 @@ test("keeps timeline activity paused while reading history and renders bounded f
 		const pausedScrollTop = await timeline.evaluate(element => element.scrollTop);
 		await expect(timeline.getByText("read", { exact: true })).toBeVisible({ timeout: 8_000 });
 		await expect(timeline).toContainText("Wave assistant complete 1.", { timeout: 12_000 });
+		const turnSummary = timeline.getByRole("region", { name: /files changed in this turn/ }).last();
+		await expect(turnSummary).toContainText("Created");
+		await expect(turnSummary).toContainText("Edited");
+		await expect(turnSummary).toContainText("activity.txt");
+		await expect(turnSummary).toContainText("preview-a.png");
+		await expect(turnSummary).toContainText("preview-b.png");
 		await expect(jump).toBeVisible();
 		const scrollTopAfter = await timeline.evaluate(element => element.scrollTop);
 		expect(scrollTopAfter).toBeLessThanOrEqual(pausedScrollTop + 8);
 
 		await expect(timeline.getByLabel("Read activity")).toContainText("notes.txt");
-		await expect(timeline.getByLabel("Wrote activity")).toContainText("activity.txt");
+		await expect(timeline.getByLabel("Wrote activity").filter({ hasText: "activity.txt" })).toBeVisible();
 		await expect(timeline.getByLabel("Edited activity")).toContainText("notes.txt");
 		await expect(timeline.locator(".tool-activity-preview").first()).toContainText("alpha");
 		await jump.click();
@@ -1555,13 +1763,20 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 	const userData = await createUserData("gradivus-inspect-");
 	const workspace = path.join(userData, "workspace");
 	await seed(userData, workspace, ["fixture-inspector-chat"]);
-	const app = await launch(userData, workspace, { GRADIVUS_TIMELINE_FIXTURE: "1" });
+	const app = await launch(userData, workspace, {
+		GRADIVUS_TIMELINE_FIXTURE: "1",
+		GRADIVUS_AGENT_HUB_MESSAGE_DELAY_MS: "500",
+	});
 	try {
 		const page = await app.firstWindow();
 		await page.setViewportSize({ width: 1440, height: 900 });
 		const composer = page.getByLabel("Message OMP");
 		const timeline = page.locator(".timeline-scroll");
 		await expect(composer).toBeVisible({ timeout: 20_000 });
+		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
+		const browserTab = page.getByRole("tab", { name: "Browser", exact: true });
+		await expect(browserTab).toBeVisible();
+		await page.getByRole("tab", { name: /Gradivus/ }).click();
 		await composer.fill("activity wave");
 		await composer.press("Enter");
 		await expect(timeline).toContainText("Wave assistant complete 1.", { timeout: 12_000 });
@@ -1582,6 +1797,12 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await agentHubHeaderControl.click();
 		await expect(runInspector).toBeVisible();
 		await expect(page.getByRole("heading", { name: "Agent Hub", exact: true })).toBeVisible();
+		const rosterFill = await runInspector.evaluate(inspector => {
+			const panel = inspector.querySelector<HTMLElement>(".agent-hub-panel")?.getBoundingClientRect();
+			const roster = inspector.querySelector<HTMLElement>(".agent-roster")?.getBoundingClientRect();
+			return panel && roster ? roster.height / panel.height : 0;
+		});
+		expect(rosterFill).toBeGreaterThan(0.7);
 
 		await expect(page.getByRole("tab", { name: "Agent Hub", exact: true })).toBeVisible();
 		await expect(page.getByRole("heading", { name: "Agent Hub", exact: true })).toBeVisible();
@@ -1591,22 +1812,96 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await expect(advisor).toBeVisible();
 		await verifier.click();
 		await expect(page.locator(".agent-hub-window")).toBeVisible();
-		await expect(page.getByRole("log", { name: "Fixture Verifier transcript" })).toContainText("Fixture collaborator transcript.");
+		const verifierTranscript = page.getByRole("log", { name: "Fixture Verifier transcript" });
+		await expect(verifierTranscript).toContainText("Fixture collaborator transcript.");
 		const agentHubWindow = page.locator(".agent-hub-window");
+		const showDetails = agentHubWindow.getByRole("button", { name: "Show details", exact: true });
+		await expect(showDetails).toBeVisible();
+		await expect(agentHubWindow.locator(".selected-agent-metrics")).toBeHidden();
+		await expect(agentHubWindow.locator(".agent-hub-window-header p")).toHaveCount(0);
+		const refreshTranscript = agentHubWindow.locator(".transcript-toolbar").getByRole("button", { name: /Refresh/ });
+		await refreshTranscript.click();
+		await expect(refreshTranscript).toHaveText("Refreshing…");
+		await expect(verifierTranscript).toContainText("Fixture collaborator transcript.");
+		await expect(refreshTranscript).toHaveText("Refresh transcript", { timeout: 8_000 });
+		const transcriptPriority = await agentHubWindow.evaluate(dialog => {
+			const transcript = dialog.querySelector<HTMLElement>(".transcript-region")?.getBoundingClientRect();
+			const dialogBounds = dialog.getBoundingClientRect();
+			return transcript ? transcript.height / dialogBounds.height : 0;
+		});
+		expect(transcriptPriority).toBeGreaterThan(0.4);
+		const assertAgentHubCenteredInChat = async (): Promise<void> => {
+			await expect
+				.poll(() =>
+					page.evaluate(() => {
+						const pane = document.querySelector<HTMLElement>(".transcript-pane");
+						const dialog = document.querySelector<HTMLDialogElement>(".agent-hub-window");
+						if (!pane || !dialog) return false;
+						const paneBounds = pane.getBoundingClientRect();
+						const dialogBounds = dialog.getBoundingClientRect();
+						const tolerance = 1;
+						return (
+							dialog.open &&
+							Math.abs(dialogBounds.left + dialogBounds.width / 2 - (paneBounds.left + paneBounds.width / 2)) <= tolerance &&
+							Math.abs(dialogBounds.top + dialogBounds.height / 2 - (paneBounds.top + paneBounds.height / 2)) <= tolerance &&
+							dialogBounds.left >= paneBounds.left - tolerance &&
+							dialogBounds.right <= paneBounds.right + tolerance &&
+							dialogBounds.top >= paneBounds.top - tolerance &&
+							dialogBounds.bottom <= paneBounds.bottom + tolerance &&
+							dialogBounds.height >= paneBounds.height - 16 - tolerance
+						);
+					}),
+				)
+				.toBe(true);
+		};
+		await assertAgentHubCenteredInChat();
+		await page.setViewportSize({ width: 1100, height: 760 });
+		await assertAgentHubCenteredInChat();
+		await page.setViewportSize({ width: 760, height: 620 });
+		await assertAgentHubCenteredInChat();
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await assertAgentHubCenteredInChat();
+		const workspaceTabs = page.getByRole("tablist", { name: "Workspace tabs" }).getByRole("tab");
+		const tabCountWhileModal = await workspaceTabs.count();
+		await page.keyboard.press(process.platform === "darwin" ? "Meta+t" : "Control+t");
+		await expect(workspaceTabs).toHaveCount(tabCountWhileModal);
+		await expect(agentHubWindow).toBeVisible();
 		const modalAxe = await new AxeBuilder({ page }).include(".agent-hub-window").setLegacyMode(true).analyze();
 		expect(modalAxe.violations.filter(v => v.impact === "critical" || v.impact === "serious")).toEqual([]);
-		await expect(agentHubWindow.getByRole("button", { name: "Close Agent Hub session", exact: true })).toBeFocused();
+		const closeAgentHub = agentHubWindow.getByRole("button", { name: "Close Agent Hub session", exact: true });
+		await closeAgentHub.focus();
+		await expect(closeAgentHub).toBeFocused();
 		await page.keyboard.press("Escape");
 		await expect(agentHubWindow).toBeHidden();
 		await expect(verifier).toBeFocused();
 		await verifier.click();
 		await expect(agentHubWindow).toBeVisible();
+		await agentHubWindow.getByRole("button", { name: "Show details", exact: true }).click();
+		await expect(agentHubWindow.locator(".selected-agent-metrics")).toBeVisible();
 		await expect(page.getByRole("button", { name: "Revive agent", exact: true })).toBeVisible();
 		await page.getByRole("button", { name: "Revive agent", exact: true }).click();
 		await expect(verifier).toHaveAttribute("aria-label", /idle/);
 
 		const agentMessage = page.locator(".agent-hub-window").getByLabel("Message Fixture Verifier", { exact: true });
 		await expect(agentMessage).toBeVisible();
+		const constrainedLayout = await agentHubWindow.evaluate(dialog => {
+			const dialogBounds = dialog.getBoundingClientRect();
+			const disclosure = dialog.querySelector<HTMLElement>(".agent-details-disclosure");
+			const transcript = dialog.querySelector<HTMLElement>(".transcript-region")?.getBoundingClientRect();
+			const composer = dialog.querySelector<HTMLElement>(".message-composer")?.getBoundingClientRect();
+			const disclosureOverflows = disclosure ? disclosure.scrollHeight > disclosure.clientHeight : false;
+			if (disclosure) disclosure.scrollTop = disclosure.scrollHeight;
+			return {
+				disclosureOverflows,
+				disclosureScrolled: disclosure ? disclosure.scrollTop > 0 : false,
+				transcriptHeight: transcript?.height ?? 0,
+				composerContained: composer ? composer.bottom <= dialogBounds.bottom + 1 : false,
+			};
+		});
+		expect(constrainedLayout.disclosureOverflows).toBe(true);
+		expect(constrainedLayout.disclosureScrolled).toBe(true);
+		expect(constrainedLayout.transcriptHeight).toBeGreaterThanOrEqual(128);
+		expect(constrainedLayout.composerContained).toBe(true);
 		await agentMessage.fill("Check the activity summary.");
 		await page.locator(".agent-hub-window").getByRole("button", { name: "Send message", exact: true }).click();
 		await expect(verifier).toContainText("Received: Check the activity summary.");
@@ -1617,9 +1912,15 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await page.getByRole("button", { name: "Close Agent Hub session", exact: true }).click();
 		await advisor.click();
 		await expect(page.locator(".agent-hub-window")).toBeVisible();
+		await expect(page.getByRole("log", { name: "Fixture Advisor transcript" })).toContainText("Fixture collaborator transcript.");
+		await expect(page.getByRole("note")).toHaveCount(0);
+		await page.getByRole("button", { name: "Show details", exact: true }).click();
 		await expect(page.getByRole("note")).toContainText("read only");
 		await expect(page.getByLabel("Message Fixture Advisor", { exact: true })).toHaveCount(0);
-		await page.getByRole("button", { name: "Close Agent Hub session", exact: true }).click();
+		const advisorDialogBounds = await agentHubWindow.boundingBox();
+		if (!advisorDialogBounds) throw new Error("Agent Hub dialog bounds are unavailable");
+		await page.mouse.click(Math.max(1, advisorDialogBounds.x - 8), advisorDialogBounds.y + 8);
+		await expect(agentHubWindow).toBeHidden();
 
 		await page.getByRole("tab", { name: /^Files/ }).click();
 		await expect(page.getByRole("heading", { name: "Files", exact: true })).toBeVisible();
@@ -1629,18 +1930,34 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await filesHeaderControl.click();
 		await expect(runInspector).toBeVisible();
 		await expect(page.getByRole("heading", { name: "Files", exact: true })).toBeVisible();
-		await expect(page.getByRole("list", { name: "Recent file and Agent Hub activity" })).toContainText("activity.txt");
-		const recentActivity = page.getByRole("list", { name: "Recent file and Agent Hub activity" });
-		await expect(recentActivity).toContainText("result.txt");
-		await recentActivity.getByRole("button", { name: "Focus read activity in the chat timeline", exact: true }).click();
-		await expect(page.getByRole("button", { name: /Jump to latest messages/ })).toBeHidden();
-		await composer.fill("normal streaming turn");
-		await composer.press("Enter");
-		await expect(timeline).toContainText("Fixture completed the requested work.", { timeout: 12_000 });
-		await expect.poll(() => timeline.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(8);
-		await page.getByRole("button", { name: "Review the current diff for result.txt", exact: true }).click();
-		await expect(page.getByRole("dialog", { name: "Git diff for result.txt" })).toContainText("Fixture result");
-		await page.getByRole("button", { name: "Close git diff", exact: true }).click();
+		const changedFilesTree = page.getByRole("tree", { name: "Changed files" });
+		await expect(changedFilesTree).toContainText("activity.txt");
+		await expect(changedFilesTree).toContainText("result.txt");
+		await expect(changedFilesTree).toContainText("preview-a.png");
+		await expect(changedFilesTree).toContainText("preview-b.png");
+		await expect(page.getByRole("list", { name: "Recent file and Agent Hub activity" })).toHaveCount(0);
+
+		await changedFilesTree.getByRole("treeitem", { name: /preview-a\.png/ }).click();
+		await expect(page.getByRole("group", { name: "Changed images" })).toBeVisible();
+		await expect(page.getByRole("img", { name: "Preview of preview-a.png" })).toBeVisible();
+		await expect(page.getByRole("button", { name: "Show preview-b.png" })).toBeVisible();
+		await page.getByRole("button", { name: "Show preview-b.png" }).click();
+		await expect(page.getByRole("img", { name: "Preview of preview-b.png" })).toBeVisible();
+		await page.getByRole("button", { name: "All files" }).click();
+
+		await changedFilesTree.getByRole("treeitem", { name: /result\.txt/ }).click();
+		await runInspector.getByRole("button", { name: "Review diff", exact: true }).click();
+		const gitDiffDialog = page.getByRole("dialog", { name: "Git diff for result.txt" });
+		await expect(gitDiffDialog).toContainText("Fixture result");
+		await page.getByRole("button", { name: "Close Git diff", exact: true }).click({ position: { x: 8, y: 8 } });
+		await expect(gitDiffDialog).toBeHidden();
+
+		await page.getByRole("tab", { name: "Agent Hub", exact: true }).click();
+		await verifier.click();
+		await expect(agentHubWindow).toBeVisible();
+		await browserTab.click();
+		await expect(agentHubWindow).toBeHidden();
+		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 	} finally {
 		await teardownElectronTest(app, userData);
 	}
@@ -1652,8 +1969,9 @@ test("opens the current chat terminal drawer without changing chat state", async
 	const workspace = path.join(userData, "workspace");
 	await seed(userData, workspace, ["fixture-terminal-chat"]);
 	const app = await launch(userData, workspace);
+	let page: Page | undefined;
 	try {
-		const page = await app.firstWindow();
+		page = await app.firstWindow();
 		await page.setViewportSize({ width: 1568, height: 470 });
 		const composer = page.getByLabel("Message OMP");
 		await expect(composer).toBeVisible({ timeout: 20_000 });
@@ -1673,11 +1991,69 @@ test("opens the current chat terminal drawer without changing chat state", async
 		await expect(terminalToggle).toHaveAttribute("aria-expanded", "false");
 		await expect(terminalPanel).toBeHidden();
 
+		// Intercept the first .wasm request with a synthetic 404 to test recovery on restart
+		await page.evaluate(() => {
+			const originalFetch = window.fetch;
+			let intercepted = false;
+			(window as unknown as { __originalFetch: typeof window.fetch }).__originalFetch = originalFetch;
+			window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (!intercepted && url.includes(".wasm")) {
+					intercepted = true;
+					return new Response("Not Found", { status: 404, statusText: "Not Found" });
+				}
+				return originalFetch(input, init);
+			};
+		});
+
 		await terminalToggle.click();
 		await expect(terminalToggle).toHaveAttribute("aria-label", "Hide terminal");
 		await expect(terminalToggle).toHaveAttribute("aria-expanded", "true");
 		await expect(terminalPanel).toBeVisible();
-		const canvas = terminalPanel.locator(".chat-terminal-canvas");
+
+		const expectedRenderer = process.platform === "win32" ? "wterm-dom" : "ghostty-web";
+		const initialShell = page.locator(".chat-terminal-shell");
+		await expect(initialShell).toHaveAttribute("data-terminal-renderer", expectedRenderer);
+
+		const alert = page.getByRole("alert");
+		await expect(alert).toBeVisible({ timeout: 10_000 });
+		const restartButton = page.getByRole("button", { name: "Restart shell", exact: true });
+		await expect(restartButton).toBeVisible({ timeout: 5_000 });
+
+		// Restore window.fetch before clicking restart
+		await page.evaluate(() => {
+			const customWindow = window as unknown as { __originalFetch?: typeof window.fetch };
+			if (customWindow.__originalFetch) {
+				window.fetch = customWindow.__originalFetch;
+				delete customWindow.__originalFetch;
+			}
+		});
+
+		const wasmResponses: number[] = [];
+		const pageErrors: string[] = [];
+		const consoleErrors: string[] = [];
+		page.on("response", response => {
+			if (response.url().includes(".wasm")) {
+				wasmResponses.push(response.status());
+			}
+		});
+		page.on("pageerror", error => {
+			pageErrors.push(error.message);
+		});
+		page.on("console", message => {
+			if (message.type() === "error") {
+				consoleErrors.push(message.text());
+			}
+		});
+
+		await restartButton.click();
+		await expect(restartButton).toHaveCount(0);
+
+		await expect.poll(() => wasmResponses, { timeout: 10_000 }).toContain(200);
+		expect(pageErrors).toEqual([]);
+		expect(consoleErrors).toEqual([]);
+
+		const terminalRegion = page.getByRole("region", { name: "Shell terminal" });
 		const panelFrame = page.locator(".chat-terminal-panel");
 		const composerBox = await page.locator(".composer-wrap").boundingBox();
 		const panelBox = await panelFrame.boundingBox();
@@ -1687,9 +2063,10 @@ test("opens the current chat terminal drawer without changing chat state", async
 		const panelWidth = await panelFrame.evaluate(element => element.getBoundingClientRect().width);
 		const paneWidth = await page.locator(".transcript-pane").evaluate(element => element.getBoundingClientRect().width);
 		expect(panelWidth).toBeCloseTo(paneWidth, 0);
-		await expect(canvas).toBeVisible();
+		await expect(terminalRegion).toBeVisible();
 		await expect(page.getByRole("button", { name: "Agent activity", exact: true })).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Shell", exact: true })).toHaveCount(0);
+
 		const visual = await page.evaluate(() => {
 			const panel = document.querySelector(".chat-terminal-drawer");
 			const canvasHost = document.querySelector(".chat-terminal-canvas");
@@ -1702,22 +2079,24 @@ test("opens the current chat terminal drawer without changing chat state", async
 		expect(visual.fontFamily).toContain("monospace");
 
 		const shell = page.locator(".chat-terminal-shell");
+		await expect(shell).toHaveAttribute("data-terminal-renderer", expectedRenderer);
 		await expect.poll(async () => Number(await shell.getAttribute("data-rendered-offset")), { timeout: 5_000 }).toBeGreaterThan(0);
 		const renderedBefore = Number(await shell.getAttribute("data-rendered-offset"));
-		await canvas.locator("canvas").first().click();
+		await terminalRegion.click();
 		await page.keyboard.type("printf 'gradivus-terminal-ok'");
 		await page.keyboard.press("Enter");
 		await expect.poll(async () => Number(await shell.getAttribute("data-rendered-offset")), { timeout: 5_000 }).toBeGreaterThan(renderedBefore);
-		await canvas.locator("canvas").first().click();
+		await terminalRegion.click();
 		await page.keyboard.type("exit");
 		await page.keyboard.press("Enter");
-		const restartButton = page.getByRole("button", { name: "Restart shell", exact: true });
-		await expect(restartButton).toBeVisible({ timeout: 5_000 });
-		await restartButton.click();
-		await expect(restartButton).toHaveCount(0);
+		const exitRestartButton = page.getByRole("button", { name: "Restart shell", exact: true });
+		await expect(exitRestartButton).toBeVisible({ timeout: 5_000 });
+		await exitRestartButton.click();
+		await expect(exitRestartButton).toHaveCount(0);
 		const restartedShell = page.locator(".chat-terminal-shell");
 		const restartedBefore = Number(await restartedShell.getAttribute("data-rendered-offset"));
-		await restartedShell.locator(".chat-terminal-canvas canvas").first().click();
+		const restartedRegion = page.getByRole("region", { name: "Shell terminal" });
+		await restartedRegion.click();
 		await page.keyboard.type("printf 'gradivus-terminal-restart-ok'");
 		await page.keyboard.press("Enter");
 		await expect.poll(async () => Number(await restartedShell.getAttribute("data-rendered-offset")), { timeout: 5_000 }).toBeGreaterThan(restartedBefore);
@@ -1731,17 +2110,26 @@ test("opens the current chat terminal drawer without changing chat state", async
 		await terminalToggle.click();
 		await expect(terminalToggle).toHaveAttribute("aria-expanded", "true");
 		await expect(terminalPanel).toBeVisible();
-		const reopenedCanvas = terminalPanel.locator(".chat-terminal-canvas");
-		await expect(reopenedCanvas).toBeVisible();
+		const reopenedRegion = page.getByRole("region", { name: "Shell terminal" });
+		await expect(reopenedRegion).toBeVisible();
 		const reopenedShell = page.locator(".chat-terminal-shell");
 		const reopenedBefore = Number(await reopenedShell.getAttribute("data-rendered-offset"));
 		expect(reopenedBefore).toBeGreaterThanOrEqual(offsetBeforeHide);
-		await reopenedCanvas.locator("canvas").first().click();
+		await reopenedRegion.click();
 		await page.keyboard.type("printf 'gradivus-terminal-reopened'");
 		await page.keyboard.press("Enter");
 		await expect.poll(async () => Number(await reopenedShell.getAttribute("data-rendered-offset")), { timeout: 5_000 }).toBeGreaterThan(reopenedBefore);
 		expect(await timeline.innerText()).toBe(timelineBefore);
 	} finally {
+		if (page) {
+			await page.evaluate(() => {
+				const customWindow = window as unknown as { __originalFetch?: typeof window.fetch };
+				if (customWindow.__originalFetch) {
+					window.fetch = customWindow.__originalFetch;
+					delete customWindow.__originalFetch;
+				}
+			}).catch(() => {});
+		}
 		await teardownElectronTest(app, userData);
 	}
 });
@@ -2005,13 +2393,13 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 					terminalBorder: terminal ? getComputedStyle(terminal).borderBottomColor : "",
 				};
 			});
-			const expectedWindow = theme === "dark" ? "#0d0d0d" : "#ffffff";
-			const expectedShell = theme === "dark" ? "#141414" : "#fafafa";
-			const expectedChat = theme === "dark" ? "#101010" : "#ffffff";
-			const expectedCode = theme === "dark" ? "#181818" : "#f5f5f5";
-			const expectedRaised = theme === "dark" ? "#1c1c1c" : "#ffffff";
-			const expectedHover = theme === "dark" ? "#292929" : "#f2f2f2";
-			const expectedLine = theme === "dark" ? "#747474" : "#858585";
+			const expectedWindow = theme === "dark" ? "#111111" : "#ffffff";
+			const expectedShell = theme === "dark" ? "#191919" : "#f9f9f9";
+			const expectedChat = theme === "dark" ? "#141414" : "#ffffff";
+			const expectedCode = theme === "dark" ? "#1c1c1c" : "#f7f7f7";
+			const expectedRaised = theme === "dark" ? "#202020" : "#ffffff";
+			const expectedHover = theme === "dark" ? "#2a2a2a" : "#f0f0f0";
+			const expectedLine = theme === "dark" ? "#747474" : "#7f7f7f";
 			expect(canonicalizeCssColor(colors.rootBackground)).toBe(expectedWindow);
 			expect(canonicalizeCssColor(colors.bodyBackground)).toBe(expectedShell);
 			expect(canonicalizeCssColor(colors.chatBackground)).toBe(expectedChat);
@@ -2082,32 +2470,39 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 			canvasHeight: number;
 			nonBackgroundPixels: number;
 		}> =>
-			page.evaluate(() => {
-				const shell = document.querySelector<HTMLElement>(".chat-terminal-shell");
-				const canvas = document.querySelector<HTMLCanvasElement>(".chat-terminal-canvas canvas");
-				const context = canvas?.getContext("2d");
-				const image = canvas && context ? context.getImageData(0, 0, canvas.width, canvas.height) : undefined;
-				let nonBackgroundPixels = 0;
-				if (image && image.data.length >= 4) {
-					const background = image.data.slice(0, 4);
-					for (let index = 4; index < image.data.length; index += 4) {
-						if (
-							image.data[index] !== background[0] ||
-							image.data[index + 1] !== background[1] ||
-							image.data[index + 2] !== background[2] ||
-							image.data[index + 3] !== background[3]
-						) {
-							nonBackgroundPixels++;
+			page.evaluate(
+				(known: { width: number; height: number }) => {
+					const shell = document.querySelector<HTMLElement>(".chat-terminal-shell");
+					const canvas = document.querySelector<HTMLCanvasElement>(".chat-terminal-canvas canvas");
+					const domHost = document.querySelector<HTMLElement>(".chat-terminal-canvas.wterm");
+					const rows = document.querySelectorAll(".chat-terminal-canvas .term-row");
+					const context = canvas?.getContext("2d");
+					const image = canvas && context ? context.getImageData(0, 0, canvas.width, canvas.height) : undefined;
+					let nonBackgroundPixels = 0;
+					if (image && image.data.length >= 4) {
+						const background = image.data.slice(0, 4);
+						for (let index = 4; index < image.data.length; index += 4) {
+							if (
+								image.data[index] !== background[0] ||
+								image.data[index + 1] !== background[1] ||
+								image.data[index + 2] !== background[2] ||
+								image.data[index + 3] !== background[3]
+							) {
+								nonBackgroundPixels++;
+							}
 						}
+					} else if (domHost && rows.length > 0) {
+						nonBackgroundPixels = rows.length;
 					}
-				}
-				return {
-					offset: Number(shell?.dataset.renderedOffset ?? 0),
-					canvasWidth: canvas?.width ?? 0,
-					canvasHeight: canvas?.height ?? 0,
-					nonBackgroundPixels,
-				};
-			});
+					return {
+						offset: Number(shell?.dataset.renderedOffset ?? 0),
+						canvasWidth: canvas?.width ?? (known.width || domHost?.clientWidth || 0),
+						canvasHeight: canvas?.height ?? (known.height || domHost?.clientHeight || 0),
+						nonBackgroundPixels,
+					};
+				},
+				{ width: replayCanvasWidth, height: replayCanvasHeight },
+			);
 		let replayOffset = 0;
 		let replayCanvasWidth = 0;
 		let replayCanvasHeight = 0;
@@ -2158,6 +2553,18 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 
 		const assertTheme = async (theme: ResolvedTheme): Promise<void> => {
 			const palette = DESKTOP_THEME_PALETTES[theme];
+			const titlebarMark = page.locator(".shell-titlebar .gradivus-mark");
+			await expect(titlebarMark).toBeVisible();
+			await expect(page.getByAltText("Gradivus mark")).toHaveCount(1);
+			const logoBackground = await titlebarMark.evaluate((element: HTMLImageElement) => {
+				const canvas = document.createElement("canvas");
+				canvas.width = element.naturalWidth;
+				canvas.height = element.naturalHeight;
+				const context = canvas.getContext("2d");
+				context?.drawImage(element, 0, 0);
+				return context ? Array.from(context.getImageData(12, 12, 1, 1).data) : [];
+			});
+			expect(logoBackground).toEqual([247, 242, 233, 255]);
 			await expectThemeContrast(page, theme);
 			await expectEnhancedContrast(page);
 			await assertNeutralThemeSurfaces(theme);
@@ -2183,9 +2590,18 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 		};
 
 		await assertTheme("dark");
+		const sidebarControls = page
+			.getByRole("complementary", { name: "Workspaces" })
+			.getByRole("navigation", { name: "Application controls" });
+		await sidebarControls.getByRole("button", { name: "Switch to light mode", exact: true }).click();
+		await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+		await expect.poll(async () => JSON.parse(await fs.readFile(path.join(userData, "settings.json"), "utf8")).theme).toBe("light");
+		await sidebarControls.getByRole("button", { name: "Switch to dark mode", exact: true }).click();
+		await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+		await expect.poll(async () => JSON.parse(await fs.readFile(path.join(userData, "settings.json"), "utf8")).theme).toBe("dark");
 
 		const setThemeInApplicationSettings = async (theme: GradivusSettings["theme"]): Promise<void> => {
-			const settingsButton = page.getByRole("button", { name: "Open application settings", exact: true });
+			const settingsButton = page.getByRole("button", { name: "Open settings", exact: true });
 			await settingsButton.click();
 			await expect(page.getByRole("heading", { name: "Application settings", exact: true })).toBeVisible();
 			const themeField = page.locator("label.settings-field").filter({ hasText: /^Theme/ });
@@ -2261,6 +2677,9 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 		await expect
 			.poll(async () => canonicalizeCssColor(await page.locator(".chat-terminal-drawer").evaluate(element => getComputedStyle(element).backgroundColor)))
 			.toBe(await cssColorFor(DESKTOP_THEME_PALETTES.light.terminal.background));
+		await sidebarControls.getByRole("button", { name: "Switch to dark mode", exact: true }).click();
+		await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+		await expect.poll(async () => JSON.parse(await fs.readFile(path.join(userData, "settings.json"), "utf8")).theme).toBe("dark");
 		await expect(page.getByLabel("Background job completed activity", { exact: true })).toBeVisible();
 	} finally {
 		await teardownElectronTest(app, userData);

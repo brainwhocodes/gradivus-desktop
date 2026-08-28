@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ArrowDown from "@solar-icons/svelte/linear/arrow-down";
+  import ArrowUp from "@solar-icons/svelte/linear/arrow-up";
   import type { SlashCommand } from "../../../shared/contracts";
 
   export let commands: SlashCommand[] = [];
@@ -26,7 +28,7 @@
 <section id="slash-command-menu" class="command-menu" aria-label="Slash command suggestions">
   <header class="command-menu-header">
     <div><span class="eyebrow">Session commands</span><strong>{commands.length} match{commands.length === 1 ? "" : "es"}</strong></div>
-    <span class="command-menu-hints"><kbd>↑</kbd><kbd>↓</kbd> browse · <kbd>Enter</kbd> choose · <kbd>Esc</kbd> close</span>
+    <span class="command-menu-hints"><kbd><ArrowUp size={11} aria-hidden="true" /></kbd><kbd><ArrowDown size={11} aria-hidden="true" /></kbd> browse · <kbd>Enter</kbd> choose · <kbd>Esc</kbd> close</span>
   </header>
   {#if loading}
     <div class="command-menu-state" role="status"><span class="spinner" aria-hidden="true"></span>Loading commands without blocking the editor…</div>

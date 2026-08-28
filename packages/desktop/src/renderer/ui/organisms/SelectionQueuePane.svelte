@@ -1,4 +1,5 @@
 <script lang="ts">
+	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import type { QueuedElementTask } from "../../../shared/contracts";
 
 	interface Props {
@@ -33,7 +34,7 @@
 				Clear
 			</button>
 			<button type="button" class="selection-queue-close" aria-label="Close selection queue" title="Close selection queue" onclick={onclose}>
-				<span aria-hidden="true">×</span>
+				<CloseCircle size={16} aria-hidden="true" />
 			</button>
 		</div>
 	</header>

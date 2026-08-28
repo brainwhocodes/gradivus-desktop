@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { tick } from "svelte";
 	import type { PromptAttachmentView, ThinkingLevel } from "../../../shared/contracts";
 	import { formatBytes } from "@oh-my-pi/pi-utils/format";
 	import { highlightMagicKeywords } from "../../markdown";
+	import ArrowUp from "@solar-icons/svelte/linear/arrow-up";
+	import ClipboardList from "@solar-icons/svelte/linear/clipboard-list";
 	import Paperclip from "@solar-icons/svelte/linear/paperclip";
 	import type { DropdownOption } from "../../settings-types";
 	import AttachmentChip from "../molecules/AttachmentChip.svelte";
@@ -22,9 +25,8 @@
 		attachDisabled: boolean;
 		attachments: PromptAttachmentView[];
 		attachmentStatus?: string;
-		kindLabelFor: (kind: PromptAttachmentView["kind"]) => string;
 		displayNameFor: (name: string) => string;
-		onStageFiles: (files: FileList) => void;
+		onStageFiles: (files: FileList, insertionIndex: number) => void;
 		onRemoveAttachment: (attachment: PromptAttachmentView) => void;
 		attachmentInputEl?: HTMLInputElement;
 		inputEl?: HTMLTextAreaElement;
@@ -63,7 +65,6 @@
 		attachDisabled,
 		attachments,
 		attachmentStatus = "",
-		kindLabelFor,
 		displayNameFor,
 		onStageFiles,
 		onRemoveAttachment,
@@ -93,6 +94,27 @@
 	let backdropEl = $state<HTMLDivElement>();
 	let actionMenuOpen = $state(false);
 	let actionMenuTriggerEl = $state<HTMLElement>();
+	let attachmentInsertionIndex = $state<number>();
+	let attachmentBarEl = $state<HTMLDivElement>();
+	let attachmentAddButtonEl = $state<HTMLButtonElement>();
+
+	function rememberAttachmentInsertion(): void {
+		attachmentInsertionIndex = inputEl?.selectionEnd ?? draft.length;
+	}
+
+	async function handleAttachmentRemoval(
+		attachment: PromptAttachmentView,
+		index: number,
+		event: MouseEvent,
+	): Promise<void> {
+		const restoreKeyboardFocus = event.detail === 0;
+		onRemoveAttachment(attachment);
+		if (!restoreKeyboardFocus) return;
+		await tick();
+		const removeButtons = attachmentBarEl?.querySelectorAll<HTMLButtonElement>(".attachment-chip-remove");
+		const nextButton = removeButtons?.[Math.min(index, Math.max(0, removeButtons.length - 1))];
+		(nextButton ?? attachmentAddButtonEl)?.focus({ preventScroll: true });
+	}
 
 	function closeActionMenu(restoreFocus = false): void {
 		if (!actionMenuOpen) return;
@@ -165,14 +187,61 @@
 <div class="composer-top-bar" class:is-plan-mode={planMode?.enabled}>
   {#if planMode?.enabled}
     <div class="plan-mode-pill" role="status" title="Plan mode is active">
-      <span class="plan-mode-icon" aria-hidden="true">📋</span>
+      <span class="plan-mode-icon" aria-hidden="true"><ClipboardList size={14} /></span>
       <span class="plan-mode-title">PLAN MODE</span>
       {#if onTogglePlanMode}
         <button type="button" class="plan-mode-exit" onclick={onTogglePlanMode} title="Exit plan mode">Exit</button>
       {/if}
     </div>
   {/if}
-
+  <div bind:this={attachmentBarEl} class="composer-attachment-bar">
+    <input
+      bind:this={attachmentInputEl}
+      class="sr-only"
+      type="file"
+      multiple
+      aria-label="Choose files to attach"
+      disabled={attachDisabled}
+      onchange={(event) => {
+        if (attachDisabled) return;
+        const files = (event.currentTarget as HTMLInputElement).files;
+        const insertionIndex = attachmentInsertionIndex ?? inputEl?.selectionEnd ?? draft.length;
+        attachmentInsertionIndex = undefined;
+        if (files) onStageFiles(files, insertionIndex);
+      }}
+    />
+    <button
+      bind:this={attachmentAddButtonEl}
+      type="button"
+      class="attachment-add-button"
+      aria-label="Attach files"
+      title="Attach files"
+      disabled={attachDisabled}
+      onclick={() => {
+        rememberAttachmentInsertion();
+        attachmentInputEl?.click();
+      }}
+    >
+      <Paperclip size={16} aria-hidden="true" />
+      <span>Attach</span>
+    </button>
+    {#if attachments.length > 0}
+      <div class="attachment-chip-list" aria-label="Attached files">
+        {#each attachments as attachment, index (attachment.id)}
+          <AttachmentChip
+            kind={attachment.kind}
+            displayName={displayNameFor(attachment.name)}
+            sizeLabel={formatBytes(attachment.size)}
+            removeLabel={`Remove ${displayNameFor(attachment.name)}`}
+            onremove={(event) => void handleAttachmentRemoval(attachment, index, event)}
+          />
+        {/each}
+      </div>
+    {/if}
+    {#if attachmentStatus}
+      <span class="attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>
+    {/if}
+  </div>
 </div>
   {#if dragging}
     <div class="composer-drop-overlay" role="status" aria-live="polite">Drop files to attach</div>
@@ -205,48 +274,6 @@
     ></textarea>
   </div>
   <div class="composer-actions">
-  <div class="composer-attachment-bar">
-    <input
-      bind:this={attachmentInputEl}
-      class="sr-only"
-      type="file"
-      multiple
-      aria-label="Choose files to attach"
-      disabled={attachDisabled}
-      onchange={(event) => {
-        if (attachDisabled) return;
-        const files = (event.currentTarget as HTMLInputElement).files;
-        if (files) onStageFiles(files);
-      }}
-    />
-    <button
-      type="button"
-      class="attachment-add-button"
-      aria-label="Attach files"
-      title="Attach files"
-      disabled={attachDisabled}
-      onclick={() => attachmentInputEl?.click()}
-    >
-      <Paperclip size={16} aria-hidden="true" />
-      <span>Attach</span>
-    </button>
-    {#if attachments.length > 0}
-      <div class="attachment-chip-list" aria-label="Attached files">
-        {#each attachments as attachment (attachment.id)}
-          <AttachmentChip
-            kindLabel={kindLabelFor(attachment.kind)}
-            displayName={displayNameFor(attachment.name)}
-            sizeLabel={formatBytes(attachment.size)}
-            removeLabel={`Remove ${displayNameFor(attachment.name)}`}
-            onremove={() => onRemoveAttachment(attachment)}
-          />
-        {/each}
-      </div>
-    {/if}
-    {#if attachmentStatus}
-      <span class="attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>
-    {/if}
-  </div>
     <div class="composer-tools">
       <RuntimePicker
         {providerOptions}
@@ -299,7 +326,7 @@
           disabled={sendDisabled}
           onclick={onSend}
         >
-          <span class="send-glyph" aria-hidden="true">↥</span>
+          <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} /></span>
           <span class="send-label">Steer</span>
         </button>
       {:else}
@@ -311,7 +338,7 @@
           disabled={sendDisabled}
           onclick={onSend}
         >
-          <span class="send-glyph" aria-hidden="true">↑</span>
+          <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} /></span>
           <span class="send-label">Send</span>
         </button>
       {/if}

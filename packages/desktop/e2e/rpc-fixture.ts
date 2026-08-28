@@ -8,6 +8,11 @@ import {
   writeOmpGrpcBootstrapFile,
 } from "@oh-my-pi/pi-grpc";
 
+const FIXTURE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
 type AttachmentKind = "file" | "prompt" | "image";
 type AttachmentRoute = "prompt" | "steer" | "follow_up";
 
@@ -66,6 +71,8 @@ function decodeMention(value: string): string {
 function parseEnvelopeBlock(block: string): ParsedEnvelope | undefined {
   const fullPrompt = block.match(/^Full prompt:\s+(@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))\. Read this file as the complete user request before responding\.$/);
   if (fullPrompt) return { kind: "prompt", path: decodeMention(fullPrompt[1].slice(1)) };
+  const promptText = block.match(/^Prompt text:\s+(@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))\. Read the referenced UTF-8 text at this exact position in the request\.$/);
+  if (promptText) return { kind: "prompt", path: decodeMention(promptText[1].slice(1)) };
   const file = block.match(/^File\s+("(?:[^"\\]|\\.)*"):\s+(@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))\. Read this attachment as needed\.$/);
   if (file) {
     let name = file[1];
@@ -81,16 +88,24 @@ function parseEnvelopeBlock(block: string): ParsedEnvelope | undefined {
   return undefined;
 }
 
+const ATTACHMENT_REFERENCE_LINE = /\[(?:Document|Image) A\d+: "(?:[^"\\]|\\.)*"\]\n/g;
+const ATTACHMENT_ENVELOPE =
+  /Prompt text:\s+@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\. Read the referenced UTF-8 text at this exact position in the request\.|File\s+"(?:[^"\\]|\\.)*":\s+@(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\. Read this attachment as needed\.|Image\s+"(?:[^"\\]|\\.)*" is attached to this message\./g;
+
 function parseAttachmentMessage(message: string): { baseText: string; envelopes: ParsedEnvelope[] } {
-  const blocks = message.split(/\n\n/);
+  const normalized = message.replace(ATTACHMENT_REFERENCE_LINE, "");
   const envelopes: ParsedEnvelope[] = [];
-  const baseBlocks: string[] = [];
-  for (const block of blocks) {
-    const envelope = parseEnvelopeBlock(block);
+  const baseParts: string[] = [];
+  let cursor = 0;
+  for (const match of normalized.matchAll(ATTACHMENT_ENVELOPE)) {
+    const index = match.index ?? cursor;
+    baseParts.push(normalized.slice(cursor, index));
+    const envelope = parseEnvelopeBlock(match[0]);
     if (envelope) envelopes.push(envelope);
-    else baseBlocks.push(block);
+    cursor = index + match[0].length;
   }
-  return { baseText: baseBlocks.join("\n\n"), envelopes };
+  baseParts.push(normalized.slice(cursor));
+  return { baseText: baseParts.join("").trim(), envelopes };
 }
 
 function hashBytes(bytes: Uint8Array): string {
@@ -177,6 +192,7 @@ const performanceFixture = process.env.GRADIVUS_PERF_FIXTURE === "1";
 const timelineFixture = process.env.GRADIVUS_TIMELINE_FIXTURE === "1";
 const settingsResponseDelay = Math.max(0, Number(process.env.GRADIVUS_SETTINGS_RESPONSE_DELAY ?? "0") || 0);
 const extensionDelayMs = Math.max(0, Number(process.env.GRADIVUS_EXTENSION_DELAY_MS ?? "0") || 0);
+const agentHubMessageDelayMs = Math.max(0, Number(process.env.GRADIVUS_AGENT_HUB_MESSAGE_DELAY_MS ?? "0") || 0);
 let settingsRequestCount = 0;
 const specialMessagesFixture = process.env.GRADIVUS_SPECIAL_MESSAGES === "1";
 const specialMessages = specialMessagesFixture
@@ -845,6 +861,10 @@ function handleFrame(frame) {
     const readId = `fixture-wave-read-${sequence}`;
     const writeId = `fixture-wave-write-${sequence}`;
     const editId = `fixture-wave-edit-${sequence}`;
+    const imageChanges = [
+      { id: `fixture-wave-image-a-${sequence}`, path: "preview-a.png" },
+      { id: `fixture-wave-image-b-${sequence}`, path: "preview-b.png" },
+    ];
     setTimeout(() => {
       send({ type: "agent_start" });
       send({ type: "message_start", message: { id: userId, role: "user", content: promptCommand.message } });
@@ -880,6 +900,23 @@ function handleFrame(frame) {
       result: "notes.txt edited",
       isError: false,
     }), 600);
+    setTimeout(() => {
+      for (const image of imageChanges) {
+        send({
+          type: "tool_execution_start",
+          toolCallId: image.id,
+          toolName: "write",
+          args: { path: image.path, content: "binary image" },
+        });
+        fs.writeFileSync(path.join(process.cwd(), image.path), FIXTURE_PNG);
+        send({
+          type: "tool_execution_end",
+          toolCallId: image.id,
+          result: `${image.path} written`,
+          isError: false,
+        });
+      }
+    }, 640);
     setTimeout(() => {
       send({ type: "message_start", message: { id: answerId, role: "assistant", content: [] } });
       send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the activity stream." }] } });
@@ -1095,7 +1132,12 @@ function handleFrame(frame) {
     const reset = requestedFromByte > 64;
     const fromByte = reset ? 0 : requestedFromByte;
     const messages = fromByte === 0 ? [{ role: "assistant", content: [{ type: "text", text: "Fixture collaborator transcript." }] }] : [];
-    return response({ fromByte, nextByte: 64, reset, entries: [], messages });
+    const result = { fromByte, nextByte: 64, reset, entries: [], messages };
+    if (agentHubMessageDelayMs > 0) {
+      setTimeout(() => response(result), agentHubMessageDelayMs);
+      return;
+    }
+    return response(result);
   }
   if (command.type === "agent_hub_message") {
     const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
@@ -1201,6 +1243,13 @@ function handleFrame(frame) {
     response({ accepted: true });
     if (/timeline wave|activity wave/i.test(analysis.baseText)) {
       finishTimelineWave(command);
+      return;
+    }
+    if (/markdown copy/i.test(analysis.baseText)) {
+      finishAgent(
+        command,
+        '## Copy proof\n\n```typescript\nconst rawTag = "<copy>";\n```\n\nRendered safely.',
+      );
       return;
     }
     if (/locked account|provider error/i.test(analysis.baseText)) {

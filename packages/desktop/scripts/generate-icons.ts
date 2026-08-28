@@ -1,21 +1,13 @@
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $ } from "bun";
 import sharp from "sharp";
 
 const desktopResources = path.resolve(import.meta.dir, "../resources");
-const sourceCandidate = path.join(os.homedir(), "Downloads/gradivus-ascii-logo-hd.png");
+const lightArtworkPath = path.join(desktopResources, "titlebar-logo.png");
 const iconPngPath = path.join(desktopResources, "icon.png");
 const iconIcoPath = path.join(desktopResources, "icon.ico");
-const icnsDest = path.join(desktopResources, "icon.icns");
+const iconIcnsPath = path.join(desktopResources, "icon.icns");
 
-let sourceBuffer: Buffer;
-try {
-	sourceBuffer = await fs.readFile(sourceCandidate);
-} catch {
-	sourceBuffer = await fs.readFile(iconPngPath);
-}
+const sourceBuffer = Buffer.from(await Bun.file(lightArtworkPath).arrayBuffer());
 
 // 1. Generate master macOS squircle icon.png (1024x1024 with 824x824 body and drop shadow)
 const artworkBuffer = await sharp(sourceBuffer).resize(824, 824, { fit: "cover" }).png().toBuffer();
@@ -46,38 +38,39 @@ const squircleSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height
 
 const masterPngBuffer = await sharp(Buffer.from(squircleSvg)).png({ quality: 100, compressionLevel: 9 }).toBuffer();
 
-await fs.mkdir(desktopResources, { recursive: true });
-await fs.writeFile(iconPngPath, masterPngBuffer);
+await Bun.write(iconPngPath, masterPngBuffer);
 
-// 2. Generate macOS .iconset and compile .icns
-if (process.platform === "darwin") {
-	const iconsetDir = path.join(os.tmpdir(), "gradivus-squircle.iconset");
-	await fs.mkdir(iconsetDir, { recursive: true });
-
-	const iconSpecs = [
-		{ name: "icon_16x16.png", size: 16 },
-		{ name: "icon_16x16@2x.png", size: 32 },
-		{ name: "icon_32x32.png", size: 32 },
-		{ name: "icon_32x32@2x.png", size: 64 },
-		{ name: "icon_128x128.png", size: 128 },
-		{ name: "icon_128x128@2x.png", size: 256 },
-		{ name: "icon_256x256.png", size: 256 },
-		{ name: "icon_256x256@2x.png", size: 512 },
-		{ name: "icon_512x512.png", size: 512 },
-		{ name: "icon_512x512@2x.png", size: 1024 },
-	];
-
-	for (const spec of iconSpecs) {
-		const dest = path.join(iconsetDir, spec.name);
-		await sharp(masterPngBuffer)
-			.resize(spec.size, spec.size, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+// 2. Generate a modern PNG-backed macOS .icns on every host.
+const icnsSpecs = [
+	{ type: "icp4", size: 16 },
+	{ type: "ic11", size: 32 },
+	{ type: "icp5", size: 32 },
+	{ type: "ic12", size: 64 },
+	{ type: "icp6", size: 64 },
+	{ type: "ic07", size: 128 },
+	{ type: "ic13", size: 256 },
+	{ type: "ic08", size: 256 },
+	{ type: "ic14", size: 512 },
+	{ type: "ic09", size: 512 },
+	{ type: "ic10", size: 1024 },
+] as const;
+const icnsEntries = await Promise.all(
+	icnsSpecs.map(async ({ type, size }) => {
+		const png = await sharp(masterPngBuffer)
+			.resize(size, size, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
 			.png({ quality: 100, compressionLevel: 9 })
-			.toFile(dest);
-	}
-
-	await $`iconutil -c icns ${iconsetDir} -o ${icnsDest}`.quiet();
-	await fs.rm(iconsetDir, { recursive: true, force: true });
-}
+			.toBuffer();
+		const entry = Buffer.alloc(8 + png.length);
+		entry.write(type, 0, 4, "ascii");
+		entry.writeUInt32BE(entry.length, 4);
+		png.copy(entry, 8);
+		return entry;
+	}),
+);
+const icnsHeader = Buffer.alloc(8);
+icnsHeader.write("icns", 0, 4, "ascii");
+icnsHeader.writeUInt32BE(icnsHeader.length + icnsEntries.reduce((sum, entry) => sum + entry.length, 0), 4);
+await Bun.write(iconIcnsPath, Buffer.concat([icnsHeader, ...icnsEntries]));
 
 // 3. Generate multi-resolution Windows icon.ico
 const sizes = [256, 128, 64, 48, 32, 16];
@@ -119,6 +112,6 @@ for (let i = 0; i < count; i++) {
 }
 
 const finalIco = Buffer.concat([icoHeader, ...entries, ...pngBuffers]);
-await fs.writeFile(iconIcoPath, finalIco);
+await Bun.write(iconIcoPath, finalIco);
 
 process.stdout.write("Generated Gradivus squircle icon.png, icon.ico, and icon.icns\n");

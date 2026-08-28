@@ -10,6 +10,7 @@
 		onclose?: () => void;
 		cancelable?: boolean;
 		onclickbackdrop?: () => void;
+		backdropDismissLabel?: string;
 		class?: string;
 		children: Snippet;
 		[key: string]: unknown;
@@ -24,6 +25,7 @@
 		onclose,
 		cancelable = false,
 		onclickbackdrop,
+		backdropDismissLabel = "Close dialog",
 		class: extraClass = "",
 		children,
 		...rest
@@ -37,13 +39,7 @@
 </script>
 
 {#if backdrop}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div
-		class={`modal-backdrop${backdropClass ? ` ${backdropClass}` : ""}`}
-		onclick={(event) => {
-			if (event.target === event.currentTarget) onclickbackdrop?.();
-		}}
-	>
+	<div class={`modal-backdrop${backdropClass ? ` ${backdropClass}` : ""}`}>
 		<svelte:element
 			this={dialogTag}
 			class={shellClass}
@@ -63,6 +59,14 @@
 		>
 			{@render children()}
 		</svelte:element>
+		{#if onclickbackdrop}
+			<button
+				type="button"
+				class="modal-backdrop-dismiss"
+				aria-label={backdropDismissLabel}
+				onclick={onclickbackdrop}
+			></button>
+		{/if}
 	</div>
 {:else}
 	<dialog

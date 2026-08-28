@@ -6,8 +6,9 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { WorkspaceCommandV1, WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 import { ensureWorkspaceRuntime, type WorkspaceRuntimeDescriptor } from "@oh-my-pi/pi-workspace-runtime/bootstrap";
 import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
-import { app, BrowserWindow, ipcMain, nativeTheme, net, protocol, session } from "electron";
-import type { OpenChatTerminalInput } from "../shared/contracts";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, net, protocol, session } from "electron";
+import { MAX_INLINE_PROMPT_BYTES, type OpenChatTerminalInput } from "../shared/contracts";
+import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../shared/selection-agent";
 import { DESKTOP_THEME_PALETTES, type ResolvedTheme, resolveTheme } from "../shared/theme-palette";
 import { AppSettingsStore } from "./app-settings";
 import { defaultWorkspacePath, ompExecutablePath, runtimeRootDir } from "./backend-path";
@@ -125,6 +126,13 @@ async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
 	}
 	const defaultProfiles = [
 		{ id: "profile-omp", name: "Oh My Pi", protocol: "omp" as const, config: {}, capabilityIds: [] },
+		{
+			id: BROWSER_SELECTION_AGENT_PROFILE_ID,
+			name: "Page Agent",
+			protocol: "omp" as const,
+			config: {},
+			capabilityIds: [],
+		},
 	];
 
 	for (const profile of defaultProfiles) {
@@ -145,6 +153,11 @@ async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
 			},
 		});
 	}
+}
+
+function showFatalStartupError(title: string, error: unknown): void {
+	const message = error instanceof Error ? error.message : String(error);
+	dialog.showErrorBox(title, `${message}\n\nGradivus cannot continue and will now close. Logs: ~/.omp/logs/`);
 }
 
 app.name = "Gradivus";
@@ -207,6 +220,7 @@ if (!gotLock) {
 				logger.error("Gradivus runtime startup failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
+				showFatalStartupError("Gradivus runtime failed to start", error);
 				rejectServicesReady?.(error);
 				app.quit();
 				return;
@@ -218,6 +232,7 @@ if (!gotLock) {
 			} catch (error) {
 				console.error("WORKSPACE AUTHORITY ERROR:", error);
 				logger.error("Could not initialize workspace authority", { error: String(error) });
+				showFatalStartupError("Gradivus workspace failed to initialize", error);
 				rejectServicesReady?.(error);
 				app.quit();
 				return;
@@ -624,20 +639,20 @@ function registerIpc(): void {
 		const { host: h } = await ensureServices();
 		return h.releasePromptAttachments(id, attachmentIds);
 	});
-	ipcMain.handle("gradivus:prompt", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
+	ipcMain.handle("gradivus:prompt", async (event, id: unknown, composition: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
-		return h.prompt(id, text, attachmentIds);
+		return h.prompt(id, composition);
 	});
-	ipcMain.handle("gradivus:steer", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
+	ipcMain.handle("gradivus:steer", async (event, id: unknown, composition: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
-		return h.steer(id, text, attachmentIds);
+		return h.steer(id, composition);
 	});
-	ipcMain.handle("gradivus:queue", async (event, id: unknown, text: unknown, attachmentIds: unknown) => {
+	ipcMain.handle("gradivus:queue", async (event, id: unknown, composition: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
-		return h.queueFollowUp(id, text, attachmentIds);
+		return h.queueFollowUp(id, composition);
 	});
 	ipcMain.handle("gradivus:abort", async (event, id: unknown) => {
 		assertTrustedSender(event);
@@ -723,6 +738,19 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.loadFileDiff(id, target);
+	});
+	ipcMain.handle("gradivus:workspace-image", async (event, id: unknown, target: unknown, maxDimension: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.loadWorkspaceImage(id, target, maxDimension);
+	});
+	ipcMain.handle("gradivus:clipboard-write", (event, value: unknown) => {
+		assertTrustedSender(event);
+		if (typeof value !== "string") throw new TypeError("clipboard text must be text");
+		if (Buffer.byteLength(value, "utf8") > MAX_INLINE_PROMPT_BYTES) {
+			throw new RangeError("clipboard text exceeds 512 KiB");
+		}
+		clipboard.writeText(value);
 	});
 	ipcMain.handle("gradivus:open-workspace-file", async (event, id: unknown, target: unknown) => {
 		assertTrustedSender(event);
@@ -838,14 +866,12 @@ function registerIpc(): void {
 				logger.error("Failed to show pane context menu", { error: String(error) });
 			});
 	});
-	ipcMain.handle("gradivus:selection-start", async (event, id: unknown, agentId: unknown, captureMode: unknown) => {
+	ipcMain.handle("gradivus:selection-start", async (event, id: unknown, captureMode: unknown) => {
 		assertTrustedSender(event);
-		const { host: h, workspace: ws } = await ensureServices();
+		const { workspace: ws } = await ensureServices();
 		const pane = typeof id === "string" ? id.trim() : "";
-		const targetAgent = typeof agentId === "string" && agentId.trim().length > 0 ? agentId.trim() : undefined;
 		const mode = captureMode === "screenshot" ? "screenshot" : "dom";
-		const epoch = ws.getBrowserDocumentEpoch(pane);
-		const { scope, target } = h.resolveSelectionTarget(pane, targetAgent, epoch);
+		const { scope, target } = await ws.ensureSelectionTarget(pane);
 		return ws.startSelection(scope, { captureMode: mode, target });
 	});
 	ipcMain.handle("gradivus:selection-cancel", async (event, id: unknown, reason: unknown) => {

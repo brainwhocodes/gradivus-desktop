@@ -257,6 +257,7 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 			agentType: "designer";
 			captureMode: "dom";
 			bounds: { x: number; y: number; width: number; height: number };
+			outerHTML: string;
 		}>();
 		const delivery = deferred<string>();
 		electronMocks.executeJavaScript.mockImplementation((script: string) => {
@@ -281,6 +282,7 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 			agentType: "designer",
 			captureMode: "dom",
 			bounds: { x: 10, y: 20, width: 100, height: 40 },
+			outerHTML: '<button id="submit-order">SERIALIZED_INLINE_NODE_SHOULD_NOT_LEAVE_PAGE</button>',
 		});
 		await Promise.resolve();
 		await Promise.resolve();
@@ -295,6 +297,13 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 				captureMode: "dom",
 			}),
 		);
+		const [promptText, , deliveryOptions] = inlineSpy.mock.calls[0]!;
+		expect(promptText).toContain("- **Page URL**:");
+		expect(promptText).toContain("#submit-order");
+		expect(promptText).not.toContain("SERIALIZED_INLINE_NODE_SHOULD_NOT_LEAVE_PAGE");
+		expect(promptText).not.toContain("Element DOM snippet");
+		expect(deliveryOptions).not.toHaveProperty("domSnapshot");
+		expect(deliveryOptions).not.toHaveProperty("domHtml");
 		expect(workspaceHost.getSelectionState("pane-browser-1").phase).toBe("analyzing");
 
 		const cancel = workspaceHost.cancelSelection("pane-browser-1", "test cancellation");
@@ -333,6 +342,7 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 		});
 		workspaceHost.setDesktopHost(desktopHost);
 		const chatSpy = vi.spyOn(desktopHost, "deliverElementPrompt").mockReturnValue(delivery.promise);
+		vi.spyOn(desktopHost, "resolveChatSessionForBrowserAgent").mockReturnValue(scope.sessionId);
 		await workspaceHost.startSelection(scope);
 		pageAction.resolve({
 			selector: "main > h1",
@@ -343,8 +353,7 @@ describe("Element Selection End-to-End Workflow with Authenticated Runtime", () 
 			captureMode: "dom",
 			bounds: { x: 12, y: 24, width: 180, height: 48 },
 		});
-		await Promise.resolve();
-		await Promise.resolve();
+		await vi.waitFor(() => expect(chatSpy).toHaveBeenCalled());
 
 		expect(chatSpy).toHaveBeenCalledWith(
 			expect.any(String),

@@ -4,7 +4,11 @@ import * as path from "node:path";
 import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAgentSwatch } from "../src/shared/agent-swatch";
-import type { GradivusEvent, ProcessState, SessionRecordV1 } from "../src/shared/contracts";
+import type { GradivusEvent, ProcessState, PromptCompositionPart, SessionRecordV1 } from "../src/shared/contracts";
+
+function composition(...parts: PromptCompositionPart[]) {
+	return { parts };
+}
 
 const processHarness = vi.hoisted(() => ({
 	instances: [] as Array<{
@@ -354,7 +358,9 @@ describe("DesktopHost runtime supervision", () => {
 		host.setWindow({ webContents: { send } } as never);
 		await host.openSession("one");
 
-		await expect(host.prompt("one", "recover provider")).resolves.toBe("gradivus-test");
+		await expect(host.prompt("one", composition({ type: "text", text: "recover provider" }))).resolves.toBe(
+			"gradivus-test",
+		);
 		processHarness.instances[0]?.emitEvent({
 			type: "prompt_result",
 			id: "gradivus-test",
@@ -388,13 +394,22 @@ describe("DesktopHost runtime supervision", () => {
 			},
 		]);
 		await host.openSession("one");
-		await host.prompt("one", "summarize", [file!.id, image!.id]);
+		const orderedComposition = composition(
+			{ type: "text", text: "summarize " },
+			{ type: "attachment", id: image!.id },
+			{ type: "text", text: " then " },
+			{ type: "attachment", id: file!.id },
+		);
+		await host.prompt("one", orderedComposition);
 		expect(processHarness.promptCalls.at(-1)).toMatchObject({
 			text: expect.stringContaining('File "notes.md": @"'),
 			images: [{ type: "image", mimeType: "image/png" }],
 		});
-		await host.steer("one", "steer", [file!.id, image!.id]);
-		await host.queueFollowUp("one", "follow up", [file!.id, image!.id]);
+		const sentText = processHarness.promptCalls.at(-1)?.text ?? "";
+		expect(sentText.indexOf(image!.reference)).toBeLessThan(sentText.indexOf(" then "));
+		expect(sentText.indexOf(" then ")).toBeLessThan(sentText.indexOf(file!.reference));
+		await host.steer("one", orderedComposition);
+		await host.queueFollowUp("one", orderedComposition);
 		expect(processHarness.requestCalls.filter(request => request.type === "steer")).toHaveLength(1);
 		expect(processHarness.requestCalls.filter(request => request.type === "follow_up")).toHaveLength(1);
 		expect(processHarness.requestCalls.at(-1)).toMatchObject({
@@ -404,14 +419,33 @@ describe("DesktopHost runtime supervision", () => {
 		});
 	});
 
+	it("rejects duplicate and cross-session attachment IDs without consuming the staged attachment", async () => {
+		const host = await createHost(["one", "two"]);
+		const [own] = await host.stagePromptAttachments("one", [
+			{ name: "own.txt", data: new TextEncoder().encode("own") },
+		]);
+		const [foreign] = await host.stagePromptAttachments("two", [
+			{ name: "foreign.txt", data: new TextEncoder().encode("foreign") },
+		]);
+		await host.openSession("one");
+
+		await expect(host.prompt("one", composition({ type: "attachment", id: foreign!.id }))).rejects.toThrow(
+			"unknown prompt attachment",
+		);
+		await expect(
+			host.prompt("one", composition({ type: "attachment", id: own!.id }, { type: "attachment", id: own!.id })),
+		).rejects.toThrow("duplicate prompt attachment ID");
+		await expect(host.prompt("one", composition({ type: "attachment", id: own!.id }))).resolves.toBe("gradivus-test");
+	});
 	it("keeps staged IDs available after dispatch failure and removes them on host close", async () => {
 		const host = await createHost(["one"]);
 		const [file] = await host.stagePromptAttachments("one", [{ name: "retry.txt", data: new Uint8Array([1, 2, 3]) }]);
 		await host.openSession("one");
 		processHarness.failNextPrompt = true;
-		await expect(host.prompt("one", "retry", [file!.id])).rejects.toThrow("prompt failed");
-		await host.prompt("one", "retry", [file!.id]);
-		const stagedPath = processHarness.promptCalls.at(-1)?.text.match(/@"([^\\"]+)"/)?.[1];
+		const retryComposition = composition({ type: "text", text: "retry " }, { type: "attachment", id: file!.id });
+		await expect(host.prompt("one", retryComposition)).rejects.toThrow("prompt failed");
+		await host.prompt("one", retryComposition);
+		const stagedPath = processHarness.promptCalls.at(-1)?.text.match(/@"([^"]+)"/)?.[1];
 		expect(stagedPath).toBeDefined();
 		await host.close();
 		await expect(stat(stagedPath!)).rejects.toMatchObject({ code: "ENOENT" });
@@ -419,10 +453,11 @@ describe("DesktopHost runtime supervision", () => {
 
 	it("holds admission for each complete client command", async () => {
 		const host = await createHost(["one", "two", "three", "four"]);
-		const held = [host.prompt("one", "hold"), host.prompt("two", "hold"), host.prompt("three", "hold")];
+		const hold = composition({ type: "text", text: "hold" });
+		const held = [host.prompt("one", hold), host.prompt("two", hold), host.prompt("three", hold)];
 		await vi.waitFor(() => expect(processHarness.promptResolvers.size).toBe(3));
 
-		const fourth = host.prompt("four", "quick");
+		const fourth = host.prompt("four", composition({ type: "text", text: "quick" }));
 		await Promise.resolve();
 		expect(processHarness.instances[3]?.startCalls).toBe(0);
 		expect(processHarness.instances.slice(0, 3).map(instance => instance.stopCalls)).toEqual([0, 0, 0]);

@@ -32,6 +32,7 @@ import type {
 	WorkspaceDocumentV1,
 	WorkspaceEvent,
 } from "../shared/contracts";
+import { BROWSER_SELECTION_AGENT_ID_PREFIX, BROWSER_SELECTION_AGENT_PROFILE_ID } from "../shared/selection-agent";
 import {
 	DESKTOP_THEME_PALETTES,
 	type ResolvedTheme,
@@ -75,18 +76,10 @@ interface InspectorBounds {
 interface InspectorTaskPayload {
 	tagName?: string;
 	selector?: string;
-	id?: string;
-	classes?: string[];
-	attributes?: Record<string, string>;
-	role?: string;
-	name?: string;
-	text?: string;
-	outerHTML?: string;
 	instruction?: string;
 	action?: ElementTaskAction;
 	agentType?: string;
 	captureMode?: string;
-	hierarchy?: string[];
 	bounds?: InspectorBounds;
 }
 
@@ -196,6 +189,11 @@ function buildInspectorScript(
 ".inspector-box.ready{border-color:var(--inspector-success-boundary);background:color-mix(in srgb,var(--inspector-success-surface) 65%,transparent)}",
 ".inspector-box.error{border-color:var(--inspector-danger-boundary);background:color-mix(in srgb,var(--inspector-danger-surface) 65%,transparent)}",
 ".inspector-pill{position:absolute;bottom:calc(100% + 5px);left:0;padding:3px 8px;white-space:nowrap;color:var(--inspector-foreground);background:var(--inspector-shell-raised);border:1px solid var(--inspector-agent-swatch,var(--inspector-line));border-radius:var(--inspector-radius-small,5px);font:11px/14px 'Departure Mono',ui-monospace,monospace;box-shadow:0 8px 24px var(--inspector-shadow-color)}",
+      ".agent-cursor{position:fixed;left:0;top:0;z-index:2147483647;display:none;width:24px;height:24px;pointer-events:none;will-change:transform;color:var(--inspector-agent-swatch,var(--inspector-accent-boundary))}",
+      ".agent-cursor::before,.agent-cursor::after{content:'';position:absolute;background:currentColor;box-shadow:0 0 0 1px var(--inspector-focus-outer)}",
+      ".agent-cursor::before{left:1px;right:1px;top:11px;height:2px}.agent-cursor::after{top:1px;bottom:1px;left:11px;width:2px}",
+      ".agent-cursor-dot{position:absolute;left:9px;top:9px;width:6px;height:6px;border:1px solid var(--inspector-focus-outer);border-radius:50%;background:currentColor}",
+      ".agent-cursor-label{position:absolute;left:18px;top:17px;max-width:160px;overflow:hidden;text-overflow:ellipsis;padding:2px 5px;white-space:nowrap;color:var(--inspector-foreground);background:var(--inspector-shell-raised);border:1px solid var(--inspector-agent-swatch,var(--inspector-accent-boundary));border-radius:var(--inspector-radius-small,5px);font:10px/13px 'Departure Mono',ui-monospace,monospace;box-shadow:0 4px 14px var(--inspector-shadow-color)}",
 ".pinned-queue-badge{position:absolute;top:-10px;right:-10px;min-width:22px;height:22px;padding:0 5px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--inspector-selection-foreground);background:var(--inspector-agent-swatch,var(--inspector-selection-surface));border:1px solid var(--inspector-agent-swatch,var(--inspector-accent-boundary));font:11px 'Departure Mono',ui-monospace,monospace}",
       ".inspector-card{position:fixed;z-index:2147483647;width:min(580px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:14px;border-radius:var(--inspector-radius-large,12px);display:none;flex-direction:column;gap:10px;color:var(--inspector-foreground);background:var(--inspector-shell-raised);border:1px solid var(--inspector-line);box-shadow:0 14px 40px var(--inspector-shadow-color);font:12px/1.4 'Departure Mono',ui-monospace,monospace;pointer-events:auto}",
       ".card-header,.target-info,.card-footer,.card-actions,.inline-response-actions{display:flex;align-items:center;gap:8px}.card-header,.card-footer{justify-content:space-between}.card-header{padding-bottom:10px;border-bottom:1px solid var(--inspector-line-soft)}.target-info{flex-wrap:wrap;min-width:0}.target-selector,.inline-response-view{color:var(--inspector-foreground-muted);background:var(--inspector-code-surface);border:1px solid var(--inspector-line-soft);border-radius:var(--inspector-radius-small,5px)}.target-selector{padding:2px 6px;font:10.5px 'Departure Mono',ui-monospace,monospace;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mode-badge{padding:2px 6px;border-radius:999px;color:var(--inspector-foreground);background:var(--inspector-shell-hover);border:1px solid var(--inspector-line);font-size:10px}.mode-badge.local{background:var(--inspector-selection-surface);border-color:var(--inspector-accent-boundary);color:var(--inspector-selection-foreground)}",
@@ -205,10 +203,20 @@ function buildInspectorScript(
     ].join("\\n");
     shadow.appendChild(style);
 
-    let cursorStyle = null;
-    cursorStyle = document.createElement("style");
+    const cursorStyle = document.createElement("style");
     cursorStyle.id = "__gradivus_cursor_style__";
-    cursorStyle.textContent = "*{cursor:crosshair!important}";
+    cursorStyle.textContent = "*{cursor:none!important}";
+    const agentCursor = document.createElement("div");
+    agentCursor.className = "agent-cursor";
+    agentCursor.setAttribute("aria-hidden", "true");
+    agentCursor.style.setProperty("--inspector-agent-swatch", targetAgent.swatch);
+    const cursorDot = document.createElement("span");
+    cursorDot.className = "agent-cursor-dot";
+    const cursorLabel = document.createElement("span");
+    cursorLabel.className = "agent-cursor-label";
+    cursorLabel.textContent = targetAgent.name;
+    agentCursor.append(cursorDot, cursorLabel);
+    shadow.appendChild(agentCursor);
     const activeBox = document.createElement("div");
     activeBox.className = "inspector-box";
     activeBox.style.setProperty("--inspector-agent-swatch", targetAgent.swatch);
@@ -261,13 +269,6 @@ function buildInspectorScript(
       root.dataset.theme = theme;
       root.style.colorScheme = theme;
       window.__gradivus_inspector_theme__ = theme;
-      updateCursorStyle(theme);
-    }
-    function updateCursorStyle(theme) {
-      if (!cursorStyle) return;
-      const focusColor = themeValues[theme]["--inspector-focus-outer"];
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 1v22M1 12h22" fill="none" stroke="' + focusColor + '" stroke-width="4" stroke-linecap="round"/><path d="M12 1v22M1 12h22" fill="none" stroke="' + targetAgent.swatch + '" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="2" fill="' + targetAgent.swatch + '" stroke="' + focusColor + '" stroke-width="1"/></svg>';
-      cursorStyle.textContent = "*{cursor:url(data:image/svg+xml," + encodeURIComponent(svg) + ") 12 12,crosshair!important}";
     }
     applyTheme(currentTheme);
     window.__gradivus_inspector_set_theme__ = applyTheme;
@@ -332,24 +333,10 @@ function buildInspectorScript(
       setText(activePill, "<" + el.tagName.toLowerCase() + "> " + Math.round(bounds.width) + " × " + Math.round(bounds.height));
     }
     function extractMetadata(el) {
-      const bounds = boundsFor(el);
-      const attributes = {};
-      for (let i = 0; i < el.attributes.length; i++) attributes[el.attributes[i].name] = el.attributes[i].value;
-      const hierarchy = [];
-      let parent = el.parentElement;
-      while (parent && hierarchy.length < 8) { hierarchy.push(parent.tagName.toLowerCase()); parent = parent.parentElement; }
       return {
         tagName: el.tagName.toLowerCase(),
         selector: generateSelector(el),
-        id: el.id || undefined,
-        classes: Array.from(el.classList || []),
-        attributes,
-        role: el.getAttribute("role") || undefined,
-        name: el.getAttribute("aria-label") || el.getAttribute("title") || undefined,
-        text: (el.innerText || el.textContent || "").trim().slice(0, 1024),
-        outerHTML: (el.outerHTML || "").slice(0, 32768),
-        bounds,
-        hierarchy,
+        bounds: boundsFor(el),
       };
     }
     function setBox(box, el, state, label) {
@@ -364,6 +351,7 @@ function buildInspectorScript(
     }
     function stopPicking() {
       window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerout", onPointerOut, true);
       window.removeEventListener("pointerdown", interceptEvent, true);
       window.removeEventListener("mousedown", interceptEvent, true);
       window.removeEventListener("mouseup", interceptEvent, true);
@@ -371,6 +359,7 @@ function buildInspectorScript(
       window.removeEventListener("keydown", onKeyDown, true);
       if (rafId) cancelAnimationFrame(rafId);
       rafId = null;
+      agentCursor.style.display = "none";
       cursorStyle.remove();
     }
     function startPicking() {
@@ -380,7 +369,9 @@ function buildInspectorScript(
       activeBox.style.display = "none";
       card.style.display = "none";
       document.documentElement.appendChild(cursorStyle);
+      agentCursor.style.display = "none";
       window.addEventListener("pointermove", onPointerMove, true);
+      window.addEventListener("pointerout", onPointerOut, true);
       window.addEventListener("pointerdown", interceptEvent, true);
       window.addEventListener("mousedown", interceptEvent, true);
       window.addEventListener("mouseup", interceptEvent, true);
@@ -413,12 +404,12 @@ function buildInspectorScript(
       card.style.top = top + "px";
       card.style.display = "flex";
       card.innerHTML = [
-        '<div class="card-header"><div class="target-info"><span class="target-icon" aria-hidden="true">⌖</span><strong id="__gradivus_inspector_title__" class="target-name"></strong><code class="target-selector"></code><span class="mode-badge"></span></div><button type="button" class="card-close-btn" aria-label="Cancel selection">×</button></div>',
+        '<div class="card-header"><div class="target-info"><span class="target-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12Z"/><path d="M2 12L5 12" stroke-linecap="round"/><path d="M19 12L22 12" stroke-linecap="round"/><path d="M12 22L12 19" stroke-linecap="round"/><path d="M12 5L12 2" stroke-linecap="round"/><path d="M10 12H14" stroke-linecap="round"/><path d="M12 14L12 10" stroke-linecap="round"/></svg></span><strong id="__gradivus_inspector_title__" class="target-name"></strong><code class="target-selector"></code><span class="mode-badge"></span></div><button type="button" class="card-close-btn" aria-label="Cancel selection"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M14.5 9.5L9.5 14.5M9.5 9.5L14.5 14.5" stroke-linecap="round"/></svg></button></div>',
         '<textarea class="card-textarea" aria-label="Element instruction" placeholder="Describe changes or ask OMP about this element…" rows="3"></textarea>',
         '<div class="card-chips"></div>',
         '<div class="card-status" role="status" aria-live="polite"></div>',
         '<div class="inline-response-view"><div class="inline-response-header"><strong>OMP result</strong><span class="inline-response-status">Complete</span></div><pre class="inline-response-body"></pre><div class="inline-response-actions"><button type="button" class="btn-copy-response">Copy</button><button type="button" class="btn-close-response">Close</button></div></div>',
-        '<div class="card-footer"><select class="agent-select" aria-label="Subagent role"><option value="task">task (General)</option><option value="designer">designer (UI/CSS)</option><option value="quick_task">quick_task (Fast Fix)</option><option value="reviewer">reviewer (Review)</option><option value="librarian">librarian (Docs/API)</option></select><div class="mode-toggles" role="radiogroup" aria-label="Capture mode"><button type="button" class="mode-toggle active" data-mode="dom">DOM</button><button type="button" class="mode-toggle" data-mode="screenshot">Screenshot</button></div><div class="card-actions"><button type="button" class="btn-cancel">Cancel</button><div class="split-action-btn-group"><button type="button" class="btn-submit-main" disabled><span class="submit-icon">⚡</span><span class="submit-label">Ask OMP</span></button><button type="button" class="btn-action-dropdown" aria-label="Choose action">▾</button><div class="split-action-menu" style="display:none"><button type="button" class="split-action-item active" data-action="inline">Ask OMP (Inline)</button><button type="button" class="split-action-item" data-action="chat">Send to Chat</button><button type="button" class="split-action-item" data-action="queue">Add to Queue</button></div></div></div></div>',
+        '<div class="card-footer"><select class="agent-select" aria-label="Subagent role"><option value="task">task (General)</option><option value="designer">designer (UI/CSS)</option><option value="quick_task">quick_task (Fast Fix)</option><option value="reviewer">reviewer (Review)</option><option value="librarian">librarian (Docs/API)</option></select><div class="mode-toggles" role="radiogroup" aria-label="Capture mode"><button type="button" class="mode-toggle active" data-mode="dom">DOM</button><button type="button" class="mode-toggle" data-mode="screenshot">Screenshot</button></div><div class="card-actions"><button type="button" class="btn-cancel">Cancel</button><div class="split-action-btn-group"><button type="button" class="btn-submit-main" disabled><span class="submit-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5.67 9.91L8.73 5.77C10.71 3.09 11.7 1.75 12.62 2.04C13.55 2.32 13.55 3.96 13.55 7.25V7.56C13.55 8.74 13.55 9.33 13.93 9.71L13.95 9.72C14.33 10.09 14.95 10.09 16.18 10.09C18.4 10.09 19.51 10.09 19.89 10.76C20.26 11.48 19.62 12.35 18.33 14.09L15.27 18.23C13.29 20.91 12.3 22.25 11.38 21.96C10.45 21.68 10.45 20.04 10.45 16.75V16.44C10.45 15.26 10.45 14.67 10.07 14.29L10.05 14.28C9.67 13.91 9.05 13.91 7.82 13.91C5.6 13.91 4.49 13.91 4.11 13.24C3.74 12.52 4.38 11.65 5.67 9.91Z"/></svg></span><span class="submit-label">Ask OMP</span></button><button type="button" class="btn-action-dropdown" aria-label="Choose action"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M19 9L12 15L5 9" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="split-action-menu" style="display:none"><button type="button" class="split-action-item active" data-action="inline">Ask OMP (Inline)</button><button type="button" class="split-action-item" data-action="chat">Send to Chat</button><button type="button" class="split-action-item" data-action="queue">Add to Queue</button></div></div></div></div>',
       ].join("");
       setText(card.querySelector(".target-name"), "<" + meta.tagName + ">");
       setText(card.querySelector(".target-selector"), meta.selector || meta.tagName);
@@ -486,7 +477,6 @@ function buildInspectorScript(
             agentType: currentAgentType,
             captureMode: currentCaptureMode,
             ...meta,
-            domHtml: meta.outerHTML,
           });
           return;
         }
@@ -512,12 +502,17 @@ function buildInspectorScript(
       return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".test") || host.endsWith(".internal") || host.startsWith("local.");
     }
     function onPointerMove(event) {
+      agentCursor.style.display = "block";
+      agentCursor.style.transform = "translate3d(" + (event.clientX - 12) + "px," + (event.clientY - 12) + "px,0)";
       if (selectedElement) return;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         const el = document.elementFromPoint(event.clientX, event.clientY);
         if (el && el !== root && !root.contains(el)) { currentTarget = el; updateOverlay(el); }
       });
+    }
+    function onPointerOut(event) {
+      if (!event.relatedTarget) agentCursor.style.display = "none";
     }
     function interceptEvent(event) { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); }
     function onElementClick(event) {
@@ -1964,6 +1959,7 @@ export class WorkspaceHost {
 		const instruction = payload.instruction?.trim() || "";
 		if (!instruction) throw new Error("An instruction is required to add an element to the queue");
 		const selector = payload.selector?.trim() || payload.tagName?.trim() || "element";
+		const tagName = payload.tagName?.trim() || "element";
 		const captureMode = payload.captureMode === "screenshot" ? "screenshot" : "dom";
 		const bounds = payload.bounds ?? null;
 		let screenshot: ElementScreenshot | undefined;
@@ -1977,34 +1973,12 @@ export class WorkspaceHost {
 		) {
 			throw STALE_SELECTION_OPERATION;
 		}
-		const domSnapshot = {
-			selector,
-			tagName: payload.tagName || "div",
-			role: payload.role,
-			name: payload.name,
-			html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
-			text: payload.text,
-			attributes: payload.attributes || {},
-			bounds: bounds ?? { x: 0, y: 0, width: 0, height: 0 },
-			hierarchy: payload.hierarchy || ["body", "html"],
-		};
-		const domBytes = Buffer.byteLength(JSON.stringify(domSnapshot), "utf8");
-		if (domBytes > SELECTION_LIMITS.maxDomBytes) {
-			throw new Error(
-				`DOM snapshot size (${domBytes} bytes) exceeds limit of ${SELECTION_LIMITS.maxDomBytes} bytes`,
-			);
-		}
-		const summary = payload.text?.trim() || undefined;
-		if (summary && Buffer.byteLength(summary, "utf8") > SELECTION_LIMITS.maxSummaryBytes) {
-			throw new Error(
-				`DOM summary size (${Buffer.byteLength(summary, "utf8")} bytes) exceeds limit of ${SELECTION_LIMITS.maxSummaryBytes} bytes`,
-			);
-		}
 		const requestBytes = Buffer.byteLength(
 			JSON.stringify({
 				selector,
 				url: entry.state.url,
-				domSnapshot,
+				tagName,
+				captureMode,
 				screenshot,
 				instruction,
 			}),
@@ -2020,14 +1994,11 @@ export class WorkspaceHost {
 			targetAgentName: resolved.target.name,
 			agentSwatch: resolved.target.swatch,
 			instruction,
-			tagName: domSnapshot.tagName,
+			tagName,
 			selector,
 			agentType: payload.agentType?.trim() || undefined,
 			captureMode,
 			url: entry.state.url,
-			summary,
-			domHtml: domSnapshot.html,
-			domSnapshot,
 			screenshot: screenshot?.base64,
 			screenshotWidth: screenshot?.width,
 			screenshotHeight: screenshot?.height,
@@ -2082,6 +2053,67 @@ export class WorkspaceHost {
 		if (this.#activeSelectionPaneId === paneId) this.#activeSelectionPaneId = undefined;
 		this.#emitSelectionState(this.#stateWithQueue({ phase: "idle", paneId, selectionId, updatedAt: Date.now() }));
 		if (entry && token) await this.#cleanupInspector(entry, token, { canceled: true });
+	}
+
+	async ensureSelectionTarget(rawPaneId: unknown): Promise<{
+		scope: SelectionAuthScope;
+		target: SelectionTargetAgent;
+	}> {
+		const id = paneId(rawPaneId);
+		const client = this.#client;
+		const desktopHost = this.#desktopHost;
+		if (!client || !desktopHost) throw new Error("Workspace agent services are unavailable for element selection");
+		const entry = this.#requireBrowser(id);
+		const document = client.document ?? (await client.getDocument());
+		desktopHost.syncWithDocument(document);
+
+		for (const agent of document.agents) {
+			if (agent.profileId !== BROWSER_SELECTION_AGENT_PROFILE_ID || !agent.sessionId) continue;
+			try {
+				desktopHost.resolveSessionWorkspace(agent.sessionId);
+				return desktopHost.resolveSelectionTarget(id, agent.id, entry.documentEpoch);
+			} catch {
+				// Stale page-agent records are skipped; the selector creates a fresh target below.
+			}
+		}
+
+		const pane = document.panes.find(candidate => candidate.id === id);
+		const tab = pane ? document.tabs.find(candidate => candidate.id === pane.tabId) : undefined;
+		const location = tab ? document.locations.find(candidate => candidate.id === tab.locationId) : undefined;
+		if (!pane || !tab || !location)
+			throw new Error("Browser workspace location is unavailable for element selection");
+		if (location.address.kind !== "local") {
+			throw new Error("Page agents currently require a local workspace location");
+		}
+		if (!document.agentProfiles.some(profile => profile.id === BROWSER_SELECTION_AGENT_PROFILE_ID)) {
+			throw new Error("Page Agent profile is unavailable");
+		}
+
+		const session = await desktopHost.createBrowserSelectionSession(location.address.path);
+		const agentId = `${BROWSER_SELECTION_AGENT_ID_PREFIX}${crypto.randomUUID()}`;
+		try {
+			const result = await client.executeCommandWithRetry(currentDocument => ({
+				version: 1 as const,
+				commandId: uniqueCommandId("cmd-browser-selection-agent"),
+				workspaceId: tab.workspaceId,
+				expectedRevision: currentDocument.revision,
+				issuedAt: Date.now(),
+				type: "agent.start" as const,
+				payload: {
+					id: agentId,
+					profileId: BROWSER_SELECTION_AGENT_PROFILE_ID,
+					sessionId: session.id,
+				},
+			}));
+			if (result.status !== "accepted" && result.status !== "duplicate") {
+				throw new Error(`Page Agent creation failed: ${result.error?.message ?? result.status}`);
+			}
+			desktopHost.syncWithDocument(result.document);
+			return desktopHost.resolveSelectionTarget(id, agentId, entry.documentEpoch);
+		} catch (error) {
+			await desktopHost.discardBrowserSelectionSession(session.id).catch(() => undefined);
+			throw error;
+		}
 	}
 
 	async startSelection(scope: SelectionAuthScope, options: StartSelectionOptions = {}): Promise<ElementEditState> {
@@ -2181,17 +2213,6 @@ export class WorkspaceHost {
 						const updated = this.#selectionCoordinator.updateSelection(boundScope, activeId, {
 							selector,
 							captureMode: payload.captureMode === "screenshot" ? "screenshot" : "dom",
-							domSnapshot: {
-								selector,
-								tagName: payload.tagName || "div",
-								role: payload.role,
-								name: payload.name,
-								html: payload.outerHTML?.slice(0, SELECTION_LIMITS.maxDomBytes),
-								text: payload.text,
-								attributes: payload.attributes || {},
-								bounds: bounds ?? { x: 0, y: 0, width: 0, height: 0 },
-								hierarchy: payload.hierarchy || ["body", "html"],
-							},
 							screenshot,
 							url: entry.state.url,
 						});
@@ -2249,14 +2270,10 @@ export class WorkspaceHost {
 			url: selectionState.url,
 			agentType,
 			selector: selectionState.selector,
-			tagName: selectionState.selectedElement?.tagName || selectionState.domSnapshot?.tagName,
 			captureMode: selectionState.captureMode,
-			summary: selectionState.selectedElement?.summary || selectionState.domSnapshot?.summary,
-			text: selectionState.selectedElement?.text || selectionState.domSnapshot?.text,
 			screenshotAttached: Boolean(selectionState.screenshot),
 			screenshotWidth: selectionState.screenshot?.width,
 			screenshotHeight: selectionState.screenshot?.height,
-			domHtml: selectionState.selectedElement?.html || selectionState.domSnapshot?.html,
 			instruction: instruction?.trim() || undefined,
 		};
 		const promptText = prompt.render(elementSelectionPromptTemplate, promptData);
@@ -2273,7 +2290,6 @@ export class WorkspaceHost {
 				const response = await this.#desktopHost.executeInlinePrompt(promptText, scope.sessionId, {
 					paneId: scope.paneId,
 					selector: selectionState.selector,
-					tagName: promptData.tagName,
 					instruction,
 					url: selectionState.url,
 					agentType,
@@ -2313,10 +2329,10 @@ export class WorkspaceHost {
 		this.#emitSelectionState({ ...selectionState });
 		try {
 			if (this.#desktopHost) {
-				await this.#desktopHost.deliverElementPrompt(promptText, scope.sessionId, {
+				const chatSessionId = this.#desktopHost.resolveChatSessionForBrowserAgent(scope.sessionId);
+				await this.#desktopHost.deliverElementPrompt(promptText, chatSessionId, {
 					paneId: scope.paneId,
 					selector: selectionState.selector,
-					tagName: promptData.tagName,
 					instruction,
 					url: selectionState.url,
 					agentType,
@@ -2347,9 +2363,6 @@ export class WorkspaceHost {
 						message: promptText,
 						selector: selectionState.selector,
 						url: selectionState.url,
-						...(selectionState.selectedElement || selectionState.domSnapshot
-							? { domSnapshot: selectionState.selectedElement || selectionState.domSnapshot }
-							: {}),
 						...(selectionState.screenshot ? { screenshot: selectionState.screenshot } : {}),
 					},
 				}));
@@ -2495,8 +2508,6 @@ export class WorkspaceHost {
 						selector: task.selector,
 						tagName: task.tagName,
 						captureMode: task.captureMode,
-						summary: task.summary ?? task.domSnapshot?.summary ?? task.domSnapshot?.text,
-						domHtml: task.domHtml ?? task.domSnapshot?.html,
 						instruction: task.instruction,
 						screenshotAttached: Boolean(screenshot),
 						screenshotWidth: task.screenshotWidth,

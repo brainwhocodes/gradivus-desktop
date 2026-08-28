@@ -1,9 +1,14 @@
 <script lang="ts">
-  import { Ghostty, Terminal } from "ghostty-web";
-  import ghosttyWasmUrl from "ghostty-web/ghostty-vt.wasm?url";
   import { onMount, tick } from "svelte";
   import type { GradivusSettings, WorkspaceEvent } from "../../../shared/contracts";
   import { DESKTOP_THEME_PALETTES, type ResolvedTheme } from "../../../shared/theme-palette";
+  import {
+    createTerminalRenderer,
+    selectTerminalRenderer,
+    type TerminalRenderer,
+    type TerminalRendererAppearance,
+    type TerminalRendererConfiguration,
+  } from "../../terminal/terminal-renderer";
 
   const NATIVE_MONO_FONT =
     'ui-monospace, "SFMono-Regular", Menlo, Monaco, "Cascadia Mono", Consolas, "Liberation Mono", monospace';
@@ -20,26 +25,25 @@
   let replayOffset = 0;
   let renderedOffset = 0;
   let pendingOutput: Array<{ data: string; offset: number }> = [];
-  let terminal: Terminal | undefined;
+  let renderer: TerminalRenderer | undefined;
   let terminalElement: HTMLDivElement | undefined;
-  let ghostty: Ghostty | undefined;
   let removeWorkspaceEvent: (() => void) | undefined;
-  let resizeObserver: ResizeObserver | undefined;
   let activationPromise: Promise<void> | undefined;
   let writeQueue: Promise<void> = Promise.resolve();
+
+  const selectedKind = selectTerminalRenderer(window.gradivus.platform);
 
   $: if (open) {
     void activateTerminal();
   }
 
-  $: if (terminal) {
-    terminal.options.theme = DESKTOP_THEME_PALETTES[theme].terminal;
-    terminal.options.fontSize = terminalSettings?.fontSize ?? 14;
-    terminal.options.fontFamily = terminalSettings?.fontFamily ?? NATIVE_MONO_FONT;
-    terminal.options.cursorBlink = terminalSettings?.cursorBlink ?? true;
-    terminal.options.cursorStyle = terminalSettings?.cursorStyle ?? "block";
-    terminal.options.scrollback = terminalSettings?.scrollback ?? 10_000;
-    void fitTerminal();
+  $: if (renderer) {
+    const appearance: TerminalRendererAppearance = {
+      theme: DESKTOP_THEME_PALETTES[theme].terminal,
+      cursorBlink: terminalSettings?.cursorBlink ?? true,
+      cursorStyle: terminalSettings?.cursorStyle ?? "block",
+    };
+    renderer.updateAppearance(appearance);
   }
 
   function dimensions(): { cols: number; rows: number } {
@@ -51,43 +55,41 @@
     };
   }
 
-  async function fitTerminal(): Promise<void> {
-    if (!open || !shellId || !terminalElement || !terminal) return;
-    if (terminalElement.clientWidth <= 0 || terminalElement.clientHeight <= 0) return;
-    const next = dimensions();
-    terminal.resize(next.cols, next.rows);
-    await window.gradivus.resizeTerminal(shellId, next.cols, next.rows).catch(() => {});
-  }
-
-  async function mountTerminal(): Promise<void> {
-    if (!terminalElement || terminal || !shellId) return;
-    ghostty ??= await Ghostty.load(ghosttyWasmUrl);
-    const instance = new Terminal({
+  function buildConfiguration(): TerminalRendererConfiguration {
+    return {
       fontSize: terminalSettings?.fontSize ?? 14,
       fontFamily: terminalSettings?.fontFamily ?? NATIVE_MONO_FONT,
       cursorBlink: terminalSettings?.cursorBlink ?? true,
       cursorStyle: terminalSettings?.cursorStyle ?? "block",
       scrollback: terminalSettings?.scrollback ?? 10_000,
       theme: DESKTOP_THEME_PALETTES[theme].terminal,
-      ghostty,
+    };
+  }
+
+  async function mountTerminal(): Promise<void> {
+    if (!terminalElement || renderer || !shellId) return;
+    const initial = dimensions();
+    const instance = await createTerminalRenderer(window.gradivus.platform, {
+      element: terminalElement,
+      cols: initial.cols,
+      rows: initial.rows,
+      configuration: buildConfiguration(),
+      onData(data) {
+        writeQueue = writeQueue.then(() => window.gradivus.writeTerminal(shellId, data)).catch(error => {
+          shellError = error instanceof Error ? error.message : String(error);
+        });
+      },
+      onResize(cols, rows) {
+        if (!open || !shellId) return;
+        void window.gradivus.resizeTerminal(shellId, cols, rows).catch(() => {});
+      },
     });
-    instance.open(terminalElement);
-    terminal = instance;
+    renderer = instance;
     for (const frame of pendingOutput) {
       instance.write(frame.data);
       renderedOffset = Math.max(renderedOffset, frame.offset + new TextEncoder().encode(frame.data).byteLength);
     }
     pendingOutput = [];
-    instance.onData(data => {
-      writeQueue = writeQueue.then(() => window.gradivus.writeTerminal(shellId, data)).catch(error => {
-        shellError = error instanceof Error ? error.message : String(error);
-      });
-    });
-    resizeObserver = new ResizeObserver(() => {
-      if (!open) return;
-      void fitTerminal();
-    });
-    resizeObserver.observe(terminalElement);
   }
 
   async function closeKnownPresentation(): Promise<void> {
@@ -131,10 +133,10 @@
       if (!shellId) await openChatTerminal();
       if (!shellId) return;
       await tick();
-      if (!terminal) await mountTerminal();
-      if (!terminal) return;
-      await fitTerminal();
-      terminal.focus();
+      if (!renderer) await mountTerminal();
+      if (!renderer) return;
+      await renderer.fit();
+      renderer.focus();
     })();
     activationPromise = run.catch(async error => {
       shellStatus = "failed";
@@ -156,8 +158,8 @@
       if (event.offset < replayOffset) return;
       const nextOffset = event.offset + new TextEncoder().encode(event.data).byteLength;
       replayOffset = Math.max(replayOffset, nextOffset);
-      if (terminal) {
-        terminal.write(event.data);
+      if (renderer) {
+        renderer.write(event.data);
         renderedOffset = Math.max(renderedOffset, nextOffset);
       } else {
         pendingOutput = [...pendingOutput, { data: event.data, offset: event.offset }];
@@ -178,10 +180,8 @@
   }
 
   async function terminateShell(close = true): Promise<void> {
-    resizeObserver?.disconnect();
-    resizeObserver = undefined;
-    terminal?.dispose();
-    terminal = undefined;
+    renderer?.dispose();
+    renderer = undefined;
     pendingOutput = [];
     renderedOffset = 0;
     const knownId = shellId || presentationId;
@@ -196,8 +196,8 @@
     removeWorkspaceEvent = window.gradivus.onWorkspaceEvent(handleWorkspaceEvent);
     return () => {
       removeWorkspaceEvent?.();
-      resizeObserver?.disconnect();
-      terminal?.dispose();
+      renderer?.dispose();
+      renderer = undefined;
       void closeKnownPresentation();
     };
   });
@@ -205,7 +205,7 @@
 
 <section class="chat-terminal" aria-label="Local chat terminal">
   <div id="chat-terminal-drawer" class="chat-terminal-drawer" hidden={!open}>
-    <div class="chat-terminal-shell" data-rendered-offset={renderedOffset}>
+    <div class="chat-terminal-shell" data-rendered-offset={renderedOffset} data-terminal-renderer={selectedKind}>
       <div bind:this={terminalElement} class="chat-terminal-canvas" role="region" aria-label="Shell terminal"></div>
       {#if shellError}<p class="chat-terminal-error" role="alert">{shellError}</p>{/if}
       {#if shellStatus === "failed" || shellStatus === "exited"}
@@ -233,6 +233,14 @@
   }
   .chat-terminal-drawer[hidden] {
     display: none;
+  }
+
+  .chat-terminal-shell {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .chat-terminal-canvas {

@@ -1,17 +1,30 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import ArrowDown from "@solar-icons/svelte/linear/arrow-down";
+  import ArrowRight from "@solar-icons/svelte/linear/arrow-right";
+  import Bolt from "@solar-icons/svelte/linear/bolt";
+  import ClockCircle from "@solar-icons/svelte/linear/clock-circle";
+  import CloseCircle from "@solar-icons/svelte/linear/close-circle";
   import CodeSquare from "@solar-icons/svelte/linear/code-square";
-  import InfoCircle from "@solar-icons/svelte/linear/info-circle";
+  import Pen2 from "@solar-icons/svelte/linear/pen-2";
+  import Stop from "@solar-icons/svelte/linear/stop";
   import type { AgentHubAgent, AgentHubMessagePage, AgentHubSnapshot, AgentSettingTab, AgentSettingValue, AgentSettingView, AuthAccountView, AuthEvent, BootstrapSnapshot, GradivusEvent, GradivusSettings, ExtensionView, FileDiffView, InterruptMode, ModelOption, OAuthAccountsView, OpenRouterModelRouting, PromptAttachmentUpload, PromptAttachmentView, QueueMode, SessionKind, SessionRecordV1, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../../../shared/contracts";
   import { MAX_INLINE_PROMPT_BYTES, MAX_PROMPT_ATTACHMENT_BATCH_BYTES, MAX_PROMPT_ATTACHMENT_BYTES, MAX_PROMPT_ATTACHMENT_COUNT } from "../../../shared/contracts";
   import { changedFiles, projectTimeline } from "../../../shared/projection";
+  import {
+    attachmentsReferencedByDraft,
+    buildPromptComposition,
+    insertAttachmentReferences,
+    removeAttachmentReference,
+    resolveAttachmentInsertionIndex,
+  } from "../../attachment-composition";
+  import { projectTurnFileSummaries } from "../../turn-file-summary";
   import { AUTH_DISCOVERY_PROVIDER } from "../../../shared/auth-events";
   import ApplicationSettingsPanel from "../organisms/ApplicationSettingsPanel.svelte";
   import SettingsShell from "../organisms/SettingsShell.svelte";
 import ModelCapabilityIcons from "../molecules/ModelCapabilityIcons.svelte";
 import OpenRouterModelAccordion from "../molecules/OpenRouterModelAccordion.svelte";
 import TimelineEntry from "../organisms/TimelineEntry.svelte";
-  import GradivusMark from "../atoms/GradivusMark.svelte";
   import CustomDropdown from "../atoms/CustomDropdown.svelte";
   import { agentSettingOptionToDropdownOption, agentSettingValueKey, type DropdownOption, type SettingsCategoryId, type SettingsRoute, type ApplicationSettingsCategoryId } from "../../settings-types";
   import FileDiffInspector from "../organisms/FileDiffInspector.svelte";
@@ -25,6 +38,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   import ModalShell from "../molecules/ModalShell.svelte";
   import StateCard from "../molecules/StateCard.svelte";
   import Toast from "../molecules/Toast.svelte";
+  import TurnFileSummary from "../molecules/TurnFileSummary.svelte";
   import ToggleField from "../molecules/ToggleField.svelte";
   import ChatTerminalDrawer from "../organisms/ChatTerminalDrawer.svelte";
   import ContextMeter from "../organisms/ContextMeter.svelte";
@@ -124,7 +138,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let extensionWidget = "";
   let extensionTitle = "";
   let aboutOpen = false;
-  let aboutButton: HTMLButtonElement | undefined;
+  let aboutReturnFocus: HTMLButtonElement | undefined;
   let loading = false;
   let loadingOlder = false;
   let reasoningLoading = new Set<string>();
@@ -159,6 +173,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let spillInFlight = false;
   $: hasComposerContent = Boolean(draft.trim() || promptAttachments.length > 0);
   $: isComposerBusy = attachmentBusy || spillInFlight;
+  $: if (promptAttachments.length > 0) reconcileAttachmentReferences(draft);
   interface AttachmentBatch {
     ids: string[];
     views: PromptAttachmentView[];
@@ -180,6 +195,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     resultReceived?: boolean;
   }
   let pendingTurns = new Map<string, PendingTurn>();
+  let admittedAttachmentBatches = new Map<string, AttachmentBatch>();
   let earlyPromptResults = new Map<string, GradivusEvent>();
   let explicitStopSessions = new Set<string>();
   let turnStartTime: number | null = null;
@@ -242,9 +258,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   type InspectorTab = "agents" | "files";
   let inspectorOpen = false;
   let inspectorTab: InspectorTab = "agents";
+  let fileInspectorTarget = "";
   let agentHubWindowOpen = false;
   let agentHubDialog: HTMLDialogElement | undefined;
   let agentHubReturnFocus: HTMLElement | undefined;
+  let transcriptPane: HTMLElement | undefined;
+  let agentHubPaneResizeObserver: ResizeObserver | undefined;
   let inspectorTabBySession = new Map<string, InspectorTab>();
   let agentHubSnapshot: AgentHubSnapshot = { agents: [] };
   let agentHubSelectedAgentId = "";
@@ -579,13 +598,14 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   $: canCompose = ensureCanCompose(current?.record.id, sessionSelectionToken, current, activeId, loading);
   $: timelineItems = projectTimeline(current?.record.kind ?? "work", current?.timeline ?? []);
   $: visibleTimeline = timelineItems;
+  $: turnFileSummaries = projectTurnFileSummaries(visibleTimeline);
   $: hiddenTimelineCount = current?.timelineStart ?? 0;
   $: outputFiles = changedFiles(current?.timeline ?? []);
   $: selectedAgent = current?.subagents.find(agent => agent.id === selectedSubagent);
   $: agentHubAgents = agentHubSnapshot.agents;
   $: agentHubSelectedAgent = agentHubAgents.find(agent => agent.id === agentHubSelectedAgentId);
   $: agentHubUnreadCount = Array.from(agentHubUnreadBySession.get(activeId)?.keys() ?? []).length;
-  $: fileActivityCount = (current?.timeline ?? []).filter(item => Boolean(item.toolActivity)).length;
+  $: fileActivityCount = outputFiles.length;
   $: commandQuery = slashCommandQuery(draft);
   $: commandMatches = commandQuery === null ? [] : searchSlashCommands(availableCommands, commandQuery);
   $: commandMenuVisible = commandQuery !== null && !commandMenuDismissed && canCompose;
@@ -631,8 +651,11 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
   $: if (agentHubWindowOpen && agentHubDialog && !agentHubDialog.open) {
-    agentHubDialog.showModal();
-    agentHubDialog.querySelector<HTMLElement>("button")?.focus();
+    syncAgentHubWindowGeometry();
+    agentHubDialog.show();
+    void tick().then(() =>
+      agentHubDialog?.querySelector<HTMLElement>('[aria-label="Close Agent Hub session"]')?.focus(),
+    );
   }
   $: if (settingsRoute.open && !observedSettingsOpen) {
     observedSettingsOpen = true;
@@ -651,6 +674,8 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   onMount(() => {
     unsubscribe = window.gradivus.onEvent(handleEvent);
     unsubscribeAuth = window.gradivus.onAuthEvent(handleAuthEvent);
+    agentHubPaneResizeObserver = new ResizeObserver(syncAgentHubWindowGeometry);
+    if (transcriptPane) agentHubPaneResizeObserver.observe(transcriptPane);
     void (async () => {
       try {
         applyAuthAccounts(await window.gradivus.getAuthStatus());
@@ -665,6 +690,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       unsubscribeAuth?.();
       clearTimelineProgrammaticScroll();
       timelineResizeObserver?.disconnect();
+      agentHubPaneResizeObserver?.disconnect();
       if (turnInterval) clearInterval(turnInterval);
     };
   });
@@ -951,9 +977,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     return normalized.slice(normalized.lastIndexOf("/") + 1) || "Attachment";
   }
 
-  function attachmentKindLabel(kind: PromptAttachmentView["kind"]): "FILE" | "IMG" | "PROMPT" {
-    return kind === "image" ? "IMG" : kind === "prompt" ? "PROMPT" : "FILE";
-  }
 
   function restoreDraftAfterFailure(failedDraft: string): void {
     const newerDraft = draft;
@@ -980,13 +1003,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     return Array.from(event.dataTransfer?.types ?? []).includes("Files");
   }
 
-  async function stageFiles(files: FileList | File[]): Promise<void> {
+  async function stageFiles(files: FileList | File[], insertionIndex = composerInput?.selectionEnd ?? draft.length): Promise<void> {
     const sessionId = current?.record.id;
     const selectionToken = sessionSelectionToken;
     if (!ensureCanCompose(sessionId, selectionToken) || attachmentBusy || spillInFlight) return;
     const admission: ComposeAdmission = { sessionId, selectionToken };
     const generation = attachmentGeneration;
     const selected = Array.from(files);
+    const originalDraft = draft;
+    const originalInsertionIndex = Math.min(Math.max(insertionIndex, 0), originalDraft.length);
     if (!selected.length) return;
     const incomingBytes = selected.reduce((total, file) => total + file.size, 0);
     if (promptAttachments.length + selected.length > MAX_PROMPT_ATTACHMENT_COUNT) {
@@ -1023,7 +1048,19 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
         await window.gradivus.releasePromptAttachments(sessionId, staged.map(view => view.id));
         return;
       }
+      const currentInsertionIndex = resolveAttachmentInsertionIndex(
+        originalDraft,
+        draft,
+        originalInsertionIndex,
+        composerInput?.selectionEnd ?? draft.length,
+      );
+      const insertion = insertAttachmentReferences(draft, staged, currentInsertionIndex);
       promptAttachments = [...promptAttachments, ...staged];
+      draft = insertion.draft;
+      commandMenuDismissed = false;
+      await tick();
+      composerInput?.focus({ preventScroll: true });
+      composerInput?.setSelectionRange(insertion.caret, insertion.caret);
       attachmentStatus = `${staged.length} attachment${staged.length === 1 ? "" : "s"} ready.`;
     } catch (error) {
       attachmentStatus = error instanceof Error ? error.message : String(error);
@@ -1037,12 +1074,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const sessionId = current?.record.id;
     const selectionToken = sessionSelectionToken;
     if (!ensureCanCompose(sessionId, selectionToken)) return;
+    const previousDraft = draft;
+    draft = removeAttachmentReference(draft, view.reference);
     promptAttachments = promptAttachments.filter(candidate => candidate.id !== view.id);
     attachmentStatus = "";
     try {
       await window.gradivus.releasePromptAttachments(sessionId, [view.id]);
     } catch (error) {
       if (current?.record.id === sessionId && sessionSelectionToken === selectionToken) {
+        draft = previousDraft;
         restoreAttachmentBatch({ ids: [view.id], views: [view] });
       }
       attachmentStatus = error instanceof Error ? error.message : String(error);
@@ -1056,37 +1096,60 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const admission: ComposeAdmission = { sessionId, selectionToken };
     const valueBytes = byteLength(value);
     if (valueBytes <= MAX_INLINE_PROMPT_BYTES || spillInFlight) return valueBytes <= MAX_INLINE_PROMPT_BYTES;
-    if (promptAttachments.length >= MAX_PROMPT_ATTACHMENT_COUNT) {
-      draft = value;
+
+    const sourceAttachments = attachmentsReferencedByDraft(value, promptAttachments);
+    const sourceById = new Map(sourceAttachments.map(attachment => [attachment.id, attachment]));
+    const sourceComposition = buildPromptComposition(value, sourceAttachments);
+    const textPartCount = sourceComposition.parts.filter(part => part.type === "text" && part.text.length > 0).length;
+    if (sourceAttachments.length + textPartCount > MAX_PROMPT_ATTACHMENT_COUNT) {
       attachmentStatus = `You can attach up to ${MAX_PROMPT_ATTACHMENT_COUNT} files.`;
       return false;
     }
-    if (visibleAttachmentBytes() + valueBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) {
-      draft = value;
+    const sourceAttachmentBytes = sourceAttachments.reduce((total, attachment) => total + attachment.size, 0);
+    if (sourceAttachmentBytes + valueBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) {
       attachmentStatus = "Attachments exceed the 32 MiB batch limit.";
       return false;
     }
+
     const generation = attachmentGeneration;
+    const stagedPrompts: PromptAttachmentView[] = [];
+    const orderedViews: PromptAttachmentView[] = [];
     spillInFlight = true;
-    const original = value;
-    if (draft === original) draft = "";
     attachmentStatus = "Staging oversized prompt…";
     try {
-      const staged = await window.gradivus.stagePromptText(sessionId, original);
+      for (const part of sourceComposition.parts) {
+        if (part.type === "attachment") {
+          const attachment = sourceById.get(part.id);
+          if (attachment) orderedViews.push(attachment);
+          continue;
+        }
+        if (!part.text) continue;
+        const staged = await window.gradivus.stagePromptText(sessionId, part.text);
+        stagedPrompts.push(staged);
+        orderedViews.push(staged);
+      }
       if (
         !ensureCanCompose(admission.sessionId, admission.selectionToken) ||
         current?.record.id !== sessionId ||
         attachmentGeneration !== generation
       ) {
-        await window.gradivus.releasePromptAttachments(sessionId, [staged.id]);
+        await window.gradivus.releasePromptAttachments(sessionId, stagedPrompts.map(attachment => attachment.id));
         return false;
       }
-      promptAttachments = [...promptAttachments, staged];
-      attachmentStatus = "Pasted prompt is ready as an attachment.";
+      const retainedIds = new Set(sourceAttachments.map(attachment => attachment.id));
+      const removedIds = promptAttachments
+        .filter(attachment => !retainedIds.has(attachment.id))
+        .map(attachment => attachment.id);
+      if (removedIds.length > 0) await window.gradivus.releasePromptAttachments(sessionId, removedIds);
+      promptAttachments = orderedViews;
+      draft = orderedViews.map(attachment => attachment.reference).join(" ");
+      attachmentStatus = "Oversized prompt sections are ready as contextual attachments.";
       return true;
     } catch (error) {
-      if (current?.record.id === sessionId && sessionSelectionToken === selectionToken) {
-        restoreDraftAfterFailure(original);
+      if (stagedPrompts.length > 0) {
+        await window.gradivus
+          .releasePromptAttachments(sessionId, stagedPrompts.map(attachment => attachment.id))
+          .catch(() => undefined);
       }
       attachmentStatus = error instanceof Error ? error.message : String(error);
       return false;
@@ -1104,7 +1167,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const composed = `${draft.slice(0, start)}${pasted}${draft.slice(end)}`;
     if (byteLength(composed) <= MAX_INLINE_PROMPT_BYTES) return;
     event.preventDefault();
-    draft = "";
+    draft = composed;
     await spillPromptText(composed);
   }
 
@@ -1139,6 +1202,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   function discardVisibleAttachments(sessionId = current?.record.id): void {
     attachmentGeneration += 1;
     const batch = takeAttachmentBatch();
+    for (const attachment of batch.views) {
+      draft = removeAttachmentReference(draft, attachment.reference);
+    }
     if (sessionId) void releaseAttachmentBatch(sessionId, batch);
   }
 
@@ -1158,6 +1224,28 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
+  function retainAdmittedAttachmentBatch(sessionId: string, batch: AttachmentBatch): void {
+    if (batch.ids.length === 0) return;
+    const previous = admittedAttachmentBatches.get(sessionId);
+    const ids = new Set(previous?.ids ?? []);
+    const views = new Map((previous?.views ?? []).map(view => [view.id, view]));
+    for (const id of batch.ids) ids.add(id);
+    for (const view of batch.views) views.set(view.id, view);
+    admittedAttachmentBatches = new Map(admittedAttachmentBatches).set(sessionId, {
+      ids: [...ids],
+      views: [...views.values()],
+    });
+  }
+
+  async function releaseAdmittedAttachmentBatch(sessionId: string): Promise<void> {
+    const batch = admittedAttachmentBatches.get(sessionId);
+    if (!batch) return;
+    const next = new Map(admittedAttachmentBatches);
+    next.delete(sessionId);
+    admittedAttachmentBatches = next;
+    await releaseAttachmentBatch(sessionId, batch);
+  }
+
   async function sendPrimary(textInput?: string, startedAdmission?: ComposeAdmission): Promise<void> {
     const sessionId = startedAdmission?.sessionId ?? current?.record.id;
     const selectionToken = startedAdmission?.selectionToken ?? sessionSelectionToken;
@@ -1172,6 +1260,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
     const text = rawText.trim();
     const batch = takeAttachmentBatch();
+    const composition = buildPromptComposition(text, batch.views);
     const shouldFollowTimeline = followIntent(sessionId);
     const activeTurn = isTurnActive;
     draft = "";
@@ -1214,13 +1303,17 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 
     const title = snapshot.record.title;
     const isDefaultTitle = !title || title.startsWith("New conversation") || title.startsWith("New Chat") || title.startsWith("Session ") || title === sessionId;
-    if (isDefaultTitle && text) {
-      const cleanTitle = text.replace(/^\[Subagent:\s*[^\]]+\]\s*/i, "").replace(/[#*`_~]/g, "").trim().slice(0, 38);
+    const titleText = batch.views.reduce(
+      (value, attachment) => value.replace(attachment.reference, ""),
+      text,
+    );
+    if (isDefaultTitle && titleText) {
+      const cleanTitle = titleText.replace(/^\[Subagent:\s*[^\]]+\]\s*/i, "").replace(/[#*`_~]/g, "").trim().slice(0, 38);
       if (cleanTitle) void renameSession(sessionId, cleanTitle);
     }
 
     try {
-      const requestId = await window.gradivus.prompt(sessionId, text, batch.ids.length ? batch.ids : undefined);
+      const requestId = await window.gradivus.prompt(sessionId, composition);
       const pending = pendingTurns.get(sessionId);
       if (!pending || pending.reconciliation === "rolled-back") return;
       pendingTurns = new Map(pendingTurns).set(sessionId, { ...pending, requestId, reconciliation: "running" });
@@ -1253,8 +1346,8 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
     const optimisticId = appendOptimisticUserMessage(sessionId, text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"));
     try {
-      await window.gradivus.steer(sessionId, text, batch.ids.length ? batch.ids : undefined);
-      await releaseAttachmentBatch(sessionId, batch);
+      await window.gradivus.steer(sessionId, buildPromptComposition(text, batch.views));
+      retainAdmittedAttachmentBatch(sessionId, batch);
       showNotice("Steering message sent", "success", "Steering");
     } catch (error) {
       removeOptimisticUserMessage(sessionId, optimisticId);
@@ -1284,8 +1377,8 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const optimisticId = appendOptimisticUserMessage(sessionId, text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"));
     draft = "";
     try {
-      await window.gradivus.queueFollowUp(sessionId, text, batch.ids.length ? batch.ids : undefined);
-      await releaseAttachmentBatch(sessionId, batch);
+      await window.gradivus.queueFollowUp(sessionId, buildPromptComposition(text, batch.views));
+      retainAdmittedAttachmentBatch(sessionId, batch);
       showNotice("Queued for the next turn", "info", "Queue");
       await refreshSessionMetrics(sessionId);
     } catch (error) {
@@ -1330,8 +1423,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const turn = pendingTurns.get(sessionId);
     if (!turn) return;
     removeTurnItems(sessionId, turn, removeUser);
-    if (current?.record.id === sessionId) restoreAttachmentBatch({ ids: turn.attachmentIds, views: turn.attachments });
-    else void releaseAttachmentBatch(sessionId, { ids: turn.attachmentIds, views: turn.attachments });
+    if (current?.record.id === sessionId) {
+      restoreDraftAfterFailure(turn.draft);
+      restoreAttachmentBatch({ ids: turn.attachmentIds, views: turn.attachments });
+    } else {
+      void releaseAttachmentBatch(sessionId, { ids: turn.attachmentIds, views: turn.attachments });
+    }
     const next = new Map(pendingTurns);
     next.delete(sessionId);
     pendingTurns = next;
@@ -1736,11 +1833,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     openRouterProviderBusy = next;
   }
 
-  function openSettings(category: SettingsCategoryId, event: Event): void {
-    const trigger = event.currentTarget;
-    if (!(trigger instanceof HTMLElement)) return;
+  function openSettingsFromTrigger(category: SettingsCategoryId, trigger: HTMLElement): void {
     onOpenSettings(category, trigger);
     settingsStatusMessage = "";
+  }
+  function openSettings(category: SettingsCategoryId, event: Event): void {
+    const trigger = event.currentTarget;
+    if (trigger instanceof HTMLElement) openSettingsFromTrigger(category, trigger);
   }
 
   function isSettingsResponseCurrent(generation: number | undefined, sessionId: string | undefined): boolean {
@@ -1834,8 +1933,29 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
+  function reconcileAttachmentReferences(value: string): void {
+    if (promptAttachments.length === 0) return;
+    const referenced = attachmentsReferencedByDraft(value, promptAttachments);
+    if (referenced.length === promptAttachments.length) return;
+    const referencedIds = new Set(referenced.map(attachment => attachment.id));
+    const removedIds = promptAttachments
+      .filter(attachment => !referencedIds.has(attachment.id))
+      .map(attachment => attachment.id);
+    promptAttachments = referenced;
+    attachmentStatus = `${removedIds.length} attachment${removedIds.length === 1 ? "" : "s"} removed with its prompt reference.`;
+    const sessionId = current?.record.id;
+    if (sessionId) {
+      void window.gradivus.releasePromptAttachments(sessionId, removedIds).catch(error => {
+        if (current?.record.id === sessionId) {
+          attachmentStatus = error instanceof Error ? error.message : String(error);
+        }
+      });
+    }
+  }
+
   function handleComposerInput(event: Event): void {
     const value = (event.currentTarget as HTMLTextAreaElement).value;
+    reconcileAttachmentReferences(value);
     if (byteLength(value) > MAX_INLINE_PROMPT_BYTES && !spillInFlight && current) {
       void spillPromptText(value);
       return;
@@ -2186,10 +2306,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const sessionId = current?.record.id;
     const agentId = agentHubSelectedAgentId;
     if (!sessionId || !agentId) return;
-    if (reset) {
-      agentHubMessages = [];
-      agentHubMessageByte = 0;
-    }
     const requestToken = ++agentHubRequestToken;
     const fromByte = reset ? 0 : agentHubMessageByte;
     agentHubMessagesLoading = true;
@@ -2197,10 +2313,14 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     try {
       const page: AgentHubMessagePage = await window.gradivus.getAgentHubMessages(sessionId, agentId, fromByte);
       if (requestToken !== agentHubRequestToken || current?.record.id !== sessionId || agentHubSelectedAgentId !== agentId) return;
-      if (page.reset) agentHubMessages = [];
       const entries = page.messages.length > 0 ? page.messages : page.entries;
-      if (entries.length > 0) agentHubMessages = [...agentHubMessages, ...entries];
-      agentHubMessageByte = Math.max(agentHubMessageByte, page.nextByte);
+      if (reset || page.reset) {
+        agentHubMessages = [...entries];
+        agentHubMessageByte = page.nextByte;
+      } else {
+        if (entries.length > 0) agentHubMessages = [...agentHubMessages, ...entries];
+        agentHubMessageByte = Math.max(agentHubMessageByte, page.nextByte);
+      }
     } catch (error) {
       if (requestToken === agentHubRequestToken && current?.record.id === sessionId) {
         agentHubMessageError = error instanceof Error ? error.message : String(error);
@@ -2285,6 +2405,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       }
     }
   }
+
+  function openImageInFiles(path: string): void {
+    fileInspectorTarget = path;
+    openInspector("files");
+  }
+
+  async function copyMarkdownText(value: string): Promise<void> {
+    await window.gradivus.writeClipboardText(value);
+  }
   function toggleInspector(tab: InspectorTab): void {
     if (inspectorOpen && inspectorTab === tab) {
       closeInspector();
@@ -2295,9 +2424,30 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 
   function closeInspector(): void {
     inspectorOpen = false;
+    fileInspectorTarget = "";
   }
-  function closeAgentHubWindow(): void {
-    const returnFocus = agentHubReturnFocus;
+  function syncAgentHubWindowGeometry(): void {
+    if (!agentHubDialog || !transcriptPane) return;
+    const bounds = transcriptPane.getBoundingClientRect();
+    agentHubDialog.style.setProperty("--agent-hub-pane-center-x", `${bounds.left + bounds.width / 2}px`);
+    agentHubDialog.style.setProperty("--agent-hub-pane-center-y", `${bounds.top + bounds.height / 2}px`);
+    agentHubDialog.style.setProperty("--agent-hub-pane-width", `${bounds.width}px`);
+    agentHubDialog.style.setProperty("--agent-hub-pane-height", `${bounds.height}px`);
+  }
+  function handleAgentHubOutsidePointerDown(event: PointerEvent): void {
+    if (!agentHubWindowOpen || !agentHubDialog) return;
+    const target = event.target;
+    if (target instanceof Node && agentHubDialog.contains(target)) return;
+    closeAgentHubWindow(false);
+  }
+  function handleAgentHubFocusIn(event: FocusEvent): void {
+    if (!agentHubWindowOpen || !agentHubDialog) return;
+    const target = event.target;
+    if (target instanceof Node && agentHubDialog.contains(target)) return;
+    agentHubDialog.querySelector<HTMLElement>('[aria-label="Close Agent Hub session"]')?.focus();
+  }
+  function closeAgentHubWindow(restoreFocus = true): void {
+    const returnFocus = restoreFocus ? agentHubReturnFocus : undefined;
     agentHubReturnFocus = undefined;
     agentHubDialog?.close();
     agentHubWindowOpen = false;
@@ -2437,11 +2587,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
         earlyPromptResults = new Map(earlyPromptResults).set(event.sessionId, event);
         return;
       }
+      await releaseAdmittedAttachmentBatch(event.sessionId);
       await reconcilePromptResult(event);
       return;
     }
 
     if (event.state) {
+      if (event.state !== "running" && event.state !== "starting") {
+        await releaseAdmittedAttachmentBatch(event.sessionId);
+      }
       const status = event.state === "running" ? "running" : event.state === "error" ? "error" : "idle";
       updateSessionStatus(event.sessionId, status);
       const pending = pendingTurns.get(event.sessionId);
@@ -2527,10 +2681,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           : isCanonicalPromptUser
             ? baseTimeline.findIndex(candidate => candidate.id === pendingTurn?.optimisticUserId)
             : -1;
-        const existed = optimisticIndex >= 0 || baseTimeline.some(candidate => candidate.id === event.item?.id);
+        const visibleItem: TimelineItem = isCanonicalPromptUser && pendingTurn
+          ? { ...event.item, text: pendingTurn.draft }
+          : event.item;
+        const existed = optimisticIndex >= 0 || baseTimeline.some(candidate => candidate.id === visibleItem.id);
         const timeline = optimisticIndex >= 0
-          ? baseTimeline.map((candidate, index) => index === optimisticIndex ? event.item as TimelineItem : candidate)
-          : appendTimeline(baseTimeline, event.item);
+          ? baseTimeline.map((candidate, index) => index === optimisticIndex ? visibleItem : candidate)
+          : appendTimeline(baseTimeline, visibleItem);
         const timelineTotal = (current.timelineTotal ?? current.timeline.length) + (existed ? 0 : 1);
         current = { ...current, timeline, timelineStart: Math.max(0, timelineTotal - timeline.length), timelineTotal };
         if (isCanonicalPromptUser && pendingTurn) {
@@ -2573,9 +2730,22 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
+  function openAbout(trigger: HTMLButtonElement): void {
+    aboutReturnFocus = trigger;
+    aboutOpen = true;
+  }
   function closeAbout(): void {
+    const returnFocus = aboutReturnFocus;
+    aboutReturnFocus = undefined;
     aboutOpen = false;
-    aboutButton?.focus();
+    void tick().then(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+  function toggleThemeFromRail(): void {
+    if (!appSettings || appSettingsBusy.has("theme")) return;
+    const nextTheme = theme === "dark" ? "light" : "dark";
+    void onUpdateAppSetting("theme", { theme: nextTheme }, "Theme");
   }
 
   function appendTimeline(items: TimelineItem[], item: TimelineItem): TimelineItem[] {
@@ -2631,7 +2801,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     if (event.key === "Enter" || event.key === " ") handleTranscriptClick(event);
   }
 </script>
-<svelte:window onclick={handleTranscriptClick} onkeydown={handleTranscriptKeydown} />
+<svelte:window
+  onclick={handleTranscriptClick}
+  onkeydown={handleTranscriptKeydown}
+  onpointerdown={handleAgentHubOutsidePointerDown}
+  onfocusin={handleAgentHubFocusIn}
+  onresize={syncAgentHubWindowGeometry}
+/>
 
 <div class="app-shell">
   <div class="settings-workspace-source" inert={settingsRoute.open} aria-hidden={settingsRoute.open}>
@@ -2647,11 +2823,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       onNewChatInWorkspace={(cwd) => void createNewChatInWorkspace(cwd)}
       onSelectSession={selectSessionFromRail}
       onDeleteSession={(id) => void deleteSessionFromRail(id)}
+      {theme}
+      themeDisabled={!appSettings || appSettingsBusy.has("theme")}
+      onOpenSettings={(trigger) => openSettingsFromTrigger("app-appearance", trigger)}
+      onOpenAbout={openAbout}
+      onToggleTheme={toggleThemeFromRail}
     />
-    <main class="transcript-pane" aria-live="polite">
+    <main bind:this={transcriptPane} class="transcript-pane" aria-live="polite">
       <header class="transcript-header">
         <div class="transcript-identity">
-          <GradivusMark size={28} />
           {#if current}
             <div class="transcript-title">
               <div class="title-line">
@@ -2665,7 +2845,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                       <span class="badge-dot"></span> PLAN MODE
                     </span>
                   {/if}
-                  <button class="rename-button" title="Rename session" aria-label="Rename session" onclick={() => { renameValue = current?.record.title || sessionDisplayName(current?.record); renaming = true; }}>✎</button>
+                  <button class="rename-button" title="Rename session" aria-label="Rename session" onclick={() => { renameValue = current?.record.title || sessionDisplayName(current?.record); renaming = true; }}><Pen2 size={13} aria-hidden="true" /></button>
                 {/if}
               </div>
               <span class="path-label">{current.record.cwd}</span>
@@ -2690,13 +2870,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               type="button"
               class="inspector-action"
               class:is-active={inspectorOpen && inspectorTab === "files"}
-              aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} activities` : ""}`}
+              aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} changed` : ""}`}
               aria-controls="run-inspector"
               aria-expanded={inspectorOpen && inspectorTab === "files"}
               onclick={() => toggleInspector("files")}
             >
               <span>Files</span>
-              {#if fileActivityCount > 0}<span class="inspector-count" aria-label={`${fileActivityCount} file activities`}>{fileActivityCount}</span>{/if}
+              {#if fileActivityCount > 0}<span class="inspector-count" aria-label={`${fileActivityCount} changed files`}>{fileActivityCount}</span>{/if}
             </button>
             <button
               type="button"
@@ -2711,22 +2891,36 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               <CodeSquare size={17} aria-hidden="true" />
             </button>
           {/if}
-          <button class="text-button settings-link" aria-label="Open settings" onclick={(event) => openSettings("runtime", event)}>Settings</button>
-          <button bind:this={aboutButton} class="icon-button" title="About Gradivus" aria-label="About Gradivus" onclick={() => aboutOpen = true}><InfoCircle size={18} aria-hidden="true" /></button>
         </div>
       </header>
       {#if !current}
-        <StateCard variant="welcome">
-          <div class="welcome-mark"><GradivusMark size={64} /></div><span class="eyebrow">Workspace</span><h2>Make the next useful thing.</h2><p>Choose a local repository or folder to start a conversation with OMP. Tool calls, diffs, commands, reasoning, and edits stay paired in one reviewable timeline.</p><button class="primary-button" onclick={() => void createSession()} disabled={loading}>Choose a workspace <span>→</span></button><div class="prompt-suggestions"><span>Start with</span><button onclick={() => draft = "Inspect this repository and identify the next implementation step."}>“Inspect this repository…”</button></div>
+        <StateCard variant="welcome"><span class="eyebrow">Workspace</span><h2>Make the next useful thing.</h2><p>Choose a local repository or folder to start a conversation with OMP. Tool calls, diffs, commands, reasoning, and edits stay paired in one reviewable timeline.</p><button class="primary-button" onclick={() => void createSession()} disabled={loading}>Choose a workspace <span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button><div class="prompt-suggestions"><span>Start with</span><button onclick={() => draft = "Inspect this repository and identify the next implementation step."}>“Inspect this repository…”</button></div>
         </StateCard>
       {:else}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div class="timeline-scroll" role="region" aria-label="Conversation transcript" tabindex="0" bind:this={timelineScroller} onscroll={handleTimelineScroll}>
           <div class="timeline-content" bind:this={timelineContent}>
-          {#if current.timeline.length === 0 && current.state === "ready"}<StateCard variant="empty"><h3>What outcome should we pursue?</h3><p>Ask for research, a summary, an implementation plan, or a review of the current tree.</p><div class="suggestion-grid"><button onclick={() => draft = "Find the important documents in this workspace and explain them."}>Find important documents<span>→</span></button><button onclick={() => draft = "Review the current repository for risks and open issues."}>Review repository risks<span>→</span></button></div></StateCard>{/if}
+          {#if current.timeline.length === 0 && current.state === "ready"}<StateCard variant="empty"><h3>What outcome should we pursue?</h3><p>Ask for research, a summary, an implementation plan, or a review of the current tree.</p><div class="suggestion-grid"><button onclick={() => draft = "Find the important documents in this workspace and explain them."}>Find important documents<span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button><button onclick={() => draft = "Review the current repository for risks and open issues."}>Review repository risks<span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button></div></StateCard>{/if}
           {#if hiddenTimelineCount > 0}<button class="secondary-button older-entries" onclick={() => void revealOlder()} disabled={loadingOlder}>Load 100 older entries <span>({hiddenTimelineCount} remaining)</span></button>{/if}
           {#each visibleTimeline as item (item.id)}
-            <TimelineEntry item={item} kind={current?.record.kind ?? "work"} reasoningLoading={reasoningLoading} openReasoning={openReasoning} onReasoning={loadReasoning} onFile={openFileDiff} showToolDetails={appSettings?.ui.showToolDetails ?? true} />
+            <TimelineEntry
+              item={item}
+              kind={current?.record.kind ?? "work"}
+              reasoningLoading={reasoningLoading}
+              openReasoning={openReasoning}
+              onReasoning={loadReasoning}
+              onCopyText={copyMarkdownText}
+              showToolDetails={appSettings?.ui.showToolDetails ?? true}
+            />
+            {@const fileSummary = turnFileSummaries.get(item.id)}
+            {#if fileSummary}
+              <TurnFileSummary
+                summary={fileSummary}
+                onreview={(path) => void openFileDiff(path)}
+                onopen={(path) => void openSelectedFile(path)}
+                onimage={openImageInFiles}
+              />
+            {/if}
           {/each}
           {#if current.state === "error"}<StateCard variant="error"><strong>Runtime stopped unexpectedly</strong><span>{current.warning ?? "Resume to reconnect and recover the saved transcript."}</span><button class="secondary-button" onclick={() => void resumeSession()}>Reconnect</button></StateCard>{/if}
           </div>
@@ -2742,7 +2936,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               aria-label={`Jump to latest messages${unseenCount > 0 ? ` (${unseenCount} unseen)` : ""}`}
               onclick={scrollToLatest}
             >
-              <span class="jump-arrow" aria-hidden="true">↓</span>
+              <span class="jump-arrow" aria-hidden="true"><ArrowDown size={14} /></span>
               <span class="jump-label">Jump to latest</span>
               {#if unseenCount > 0}
                 <span class="jump-badge">{unseenCount}</span>
@@ -2773,12 +2967,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               </div>
               <div class="turn-metrics">
                 <span class="turn-timer" title="Elapsed turn time">
-                  <span class="timer-glyph" aria-hidden="true">⏱</span>
+                  <span class="timer-glyph" aria-hidden="true"><ClockCircle size={14} /></span>
                   <span class="timer-value">{formatElapsed(elapsedSeconds)}</span>
                 </span>
                 {#if current.tokensPerSecond && current.tokensPerSecond > 0}
                   <span class="turn-throughput" title="Generation throughput">
-                    <span class="throughput-glyph" aria-hidden="true">⚡</span>
+                    <span class="throughput-glyph" aria-hidden="true"><Bolt size={14} /></span>
                     <span class="throughput-value">{Math.round(current.tokensPerSecond)} tok/s</span>
                   </span>
                 {/if}
@@ -2789,7 +2983,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                   aria-label="Stop generation"
                   onclick={() => void abortTurn()}
                 >
-                  <span class="stop-icon" aria-hidden="true">■</span>
+                  <span class="stop-icon" aria-hidden="true"><Stop size={12} /></span>
                   <span class="stop-label">Stop</span>
                 </button>
               </div>
@@ -2832,9 +3026,8 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             attachDisabled={!canCompose || isComposerBusy}
             attachments={promptAttachments}
             attachmentStatus={attachmentStatus}
-            kindLabelFor={attachmentKindLabel}
             displayNameFor={attachmentDisplayName}
-            onStageFiles={(files) => void stageFiles(files)}
+            onStageFiles={(files, insertionIndex) => void stageFiles(files, insertionIndex)}
             onRemoveAttachment={(attachment) => void removeAttachment(attachment)}
             bind:attachmentInputEl={attachmentInput}
             bind:inputEl={composerInput}
@@ -2898,32 +3091,39 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           />
         {:else}
           <FileActivityPanel
-            items={current.timeline}
+            files={outputFiles}
+            selectedPath={fileInspectorTarget}
             onOpenFile={(path) => void openSelectedFile(path)}
             onOpenDiff={(path) => void openFileDiff(path)}
-            onFocusItem={focusTimelineItem}
+            loadImagePreview={(path, maxDimension) =>
+              window.gradivus.loadWorkspaceImage(activeId, path, maxDimension)}
           />
         {/if}
       </RunInspector>
     {/if}
   </div>
   {#if current && agentHubWindowOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-backdrop agent-hub-window-backdrop" onclick={(event) => { if (event.target === event.currentTarget) closeAgentHubWindow(); }}>
+    <div class="modal-backdrop agent-hub-window-backdrop">
       <dialog
         bind:this={agentHubDialog}
         class="agent-hub-window"
         tabindex="-1"
         aria-labelledby="agent-hub-window-title"
+        onkeydown={(event) => {
+          event.stopPropagation();
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeAgentHubWindow();
+          }
+        }}
         oncancel={(event) => { event.preventDefault(); closeAgentHubWindow(); }}
       >
         <header class="agent-hub-window-header">
           <div>
             <span class="eyebrow">Agent Hub session</span>
-            <h2 id="agent-hub-window-title">{agentHubSelectedAgent?.displayName ?? "Agent details"}</h2>
-            <p>Inspect the retained transcript and continue this agent's focused work.</p>
+            <h2 id="agent-hub-window-title" title={agentHubSelectedAgent?.displayName ?? "Agent details"}>{agentHubSelectedAgent?.displayName ?? "Agent details"}</h2>
           </div>
-          <IconButton class="inspector-close" glyph="×" label="Close Agent Hub session" onclick={closeAgentHubWindow} />
+          <IconButton class="inspector-close" icon={CloseCircle} size={15} label="Close Agent Hub session" onclick={closeAgentHubWindow} />
         </header>
         <div class="agent-hub-window-content">
           <AgentHubPanel
@@ -2949,7 +3149,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   {/if}
 
   {#if selectedDiffPath}
-    <ModalShell backdrop dialogClass="file-diff-dialog" role="dialog" ariaLabel={`Git diff for ${selectedDiffPath}`} onclickbackdrop={closeFileDiff}>
+    <ModalShell backdrop backdropDismissLabel="Close Git diff" dialogClass="file-diff-dialog" role="dialog" ariaLabel={`Git diff for ${selectedDiffPath}`} onclickbackdrop={closeFileDiff}>
       <FileDiffInspector
         path={selectedDiffPath}
         diff={selectedDiff}
@@ -3217,7 +3417,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                         {#if account.signedIn}
                           <button type="button" class="secondary-button" aria-label={`Sign out of ${account.name}`} disabled={Boolean(authBusyProvider)} onclick={() => void logoutProvider(account)}>{authBusyProvider === account.provider ? "Signing out…" : "Sign out"}</button>
                         {:else if account.available}
-                          <button type="button" class="primary-button" aria-label={`Sign in to ${account.name}`} disabled={Boolean(authBusyProvider)} onclick={() => void loginProvider(account)}>{authBusyProvider === account.provider ? "Waiting for sign-in…" : "Sign in"} <span>→</span></button>
+                          <button type="button" class="primary-button" aria-label={`Sign in to ${account.name}`} disabled={Boolean(authBusyProvider)} onclick={() => void loginProvider(account)}>{authBusyProvider === account.provider ? "Waiting for sign-in…" : "Sign in"} <span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button>
                         {/if}
                       </div>
                     </article>
