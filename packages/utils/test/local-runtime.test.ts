@@ -80,15 +80,25 @@ describe("secure local runtime", () => {
 		expect(() => secureRuntimePath("relative", "file")).toThrow();
 		const parent = await temporaryRoot();
 		const parentLink = `${parent}-link`;
-		await fs.symlink(parent, parentLink);
-		await expect(ensureSecureRuntimeRoot(path.join(parentLink, "child"))).rejects.toThrow();
-		await fs.rm(parentLink, { force: true });
-		await fs.rm(parent, { recursive: true, force: true });
-		await fs.rm(root, { recursive: true, force: true });
-		const symlink = `${root}-link`;
-		await fs.symlink(root, symlink);
-		await expect(ensureSecureRuntimeRoot(symlink)).rejects.toThrow();
-		await fs.rm(symlink, { force: true });
+		try {
+			await fs.symlink(parent, parentLink, process.platform === "win32" ? "junction" : undefined);
+			await expect(ensureSecureRuntimeRoot(path.join(parentLink, "child"))).rejects.toThrow();
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+		} finally {
+			await fs.rm(parentLink, { force: true });
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+		try {
+			const symlink = `${root}-link`;
+			await fs.symlink(root, symlink, process.platform === "win32" ? "junction" : undefined);
+			await expect(ensureSecureRuntimeRoot(symlink)).rejects.toThrow();
+			await fs.rm(symlink, { force: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 	it("derives secure runtime endpoints with correct platform naming", async () => {
 		const root = await temporaryRoot();

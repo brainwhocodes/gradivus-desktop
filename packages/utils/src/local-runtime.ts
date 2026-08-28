@@ -221,6 +221,7 @@ function ownerUid(): number | undefined {
 }
 
 function assertOwnedMode(stat: fs.Stats, expectedMode: number, label: string): void {
+	if (process.platform === "win32") return;
 	const uid = ownerUid();
 	if (uid !== undefined && stat.uid !== uid) throw new Error(`${label} is not owned by the current user`);
 	if (modeBits(stat.mode) !== expectedMode) throw new Error(`${label} must have mode ${expectedMode.toString(8)}`);

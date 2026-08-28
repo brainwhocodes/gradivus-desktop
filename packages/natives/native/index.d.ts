@@ -148,6 +148,11 @@ export declare class Process {
   static fromPath(path: string): Array<Process>
   /** Operating-system process identifier for this process reference. */
   get pid(): number
+  /**
+   * Stable identity token derived from the platform's kernel-reported process
+   * start or creation time.
+   */
+  get identityToken(): string
   /** Parent process id for this process, when available. */
   get ppid(): number | null
   /** Launch arguments for this process. */
@@ -180,8 +185,6 @@ export declare class Process {
   children(): Array<Process>
   /** Current status of this process reference. */
   status(): ProcessStatus
-  /** Stable identity token derived from the platform's kernel-reported process start or creation time. */
-  get identityToken(): string
 }
 
 /** Stateful PTY session for interactive stdin/stdout passthrough. */
