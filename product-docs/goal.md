@@ -12,9 +12,9 @@ Maintain an evidence-backed description of the Gradivus OMP Chat experience as a
 
 ## Scope discipline
 
-The primary surface is the fixed **OMP Chat** tab in the Gradivus Electron application. Include the session rail, composer, conversation transcript, active-turn controls, Agent Hub, Files inspector, Local terminal drawer, Settings routes that affect chat, extension requests, in-app notifications, and browser-selection delivery to chat.
+The primary surface is the entire Gradivus desktop application: the workspace shell (window, title bar, tab strip, shortcuts, Settings route), the browser workspace (tabs, panes, splits, address-bar navigation), element targeting and Page Agent delivery, the OMP runtime connection, and the fixed OMP Chat tab with its session rail, composer, conversation transcript, active-turn controls, Agent Hub, Files inspector, Local terminal drawer, Settings routes, extension requests, and in-app notifications.
 
-Generic browser navigation, browser split layout, packaging, release engineering, the terminal-only OMP CLI/TUI, SDK contracts, and implementation architecture are outside scope unless their behavior changes a chat user's expectation. Link to repository engineering documentation instead of recreating it.
+Packaging, release engineering, the terminal-only OMP CLI/TUI, SDK contracts, and implementation architecture are outside scope unless their behavior changes a documented surface. Link to repository engineering documentation instead of recreating it.
 
 Assume a local desktop user, a normal writable local workspace, a Work session, and default machine-local settings unless a feature document says otherwise. Describe other modes as modifiers, not as a new default.
 

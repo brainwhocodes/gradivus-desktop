@@ -59,7 +59,7 @@ The split draft/attachment behavior is intentionally documented as unresolved ra
 
 **Inference:** after a hard renderer or app loss, only entries returned by OMP history and state returned by durable stores can be reconstructed. The passing Electron journeys did not relaunch with a draft, active turn, pending extension request, or open disclosure, so this consequence remains unobserved.
 
-Registry corruption is handled below the UI by preserving the invalid file under a corrupt-file name and starting from a repaired/empty state. The source-level warning is not rendered by OMP Chat, so visible recovery remains an open gap (`packages/desktop/src/main/session-registry.ts:30-70`; `packages/desktop/src/main/desktop-host.ts:215-229`).
+Registry corruption is handled below the UI by preserving the invalid file under a corrupt-file name and starting from a repaired/empty state, and the recovery warning is surfaced as a one-time **Recovery warning** toast after the window finishes loading (`packages/desktop/src/main/session-registry.ts:30-70`; `packages/desktop/src/main/desktop-host.ts:215-229`; `packages/desktop/src/main/main.ts:356-362`).
 
 ## Reconnect is two different recoveries
 
@@ -73,9 +73,9 @@ No passing mounted Electron journey forced this failure and activated **Reconnec
 
 ### Workspace runtime
 
-Unexpected authority-client loss triggers bounded automatic attempts and is designed to emit reconnecting then connected status. Terminal resubscription retains its byte offset (`packages/desktop/src/main/main.ts:233-334`; `packages/desktop/src/main/workspace-host.ts:873-970`; test-specified `packages/desktop/test/workspace-host-reconnect.test.ts:89-145`).
+Unexpected authority-client loss triggers bounded automatic attempts: a transient **Reconnecting to the workspace runtime…** notice while retrying, **Workspace runtime disconnected** after an unexpected loss, and — after ten failed attempts with capped backoff — the persistent **Workspace runtime unreachable** error with **Retry** and dismiss controls. Terminal resubscription retains its byte offset (`packages/desktop/src/main/runtime-reconnect.ts`; `packages/desktop/src/renderer/ui/pages/App.svelte`; test-specified `packages/desktop/test/runtime-reconnect.test.ts:26-84`, `packages/desktop/test/workspace-host-reconnect.test.ts:89-145`).
 
-The outer shell assigns reconnect and action-error messages but does not render them. A user can therefore see a frozen-looking shell rather than a reconnecting or exhausted state. This is the high-severity suspected defect [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered), established in source at `packages/desktop/src/renderer/ui/pages/App.svelte:563-603,650-754`.
+Rendering of this ladder was the resolved defect [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered): the shell previously computed reconnect and action-error messages without rendering them. The unit suite now proves the emission sequence; a mounted Electron journey that severs the runtime and observes the full ladder remains open (see [OMP runtime connection](../features/omp-runtime-connection.md)).
 
 ## Owning feature documents
 

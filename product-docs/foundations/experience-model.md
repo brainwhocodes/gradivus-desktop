@@ -2,17 +2,22 @@
 
 ## Summary
 
-OMP Chat is a persistent chat stage inside a multi-surface Electron workspace. The user selects a local folder, works in one of its chat sessions, submits one turn at a time, and reviews a transcript that mixes human messages with OMP reasoning, tool activity, system context, and delegated work. Secondary surfaces remain attached to the selected chat: Agent Hub, Files, and the Local terminal drawer.
+Gradivus is a multi-surface Electron workspace. The workspace shell owns the window, the tab strip, and the Settings route; the browser workspace holds sandboxed browser tabs and panes; and OMP Chat is a persistent chat stage where the user selects a local folder, works in one of its chat sessions, submits one turn at a time, and reviews a transcript that mixes human messages with OMP reasoning, tool activity, system context, and delegated work. Secondary surfaces remain attached to the selected chat: Agent Hub, Files, and the Local terminal drawer. Element targeting connects the browser workspace to OMP work through a hidden Page Agent session.
 
-The central product invariant is ownership: a submitted turn, its live activity, changed-file evidence, unread state, staged input, and delegated agents must remain associated with the chat session where they originated.
+The central product invariant is ownership: a submitted turn, its live activity, changed-file evidence, unread state, staged input, delegated agents, and browser-delivered work must remain associated with the chat session or pane where they originated.
+
 
 ## Visible hierarchy
 
 ```mermaid
 flowchart TD
-    Window[Gradivus window] --> Tabs[Workspace tab strip]
-    Tabs --> Chat[OMP Chat tab]
+    Window[Gradivus window] --> TitleBar[Title bar and window controls]
+    Window --> Tabs[Workspace tab strip]
+    Tabs --> Chat[Fixed chat tab]
     Tabs --> Browser[Browser tabs]
+    Browser --> Panes[Browser panes with address bars]
+    Panes --> Targeting[Element targeting card and pins]
+    Panes --> PageAgentHub[Browser Agent Hub]
     Chat --> Rail[Workspace and chat rail]
     Chat --> Transcript[Conversation transcript]
     Chat --> Composer[Composer]
@@ -20,10 +25,13 @@ flowchart TD
     Chat --> Drawer[Local terminal drawer]
     Window --> Settings[Settings route]
     Transcript --> Modal[Reasoning, diff, and extension disclosures]
-    Browser --> Selection[Selection queue delivered to chat]
+    Targeting --> Queue[Selection queue]
+    Queue --> ChatTurn[Delivered turn in a visible chat]
+    Targeting --> Hidden[Hidden Page Agent session for inline work]
 ```
 
-The OMP Chat stage stays mounted while the user visits browser tabs. Settings makes the underlying workspace inert and returns focus to the invoking control when closed. The shell shows a blocking **Connecting to the workspace runtime…** overlay until initial workspace hydration completes.
+The chat stage stays mounted while the user visits browser tabs, and browser panes of background tabs stay alive while detached. Settings makes the underlying workspace inert and returns focus to the invoking control when closed. The shell shows a blocking **Connecting to the workspace runtime…** overlay until initial workspace hydration completes, and a persistent **Workspace runtime unreachable** error with **Retry** if reconnect attempts are exhausted.
+
 
 ## Top-level user-visible states
 
@@ -57,7 +65,7 @@ These states are a documentation lens. The implementation uses additional proces
 | Rail workspace | Exact local folder path | Recomputed from saved chat records | Chats with the same exact path appear under one folder group. |
 | Chat session | One rail row | Desktop session registry | Title, folder, timestamps, active pointer, and OMP resume information survive relaunch. |
 | OMP session | One chat session | OMP JSONL history | The conversation transcript can be resumed and paged. |
-| Resident runtime | One chat session | Process lifetime | A running or recently used chat responds immediately; dormant chats restart on open. |
+| Resident runtime | One chat session | Process lifetime; at most three resident, five-minute idle stop, LRU eviction | A running or recently used chat responds immediately; dormant or evicted chats restart on open and resume their transcript. |
 | Draft text | Renderer | Renderer lifetime | Unsubmitted text is not durable across app exit. Current code carries one draft across chat selection; that ownership is under triage. |
 | Staged attachments | Current chat session | Temporary attachment store | Chips belong to the selected chat; session boundaries release visible staged files. |
 | Pending turn | Originating chat session | Renderer plus OMP request correlation | Background completion and rail status remain attached to the original chat. |
@@ -66,7 +74,9 @@ These states are a documentation lens. The implementation uses additional proces
 | Agent Hub | Chat session and OMP process | Retained agent state while available | Roster, unread state, transcript, and lifecycle actions change with selected chat. |
 | Files inspector | Chat session transcript | Derived from successful tool entries | Inventory is chat-scoped; **View diff** reads current workspace state. |
 | Local terminal drawer | Selected chat session | Workspace runtime PTY lifecycle | Hide/show and renderer reload can preserve the shell; switching workspace, restart, or explicit close ends its ephemeral PTY. |
-| Browser selection queue | Browser workspace with target chat | Host-owned in-flight state | Picks route to an explicit chat and remain in the browser card until completion/error is acknowledged. |
+| Browser tab and panes | Browser tab in the tab strip | Durable workspace-authority record | Tab names, layout, and current URLs survive relaunch; history, titles, and scroll do not. |
+| Page Agent | Browser workspace | Hidden OMP session while live | Inline and queued element work run outside every visible chat; only Send to Chat reaches a visible chat, resolved by workspace path. |
+| Selection queue | One browser pane | Host-owned in-memory state | Queued picks survive navigation and tab switches, die with the pane and on relaunch, and remain in rows until completion/error is acknowledged. |
 
 > Technical note: the rail's “workspace” and “session” vocabulary does not match the workspace runtime's authority objects. Product prose uses **rail workspace**, **chat session**, **workspace authority**, and **workspace session** to keep those domains distinct.
 
@@ -161,6 +171,8 @@ The Files inspector includes only successful completed write/edit activity and d
 | Extension request | Modal | Ephemeral outstanding request | OMP is blocked on user input; response is not a transcript entry. |
 | Settings status | Settings surface | Ephemeral around durable mutation | A setting is saving, applied, reset, or failed. |
 | Browser selection card | Browser pane | Until acknowledgement | Selection delivery or inline work remains reviewable where it started. |
+| Shell notice/error toast | Workspace shell overlay | 5–7 s, or persistent with Retry | Reconnecting/disconnected workspace-runtime state and outer-shell action failures. |
+| Launch overlay | Workspace shell | Until first workspace document | The app is connecting to the workspace runtime. |
 
 ## Cross-system boundaries
 
@@ -174,8 +186,8 @@ The Files inspector includes only successful completed write/edit activity and d
 
 ## Established product gaps
 
-The state model leaves several user-visible decisions unresolved: canonical product identity; conversation deletion; draft ownership across chats; inactive-chat extension requests; visible workspace-runtime reconnect feedback; complete large-reasoning disclosure; Stop reconciliation in a mounted renderer; and whether successful Steer/Queue attachment bytes should remain retained. These are recorded with reproduction and decision criteria in [`../bug-triage.md`](../bug-triage.md).
+The state model leaves several user-visible decisions unresolved: conversation deletion (resolved — deletion shipped); draft ownership across chats (resolved — per-chat drafts); inactive-chat extension requests (resolved — replay-on-activation); visible workspace-runtime reconnect feedback (resolved — toast ladder with Retry); complete large-reasoning disclosure (resolved — bounded-preview honesty); the composer one-surface contract at narrow widths (CHAT-012); the browser pane context menu (CHAT-013); the silent launch exit (CHAT-014); whether queued captures should survive navigation; and whether inline Page Agent work needs a reviewable history beyond the browser card. These are recorded with reproduction and decision criteria in [`../bug-triage.md`](../bug-triage.md).
 
 ## Verification boundary
 
-This foundation is based on the working tree anchored at `c125341133ff90a29fe266e1b166bac0183338c8`. On 2026-08-25, 24 Electron chat journeys, 8 Electron browser-selection journeys, and 1 compiled-runtime Electron journey passed on macOS arm64. The package unit-test command did not complete and is not counted as passing evidence.
+This foundation is based on the working tree anchored at `ac5f533bb245ef7f911dfc165c7c39356a2ac639` with the cross-platform terminal-renderer cutover and the composer footer fix applied. On 2026-08-28, all 36 fixture-backed Electron journeys and 1 compiled-runtime journey passed on Windows x64, plus 14 unit assertions for terminal-engine routing and palette. The package unit suite was not re-run end to end in this pass. The 2026-08-25 macOS arm64 evidence predates the Gradivus identity and Page Agent cutovers.

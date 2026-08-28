@@ -10,17 +10,32 @@ The canonical product name used by this documentation set and the repository roo
 **OMP**  
 Oh My Pi, the local coding-agent runtime that owns models, provider access, tool execution, and resumable conversation history.
 
-**OMP Chat**  
-The fixed Electron chat tab where a user chooses a workspace, manages chats, composes requests, follows OMP activity, and opens chat-scoped inspectors. It is a surface within Gradivus, not another product name.
+**OMP Chat**
+The fixed Electron chat tab where a user chooses a workspace, manages chats, composes requests, follows OMP activity, and opens chat-scoped inspectors. It is a surface within Gradivus, not another product name. Its visible tab label is **Gradivus** with a small **native** pill.
 
-**workspace shell**  
-The Electron window around OMP Chat and browser tabs. It owns the native title bar, tab strip, settings route, window controls, and initial connection overlay.
+**workspace shell**
+The Electron window around OMP Chat and browser tabs. It owns the custom title bar, window controls (Minimize, Maximize/Restore, Close), the tab strip, global keyboard shortcuts, the Settings route, and the initial connection overlay.
 
-**browser workspace**  
-The browser-tab and browser-pane area beside OMP Chat. Generic browsing is outside this documentation set except when browser selection is delivered to OMP Chat.
+**tab strip**
+The row of tabs at the top of the workspace shell. It always contains the fixed chat tab and zero or more browser tabs.
 
-**Local terminal drawer**  
-The chat-local drawer opened from the transcript header. It contains a bounded **Agent activity** projection and an independent **Shell**. The shell does not add its input or output to OMP context or the conversation transcript.
+**browser tab**
+A durable workspace record shown in the tab strip. Browser tabs are named **Browser**, **Browser 2**, and so on; page titles never reach the tab strip.
+
+**browser pane**
+One sandboxed native web view inside a browser tab. A tab holds one to four panes arranged as columns, rows, or a 2×2 grid.
+
+**browser workspace**
+The browser-tab and browser-pane area beside OMP Chat, including per-pane address bars, the browser toolbar, and the element-targeting entry points.
+
+**window controls**
+The Minimize, Maximize/Restore, and Close controls in the custom title bar. Window geometry does not persist across relaunch.
+
+**Local terminal drawer**
+The chat-local drawer opened from the transcript header with the terminal toggle. Its interactive area is a region named **Shell terminal**, rendered by a platform-selected terminal engine. The shell does not add its input or output to OMP context or the conversation transcript.
+
+**terminal engine**
+The platform-selected renderer inside the Local terminal drawer: `wterm-dom` (DOM rows with the libghostty WebAssembly core) on Windows, and `ghostty-web` (canvas with the Ghostty Web WebAssembly core) on macOS and Linux. Exposed on the drawer as `data-terminal-renderer`.
 
 ## Containers and persistence
 
@@ -53,6 +68,15 @@ A saved chat session whose OMP child process is stopped. Opening the chat starts
 
 **workspace runtime**  
 The local daemon that persists workspace-authority state and owns durable browser and terminal services. Its reconnect lifecycle is distinct from reconnecting an errored OMP chat.
+
+**runtime residency**
+The supervisor rule that at most three chat runtimes stay resident, an idle runtime stops after five minutes, and opening a further chat evicts the least-recently-used idle one. Evicted chats resume transparently from their saved OMP session file.
+
+**Page Agent**
+The hidden OMP session Gradivus provisions automatically the first time a user selects a page element. It runs inline element work and queued tasks, is visible in the browser pane's Agent Hub, and never appears in the chat rail.
+
+**element targeting**
+The interaction of selecting a page element in a browser pane and giving OMP an instruction through the Page Agent. Its delivery actions are **Ask OMP** (inline), **Send to Chat**, and **Add to Queue**.
 
 ## Conversation and turn lifecycle
 

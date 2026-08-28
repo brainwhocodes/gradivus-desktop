@@ -329,6 +329,81 @@ Resolved 2026-08-25 by shipping deletion. New `deleteSession` API/IPC (`gradivus
 
 **Verification:** `test/session-registry.test.ts` covers removal persistence, active fallback ordering, last-of-kind clearing, and unknown-id rejection; Electron journey “deletes a chat after confirmation…” asserts copy disclosure, rail update, fallback selection, and persisted registry.
 
+## CHAT-012 — The composer footer loses its attachment bar at narrow widths
+
+- **Status:** **Resolved** (2026-08-28)
+- **Severity:** Medium
+- **Evidence:** The geometry journey failed on Windows x64 with `narrowGeometry.attachmentRect` null at `packages/desktop/e2e/desktop.spec.ts:743` because the working tree had moved `.composer-attachment-bar` from `.composer-actions` into `.composer-top-bar`, while the journey (and the shipped footer CSS) codify the footer placement.
+- **Product impact:** At narrow widths the attachment shelf is missing from the composer footer, so the staged-attachment affordance and the documented one-surface composer contract (attachment shelf above tools and action rail) are not rendered.
+
+### Reproduction
+
+1. Launch the packaged Electron app with the fixture chat.
+2. Resize the window to 920, 760, and 720 px width.
+3. Inspect `.composer-actions` for `.composer-attachment-bar`.
+
+### Rationale
+
+The composer was restructured in the working tree (the runtime picker and send controls were re-laid-out); the narrow-width footer no longer renders the attachment bar the geometry journey requires. The same journey codifies the intended wide layout: attachment bar leftmost, then runtime picker, context meter, and the send button rightmost with compact gaps.
+### Decision needed
+
+Resolved by decision, amended 2026-08-28 by product decision. Final contract: the attachment shelf is the only control that renders above the chat textarea (first child of `.composer-top-bar`, spanning the composer width); the composer footer holds only the runtime picker, context meter, and **Send**/**Steer** action as a right-aligned cluster with the primary action flush to the footer's lower right at every width. The textarea height limits match the codified contract (42/160 px comfortable, 36/144 px compact). The geometry journey now codifies shelf-above-input plus the right-aligned footer at 920/760/720 px, and the two attachment journeys assert the shelf above the input.
+
+### Resolution threshold
+
+Met 2026-08-28: `packages/desktop/e2e/desktop.spec.ts` **"keeps the Command Deck composer as one usable surface at both densities"** passes at both densities and all three narrow widths, and the full desktop Playwright suite passes on Windows x64 against the rebuilt packaged bundle.
+
+## CHAT-013 — Browser pane right-click menu items do nothing
+
+- **Status:** **Resolved** (2026-08-28)
+- **Severity:** Medium
+- **Evidence:** `packages/desktop/src/main/workspace-host.ts:1690-1699` builds the native pane context menu (**Split Right**, **Split Down**, **Close Pane**) and emits a `pane-context-action` workspace event (`packages/desktop/src/shared/contracts.ts:623`), but no renderer or main-process subscriber handles the event — the renderer has no `pane-context-action` reference at all.
+- **Product impact:** Right-clicking a browser pane shows working-looking menu items that have no effect, while the package README documents “Right-click any browser pane to split it right or down, or to close it” as supported behavior. Toolbar split/close buttons work.
+
+### Reproduction
+
+1. Launch the app and open a browser tab.
+2. Right-click inside the browser pane.
+3. Choose **Split Right** (or **Split Down** / **Close Pane**).
+4. Observe the pane layout.
+
+### Rationale
+
+The menu was wired to an event contract that was never consumed. Unit tests (`test/workspace-host-pane-menu.test.ts`) assert only main-side label/enabled/event behavior, so the gap is invisible to them.
+
+### Decision needed
+
+Resolved by handling the event. The shell's workspace-event handler (`App.svelte` `handleWorkspaceEvent`) now consumes `pane-context-action`: it locates the owning browser tab and routes `close` to the same `closeBrowserPane` path as the toolbar, and `split-columns`/`split-rows` to the same `splitBrowser` path. Unknown pane ids are dropped silently.
+
+### Resolution threshold
+
+Met 2026-08-28. New Electron journey **“routes native pane context menu actions to pane splits and close”** (`e2e/desktop.spec.ts`) emits the `pane-context-action` workspace event exactly as the native menu click does (`workspace-host.ts` `#send` → `gradivus:workspace`) and observes split-columns (1→2 panes), split-rows (2→3 panes), and close (3→2, pane id removed). Combined with the existing main-side unit test (`test/workspace-host-pane-menu.test.ts` proves menu click → event emission), the full chain menu click → event → split/close is covered. Passes in the full desktop Playwright run on Windows x64.
+
+## CHAT-014 — Gradivus exits silently when the workspace runtime cannot start
+
+- **Status:** **Resolved** (2026-08-28)
+- **Severity:** High
+- **Evidence:** `packages/desktop/src/main/main.ts:209-233` catches workspace-runtime and workspace-authority startup failures, logs them (`RUNTIME STARTUP ERROR:` / `WORKSPACE AUTHORITY ERROR:`), and exits; no dialog, window, or error surface appears. Spawn-failure wording exists in `packages/workspace-runtime/src/bootstrap.ts:329`.
+- **Product impact:** On a packaged install with a broken bundled runtime (or a development tree missing the compiled OMP binary), launching Gradivus appears to do nothing. The only diagnostics are log files.
+
+### Reproduction
+
+1. Rename or remove the packaged OMP executable (or the development `dist/omp` binary).
+2. Launch Gradivus.
+3. Observe that no window appears and the process exits.
+
+### Rationale
+
+>The startup sequence creates the window only after the daemon is running, and the failure path exits before any UI exists. The development-missing-binary case has an explicit message in the log, but nothing user-visible.
+
+### Decision needed
+
+Resolved with a native error dialog. Both startup-failure catch blocks in `main.ts` now call `showFatalStartupError` before quitting: `dialog.showErrorBox` renders the failure heading ("Gradivus runtime failed to start" / "Gradivus workspace failed to initialize"), the underlying error text, and a logs pointer (`Logs: ~/.omp/logs/`). The app quits after the user dismisses the dialog.
+
+### Resolution threshold
+
+Met 2026-08-28 (Observed, Windows x64). In the packaged build with `resources/omp.exe` removed, launch shows a modal native error dialog — heading "Gradivus runtime failed to start", body "Workspace runtime server failed to start at …omp.exe: spawn … ENOENT" plus the logs pointer (dialog text read back via UI Automation) — instead of exiting silently. Dismissing the dialog exits the app cleanly; `omp.exe` was restored afterwards.
+
 ## Triage review rule
 
 When an item is reproduced, replace source-predicted wording with exact observed setup, visible result, platform, and evidence. When resolved, keep the entry with resolution revision and the verification claim that prevents recurrence; do not silently delete the historical decision.

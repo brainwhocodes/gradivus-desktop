@@ -74,7 +74,7 @@ The mounted semantic-transcript journey observed accessible system/IRC/advisor/j
 
 OMP Chat notifications do not auto-dismiss. A later notice replaces the current notice singleton, and errors use a separate singleton. There is no notification history, native notification, sound, badge preference, or multi-device delivery (`packages/desktop/src/renderer/ui/pages/OmpChat.svelte:1190-1238,2294-2297,2425-2427,2476-2482,3148-3149`; `packages/desktop/src/renderer/ui/molecules/Toast.svelte:1-27`).
 
-Outer-shell workspace reconnect and action errors are assigned to state but never rendered. That means the semantic feedback path is absent, not merely visually subtle. The suspected high-severity defect is [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered), with source evidence in `packages/desktop/src/renderer/ui/pages/App.svelte:563-603,650-754`.
+Outer-shell workspace reconnect and action errors are rendered as bottom-right toasts: transient notices with `role=status`, action errors with `role=alert`, and the persistent retry-exhausted error with **Retry** and dismiss controls. The earlier absence of this feedback path was [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered), resolved 2026-08-25; a mounted journey that severs the runtime and observes the announcements remains open.
 
 ## Themes, contrast, density, and motion
 

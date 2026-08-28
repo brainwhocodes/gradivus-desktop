@@ -108,7 +108,7 @@ There is no `offline` badge, `navigator.onLine` workflow, offline queue, or defe
 | --- | --- | --- |
 | External provider/network | Saved local settings, chat metadata, and already persisted OMP history may still exist. | New provider-backed work can fail into prompt recovery or provider-error feedback. Automatic retry is an OMP preference, not an offline queue. |
 | Local OMP process/RPC | Desktop chat record and saved OMP session file remain. | The chat enters error and offers **Reconnect**. No passing Electron journey executed this recovery. |
-| Local workspace runtime | The mounted renderer may retain live in-memory OMP Chat state temporarily. | The shell automatically retries the authority connection, but visible reconnect/exhaustion feedback is not currently rendered. See [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered). |
+| Local workspace runtime | The mounted renderer may retain live in-memory OMP Chat state temporarily. | The shell automatically retries the authority connection with visible reconnecting/disconnected toasts and, after exhaustion, a persistent error with **Retry** (resolved [`CHAT-002`](../bug-triage.md#chat-002--workspace-reconnect-and-outer-shell-errors-are-not-rendered)). |
 | Embedded-page network | OMP Chat and local state remain separate. | No custom browser offline page is established. |
 
 Machine-local does not mean network-isolated. The fixture-backed Electron journey launches isolated temporary user data and a deterministic loopback chat RPC process without provider credentials, but browser panes can still navigate HTTP/HTTPS and the process inherits a parent environment before test overrides (`product-docs/foundations/scope-and-evidence.md:76-88`).
