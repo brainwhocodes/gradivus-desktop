@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { releaseTagNames, validateExplicitVersion } from "./release";
+import { bumpCanaryVersion, bumpVersion, releaseTagNames, validateExplicitVersion } from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -56,5 +56,27 @@ describe("releaseTagNames", () => {
 		expect(() => releaseTagNames("18.0.0", "github.com/can1357/oh-my-pi/go/omp-rpc/v17")).toThrow(
 			"does not match release major v18",
 		);
+	});
+});
+
+describe("release version bumps", () => {
+	test("starts a canary patch release after the current stable version", () => {
+		expect(bumpCanaryVersion("0.13.0")).toBe("0.13.1-canary.1");
+	});
+
+	test("increments the existing canary release number", () => {
+		expect(bumpCanaryVersion("0.13.0-canary.2")).toBe("0.13.0-canary.3");
+	});
+
+	test("finalizes a canary with a patch bump", () => {
+		expect(bumpVersion("0.13.0-canary.2", "patch")).toBe("0.13.0");
+	});
+
+	test("bumps the core version when applying a minor bump to a canary", () => {
+		expect(bumpVersion("0.13.0-canary.2", "minor")).toBe("0.14.0");
+	});
+
+	test("rejects explicit canary versions", () => {
+		expect(validateExplicitVersion("1.2.3-canary.1")).toBe(null);
 	});
 });

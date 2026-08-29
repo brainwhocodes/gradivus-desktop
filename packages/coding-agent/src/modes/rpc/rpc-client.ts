@@ -69,8 +69,9 @@ export interface RpcClientOptions {
 	sessionDir?: string;
 	/** Additional CLI arguments */
 	args?: string[];
-	/** Custom tools owned by the embedding host and exposed over the RPC transport */
 	customTools?: RpcClientCustomTool[];
+	/** Grace period before force-killing a child during transport cleanup. */
+	terminationGraceMs?: number;
 }
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
@@ -506,7 +507,7 @@ export class RpcClient {
 
 			if (connection) {
 				const grace = Promise.withResolvers<boolean>();
-				const graceTimer = setTimeout(() => grace.resolve(false), 5_000);
+				const graceTimer = setTimeout(() => grace.resolve(false), this.options.terminationGraceMs ?? 5_000);
 				const exitedGracefully = await Promise.race([
 					child.exited.then(
 						() => true,

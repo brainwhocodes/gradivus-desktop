@@ -179,6 +179,37 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		await expect(pending).rejects.toThrow("Client stopped");
 	});
 
+	test.skipIf(process.platform === "win32")(
+		"rejects pending requests and reaps the worker when stdout parsing fails",
+		async () => {
+			// This awaits the real child-process grace-to-hard-kill path; fake timers
+			// cannot drive OS signal delivery or process reaping.
+			using tempDir = TempDir.createSync("@omp-rpc-reader-failure-");
+			const pidFile = tempDir.join("pid");
+			using client = new RpcClient({
+				cliPath: MOCK_AGENT,
+				env: {
+					MOCK_RPC_PID_FILE: pidFile,
+					MOCK_RPC_INVALID_OUTPUT: "1",
+					MOCK_RPC_IGNORE_SIGTERM: "1",
+				},
+				terminationGraceMs: 10,
+			});
+
+			let pid = 0;
+			try {
+				await client.start();
+				pid = Number(await Bun.file(pidFile).text());
+
+				await expect(client.getState()).rejects.toThrow(/Agent output reader failed/);
+				await expect(client.getState()).rejects.toThrow("Client not started");
+				expect(isProcessAlive(pid)).toBe(false);
+			} finally {
+				if (pid > 0 && isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+			}
+		},
+		10_000,
+	);
 	test("reports exit code and stderr when a ready worker exits", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

@@ -116,6 +116,7 @@ export interface AcquireTabOptions {
 	cmuxSurface?: string;
 	ownerSessionId?: string;
 	ownerAgentLabel?: string;
+	deadlineStartMs?: number;
 }
 
 export interface AcquireTabResult {
@@ -142,6 +143,9 @@ const tabs = new Map<string, TabSession>();
 const acquireChains = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 const WORKER_INIT_TIMEOUT_MS = 15_000;
+const SETUP_BUDGET_CAP_MS = 10_000;
+const SETUP_BUDGET_FLOOR_MS = 2_000;
+const READY_BUDGET_FLOOR_MS = 500;
 // Names of tabs the supervisor force-killed (timeout past grace, failed recycle),
 // mapped to the kill reason. Lets the next `run` on that name explain WHY the tab
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
@@ -348,17 +352,16 @@ async function acquireTabImpl(
 	}
 	let info: ReadyInfo;
 	try {
-		info = await initializeTabWorker(
-			worker,
-			initPayload,
-			Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS),
-		);
+		const workerInitTimeoutMs =
+			opts.deadlineStartMs === undefined
+				? Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS)
+				: opts.timeoutMs;
+		info = await initializeTabWorker(worker, initPayload, workerInitTimeoutMs, opts.deadlineStartMs);
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 		throw error;
 	}
-
 	// If the caller aborted while we were spawning/initializing the worker, tear
 	// the freshly-built worker down before publishing the tab so the browser
 	// refCount (which `holdBrowser` below would take) never grows for a tab
@@ -1112,19 +1115,32 @@ async function initializeTabWorker(
 	worker: WorkerHandle,
 	payload: WorkerInitPayload,
 	timeoutMs: number,
+	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
-	const { promise, resolve, reject } = Promise.withResolvers<ReadyInfo>();
+	const remainingMs = timeoutMs - Math.round(performance.now() - deadlineStart);
+	const setupBudgetMs = Math.max(SETUP_BUDGET_FLOOR_MS, Math.min(SETUP_BUDGET_CAP_MS, Math.floor(remainingMs / 3)));
+	const setup = Promise.withResolvers<void>();
+	const ready = Promise.withResolvers<ReadyInfo>();
+	let setupDone = false;
+	const failStartup = (error: Error): void => {
+		(setupDone ? ready : setup).reject(error);
+	};
 	const unlisten = worker.onMessage(msg => {
-		if (msg.type === "ready") resolve(msg.info);
-		else if (msg.type === "init-failed") reject(errorFromPayload(msg.error));
+		if (msg.type === "setup") {
+			setupDone = true;
+			setup.resolve();
+		} else if (msg.type === "ready") ready.resolve(msg.info);
+		else if (msg.type === "init-failed") failStartup(errorFromPayload(msg.error));
 		else if (msg.type === "log") logWorkerMessage(msg);
 	});
 	const unlistenError = worker.onError(error => {
-		reject(new ToolError(`Tab worker failed during startup: ${error.message}`));
+		failStartup(new ToolError(`Tab worker failed during startup: ${error.message}`));
 	});
 	try {
 		worker.send({ type: "init", payload });
-		return await raceWithTimeout(promise, timeoutMs, "Timed out initializing browser tab worker");
+		await raceWithTimeout(setup.promise, setupBudgetMs, "Timed out waiting for tab worker setup");
+		const readyBudgetMs = Math.max(READY_BUDGET_FLOOR_MS, timeoutMs - Math.round(performance.now() - deadlineStart));
+		return await raceWithTimeout(ready.promise, readyBudgetMs, "Timed out initializing browser tab worker");
 	} finally {
 		unlisten();
 		unlistenError();
@@ -1135,8 +1151,9 @@ export function initializeTabWorkerForTest(
 	worker: WorkerHandle,
 	payload: WorkerInitPayload,
 	timeoutMs: number,
+	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
-	return initializeTabWorker(worker, payload, timeoutMs);
+	return initializeTabWorker(worker, payload, timeoutMs, deadlineStart);
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {

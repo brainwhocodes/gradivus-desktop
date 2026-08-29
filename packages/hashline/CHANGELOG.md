@@ -5,6 +5,12 @@
 ### Fixed
 
 - Fixed prepared hashline commits to revalidate source and move-destination identities while holding the process-local mutation lease, returning a no-write conflict instead of recording or writing stale bytes.
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Improved line-ending normalization performance by avoiding full scan-and-copy operations on files without carriage returns, eliminating stalls on large LF-only files.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
