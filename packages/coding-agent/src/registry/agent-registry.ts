@@ -17,9 +17,15 @@ export const MAIN_AGENT_ID = "Main";
 
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
 const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
+/** Sidecar marker retained beside a child transcript after Agent Hub dismissal. */
+const AGENT_DISMISSED_SUFFIX = ".dismissed";
 
 export function getAgentTombstonePath(sessionFile: string): string {
 	return `${sessionFile}${AGENT_TOMBSTONE_SUFFIX}`;
+}
+
+export function getAgentDismissedPath(sessionFile: string): string {
+	return `${sessionFile}${AGENT_DISMISSED_SUFFIX}`;
 }
 
 /**

@@ -121,6 +121,14 @@ describe("AgentSession queued steer delivery", () => {
 		};
 		return promise;
 	}
+	function queueText(message: unknown): string {
+		if (typeof message !== "object" || message === null || !("content" in message)) return "";
+		const content: unknown = message.content;
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		const text = content.find(part => typeof part === "object" && part !== null && "type" in part && part.type === "text");
+		return text && typeof text === "object" && "text" in text && typeof text.text === "string" ? text.text : "";
+	}
 
 	it("delivers a collab steer that lands at the run's yield boundary", async () => {
 		const { session, sessionManager, mock } = await createSession([
@@ -305,4 +313,39 @@ describe("AgentSession queued steer delivery", () => {
 
 		expect(session.agent.peekSteeringQueue()).toEqual([]);
 	});
+	it("promotes one matching follow-up into steering without duplicating it", async () => {
+		const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+		let promoted = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (promoted) return;
+			promoted = true;
+			session.agent.followUp({
+				role: "custom",
+				customType: "ultrathink-notice",
+				content: "Thinking enabled",
+				display: false,
+				attribution: "user",
+				timestamp: Date.now(),
+			});
+			session.agent.followUp({
+				role: "user",
+				content: [{ type: "text", text: "promote this" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			});
+			expect(session.steerQueuedMessage("promote this")).toBe(true);
+			expect(session.steerQueuedMessage("missing")).toBe(false);
+			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+			expect(session.agent.peekSteeringQueue().map(message => message.role === "custom" ? message.customType : message.role)).toEqual([
+				"ultrathink-notice",
+				"user",
+			]);
+		});
+
+		await session.prompt("hello");
+		await session.waitForIdle();
+		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
+		expect(session.agent.state.messages.filter(message => queueText(message) === "promote this")).toHaveLength(1);
+	});
+
 });

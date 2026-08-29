@@ -635,6 +635,13 @@ export interface BootstrapSnapshot {
 	warning?: string;
 }
 
+export interface EditMessageResult {
+	cancelled: boolean;
+	snapshot: SessionSnapshot;
+	requestId?: string;
+	error?: string;
+}
+
 export interface GradivusEvent {
 	sessionId: string;
 	type:
@@ -716,6 +723,7 @@ export interface GradivusApi {
 	getAgentHubMessages(id: string, agentId: string, fromByte?: number): Promise<AgentHubMessagePage>;
 	agentHubMessage(id: string, agentId: string, message: string): Promise<void>;
 	agentHubKill(id: string, agentId: string): Promise<void>;
+	agentHubClear(id: string, agentId: string): Promise<void>;
 	agentHubRevive(id: string, agentId: string): Promise<void>;
 	loadTimelineItem(id: string, itemId: string): Promise<TimelineItem>;
 	getAvailableCommands(id: string): Promise<SlashCommand[]>;
@@ -734,9 +742,11 @@ export interface GradivusApi {
 	stagePromptText(id: string, text: string): Promise<PromptAttachmentView>;
 	releasePromptAttachments(id: string, attachmentIds: string[]): Promise<void>;
 	prompt(id: string, composition: PromptComposition): Promise<string>;
-	steer(id: string, composition: PromptComposition): Promise<void>;
-	queueFollowUp(id: string, composition: PromptComposition): Promise<void>;
+	editMessage(sessionId: string, timelineItemId: string, text: string): Promise<EditMessageResult>;
 	abort(id: string): Promise<void>;
+	steer(id: string, composition: PromptComposition): Promise<void>;
+	steerQueued(id: string, composition: PromptComposition): Promise<void>;
+	queueFollowUp(id: string, composition: PromptComposition): Promise<void>;
 	setModel(id: string, provider: string, modelId: string): Promise<void>;
 	setThinking(id: string, level: ThinkingLevel): Promise<void>;
 	setFastMode(id: string, enabled: boolean): Promise<void>;

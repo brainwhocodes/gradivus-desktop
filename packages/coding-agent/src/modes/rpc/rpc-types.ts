@@ -31,6 +31,7 @@ export type RpcCommand =
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "steer_queued"; message: string }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
@@ -59,6 +60,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_agent_hub_messages"; agentId: string; fromByte?: number }
 	| { id?: string; type: "agent_hub_message"; agentId: string; message: string }
 	| { id?: string; type: "agent_hub_kill"; agentId: string }
+	| { id?: string; type: "agent_hub_clear"; agentId: string }
 	| { id?: string; type: "agent_hub_revive"; agentId: string }
 	| { id?: string; type: "get_oauth_accounts" }
 	| { id?: string; type: "set_oauth_account_lock"; providerId: string; credentialId?: number }
@@ -326,9 +328,9 @@ export interface RpcOAuthAccounts {
 
 // Success responses with data
 export type RpcResponse =
-	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
+	| { id?: string; type: "response"; command: "steer_queued"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
@@ -407,6 +409,13 @@ export type RpcResponse =
 			id?: string;
 			type: "response";
 			command: "agent_hub_revive";
+			success: true;
+			data: RpcAgentHubActionResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "agent_hub_clear";
 			success: true;
 			data: RpcAgentHubActionResult;
 	  }

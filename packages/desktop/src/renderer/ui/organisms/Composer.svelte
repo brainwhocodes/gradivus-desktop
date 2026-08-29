@@ -321,13 +321,13 @@
         <button
           type="button"
           class="action-button send-turn-btn"
-          title="Steer current turn (Enter)"
-          aria-label="Steer current turn"
+          title="Queue for the next turn"
+          aria-label="Queue for the next turn"
           disabled={sendDisabled}
           onclick={onSend}
         >
-          <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} /></span>
-          <span class="send-label">Steer</span>
+          <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} aria-hidden="true" /></span>
+          <span class="send-label">Queue</span>
         </button>
       {:else}
         <button

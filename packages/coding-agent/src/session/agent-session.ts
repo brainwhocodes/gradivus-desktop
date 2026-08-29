@@ -6456,6 +6456,23 @@ export class AgentSession {
 		};
 	}
 
+	/** Move a matching user follow-up into the steering queue without submitting it twice. */
+	steerQueuedMessage(text: string): boolean {
+		const followUp = this.agent.peekFollowUpQueue();
+		const normalizedText = text.trim();
+		const userIndex = followUp.findIndex(
+			message => isUserQueuedMessage(message) && queueChipText(message).trim() === normalizedText,
+		);
+		if (userIndex < 0) return false;
+		let start = userIndex;
+		while (start > 0 && isHiddenUserCompanion(followUp[start - 1]!)) start--;
+		const moved = followUp.slice(start, userIndex + 1);
+		const remaining = followUp.slice(0, start).concat(followUp.slice(userIndex + 1));
+		this.agent.replaceQueues([...this.agent.peekSteeringQueue(), ...moved], remaining);
+		this.#reconcileQueuedMessageDrain();
+		return true;
+	}
+
 	/**
 	 * Pop the last queued message (steering first, then follow-up).
 	 * Used by dequeue keybinding to restore messages to editor one at a time.

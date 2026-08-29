@@ -4,7 +4,9 @@
 		copyMarkdownText,
 		renderMarkdownDocument,
 		type MarkdownCopyText,
+		type MarkdownRenderResult,
 	} from "../../markdown";
+	import { onDestroy } from "svelte";
 
 	interface Props {
 		value: string;
@@ -23,12 +25,40 @@
 	}: Props = $props();
 	let responseCopying = $state(false);
 	let responseStatus = $state("");
-	const rendered = $derived(
-		renderMarkdownDocument(value, {
-			syntaxHighlight: !streaming,
-			codeCopyActions: !streaming && onCopyText !== undefined,
-		}),
-	);
+	let rendered = $state<MarkdownRenderResult>({ html: "", codeBlocks: [] });
+	let pendingRender: NodeJS.Timeout | undefined;
+
+	function cancelPendingRender(): void {
+		clearTimeout(pendingRender);
+		pendingRender = undefined;
+	}
+
+	function renderCurrent(valueToRender: string, isStreaming: boolean, copyText: MarkdownCopyText | undefined): void {
+		rendered = renderMarkdownDocument(valueToRender, {
+			syntaxHighlight: !isStreaming,
+			codeCopyActions: !isStreaming && copyText !== undefined,
+		});
+	}
+
+	$effect(() => {
+		const valueToRender = value;
+		const isStreaming = streaming;
+		const copyText = onCopyText;
+		cancelPendingRender();
+
+		if (!isStreaming) {
+			renderCurrent(valueToRender, isStreaming, copyText);
+			return;
+		}
+
+		pendingRender = setTimeout(() => {
+			pendingRender = undefined;
+			if (value !== valueToRender || !streaming) return;
+			renderCurrent(valueToRender, true, copyText);
+		}, 16);
+	});
+
+	onDestroy(cancelPendingRender);
 
 	async function copyResponse(): Promise<void> {
 		if (!onCopyText || streaming || responseCopying) return;

@@ -902,9 +902,9 @@ export class RpcClient {
 
 	/**
 	 * Branch from a specific message.
-	 * @returns Object with `text` (the message text) and `cancelled` (if extension cancelled)
+	 * @returns Object with the selected message `text`, its historical `images`, and whether an extension `cancelled`
 	 */
-	async branch(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+	async branch(entryId: string): Promise<{ text: string; images: ImageContent[]; cancelled: boolean }> {
 		const response = await this.#send({ type: "branch", entryId });
 		return this.#getData(response);
 	}

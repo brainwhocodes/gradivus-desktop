@@ -1,6 +1,6 @@
 <script lang="ts">
+  import Refresh from "@solar-icons/svelte/linear/refresh";
   import type { AgentHubAgent } from "../../../shared/contracts";
-
   export let agents: AgentHubAgent[] = [];
   export let selectedAgentId = "";
   export let rosterOnly = false;
@@ -13,11 +13,14 @@
   export let draft = "";
   export let actionBusy = "";
   let detailsOpen = false;
+  let detailsAgentId = "";
+  let refreshPending = false;
   export let onSelect: (agentId: string) => void;
-  export let onLoadMessages: () => void;
-  export let onSend: (message: string) => void;
+  export let onLoadMessages: () => void | Promise<void>;
   export let onKill: (agentId: string) => void;
   export let onRevive: (agentId: string) => void;
+  export let onSend: (message: string) => void;
+  export let onClear: (agentId: string) => void;
 
   interface MessageSummary {
     key: string;
@@ -41,6 +44,11 @@
   $: busy = actionBusy.length > 0;
   $: selectedIsReadOnly = selectedAgent ? isReadOnly(selectedAgent) : true;
   $: canSend = Boolean(selectedAgent && !selectedIsReadOnly && selectedAgent.status !== "aborted" && draft.trim());
+  $: if (detailsAgentId !== selectedAgentId) {
+    detailsAgentId = selectedAgentId;
+    detailsOpen = false;
+  }
+  $: refreshBusy = messagesLoading || refreshPending;
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -166,9 +174,24 @@
       onKill(agent.id);
     }
   }
+  async function handleRefresh(): Promise<void> {
+    if (refreshBusy || !selectedAgent?.transcriptAvailable) return;
+    refreshPending = true;
+    try {
+      await onLoadMessages();
+    } finally {
+      refreshPending = false;
+    }
+  }
+  function handleClear(agent: AgentHubAgent): void {
+    if (busy || agent.kind === "advisor" || agent.readOnly || (agent.status !== "parked" && agent.status !== "aborted")) return;
+    if (window.confirm(`Clear ${agent.displayName} from Agent Hub? Its transcript remains available as history.`)) {
+      onClear(agent.id);
+    }
+  }
 </script>
 
-<section class="agent-hub-panel" class:roster-only={rosterOnly} class:detail-only={detailOnly} aria-labelledby={titleId} aria-busy={messagesLoading || busy}>
+<section class="agent-hub-panel" class:roster-only={rosterOnly} class:detail-only={detailOnly} aria-labelledby={titleId} aria-busy={refreshBusy || busy}>
   <header class="panel-header">
     <div>
       <h2 id={titleId}>Agent Hub</h2>
@@ -238,12 +261,20 @@
             </button>
             <button
               type="button"
-              class="text-button"
-              disabled={messagesLoading || !selectedAgent.transcriptAvailable}
-              on:click={onLoadMessages}
+              class="text-button transcript-refresh"
+              aria-label={refreshBusy ? "Refreshing transcript" : "Refresh transcript"}
+              title={refreshBusy ? "Refreshing transcript" : "Refresh transcript"}
+              aria-busy={refreshBusy}
+              disabled={refreshBusy || !selectedAgent.transcriptAvailable}
+              on:click={() => void handleRefresh()}
             >
-              {messagesLoading ? "Refreshing…" : "Refresh transcript"}
+              <Refresh size={15} class={refreshBusy ? "spinning" : ""} aria-hidden="true" />
             </button>
+            {#if (selectedAgent.status === "parked" || selectedAgent.status === "aborted") && selectedAgent.kind !== "advisor" && !selectedAgent.readOnly}
+              <button type="button" class="panel-button danger" disabled={busy} on:click={() => handleClear(selectedAgent)}>
+                Clear from Hub
+              </button>
+            {/if}
           </div>
         </div>
 
@@ -911,6 +942,27 @@
     text-underline-offset: 2px;
   }
 
+  .transcript-refresh {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+  }
+
+  .transcript-refresh:hover:not(:disabled) {
+    text-decoration: none;
+  }
+
+  :global(.transcript-refresh .spinning) {
+    animation: transcript-refresh-spin 850ms linear infinite;
+  }
+
+  @keyframes transcript-refresh-spin {
+    to { transform: rotate(360deg); }
+  }
+
   .selection-empty {
     flex: 1 1 auto;
   }
@@ -942,6 +994,9 @@
     }
 
     .transcript-loading span {
+      animation: none;
+    }
+    :global(.transcript-refresh .spinning) {
       animation: none;
     }
   }

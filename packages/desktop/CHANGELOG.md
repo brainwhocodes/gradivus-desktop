@@ -32,6 +32,7 @@
 - Added conversation deletion from the session rail with confirmation, active-chat fallback selection, and explicit disclosure that OMP transcript files remain on disk.
 - Added a persistent retry-exhausted workspace error state with a Retry action (`GradivusApi.reconnectRuntime`).
 - Added bounded explicit-language syntax highlighting plus raw Markdown and fenced-code copy actions to completed assistant responses.
+- Added inline editing for sent user messages after generation stops, branching conversation history at the selected message and resending with preserved image attachments.
 
 ### Changed
 
@@ -61,6 +62,7 @@
 ### Fixed
 
 - Fixed the Thinking selector in Runtime settings rendering as an unbounded text control instead of matching the aligned Provider and Model dropdowns.
+- Fixed edit activity cards exposing raw `*** Begin Patch` and `PUT` payload grammar; they now show file targets while running and structured diffs after completion.
 - Fixed Page Agent DOM targeting sending serialized element content; DOM mode now sends only the selector, page URL, and minimal routing metadata so the agent traverses the live page itself.
 - Fixed canonical user transcript reconciliation exposing expanded attachment envelopes and temporary filesystem paths instead of the authored attachment references.
 - Fixed browser element targeting requiring a preselected chat or workspace agent and losing its active latch to an idle workspace snapshot during setup; the target tool now provisions a hidden, session-authorized Page Agent automatically.
@@ -106,6 +108,15 @@
 - Fixed OMP Chat composer, modal, responsive rail, terminal, eyebrow, and toast styling regressions to use the semantic token contract and remain visible at compact sizes.
 
 - Fixed modal backdrop dismissal to use a semantic labeled control instead of a static element click handler.
+
+- Fixed stopped turns leaving the original prompt in chat after late canonical timeline delivery; canceled prompts now restore the composer without duplicating the timeline.
+- Fixed Agent Hub transcript refresh controls crowding narrow panels by replacing text labels with accessible refresh/loading icons.
+- Fixed turn-stop error alerts wrapping poorly by grouping message content and keeping actions readable at compact widths.
+- Fixed Agent Hub roster cleanup by allowing parked and aborted task agents to be cleared while retaining their transcripts as history.
+- Fixed tool and streaming updates lagging the renderer by batching high-frequency events and coalescing superseded timeline frames.
+- Changed active-turn composer submissions to queue follow-ups automatically, with per-message transcript rows and direct Steer actions that promote the selected follow-up without duplicate delivery.
+- Fixed sent queued messages remaining only in the composer; successful submissions now clear the input while retaining the visible queued transcript entry and attachment context.
+- Fixed changed-file summaries rendering against the transcript edge instead of the centered chat content measure.
 
 ### Removed
 

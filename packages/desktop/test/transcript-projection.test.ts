@@ -79,7 +79,7 @@ describe("TranscriptStore", () => {
 		const completeDetail = complete?.detail;
 		expect(typeof completeDetail === "string" && completeDetail.includes(image.data)).toBe(false);
 	});
-	it("projects workspace file changes from write paths and multi-file edit patches", () => {
+	it("keeps raw hashline edit grammar out of activity previews and projects structured diffs", () => {
 		const store = new TranscriptStore();
 		const write = store.apply({
 			type: "tool_execution_start",
@@ -93,7 +93,36 @@ describe("TranscriptStore", () => {
 			toolName: "edit",
 			args: {
 				input: "*** Begin Patch\n[src/one.ts#A1B2]\nPUT 1.=1:\n+one\n[src/two.ts#C3D4]\nPUT 1.=1:\n+two\n[src/one.ts#A1B2]\nPUT 2.=2:\n+again\n*** End Patch",
+				patch: "*** Begin Patch\n[raw-patch.ts#A1B2]\nPUT 1.=1:\n+raw\n*** End Patch",
+				diff: "--- a/raw-arg.ts\n+++ b/raw-arg.ts\n@@ -1 +1 @@\n-old\n+raw",
 			},
+		});
+		const firstDiff = "--- a/src/one.ts\n+++ b/src/one.ts\n@@ -1 +1 @@\n-old\n+one";
+		const secondDiff = "--- a/src/two.ts\n+++ b/src/two.ts\n@@ -1 +1 @@\n-old\n+two";
+		const aggregateProgress = store.apply({
+			type: "tool_execution_update",
+			toolCallId: "edit-1",
+			partialResult: {
+				details: {
+					diff: firstDiff,
+					perFileResults: [{ path: "src/two.ts", diff: secondDiff }],
+				},
+			},
+		});
+		const completedEdit = store.apply({
+			type: "tool_execution_end",
+			toolCallId: "edit-1",
+			result: {
+				details: {
+					diff: "",
+					perFileResults: [
+						{ path: "src/one.ts", diff: firstDiff },
+						{ path: "src/two.ts", diff: secondDiff },
+						{ path: "src/one.ts", diff: firstDiff },
+					],
+				},
+			},
+			isError: false,
 		});
 		const virtualWrite = store.apply({
 			type: "tool_execution_start",
@@ -107,6 +136,25 @@ describe("TranscriptStore", () => {
 			{ path: "src/one.ts", operation: "edit" },
 			{ path: "src/two.ts", operation: "edit" },
 		]);
+		expect(edit?.toolActivity).toEqual({
+			operation: "edit",
+			paths: ["src/one.ts", "src/two.ts"],
+			diff: [],
+		});
+		expect(JSON.stringify(edit?.toolActivity)).not.toContain("*** Begin Patch");
+		expect(JSON.stringify(edit?.toolActivity)).not.toContain("PUT");
+		expect(aggregateProgress?.toolActivity).toEqual({
+			operation: "edit",
+			paths: ["src/one.ts", "src/two.ts"],
+			diff: firstDiff.split("\n"),
+		});
+		expect(completedEdit?.toolActivity).toEqual({
+			operation: "edit",
+			paths: ["src/one.ts", "src/two.ts"],
+			diff: `${firstDiff}\n${secondDiff}`.split("\n"),
+		});
+		expect(JSON.stringify(completedEdit?.toolActivity)).not.toContain("*** Begin Patch");
+		expect(JSON.stringify(completedEdit?.toolActivity)).not.toContain("PUT");
 		expect(virtualWrite?.files).toBeUndefined();
 	});
 
@@ -247,6 +295,23 @@ describe("TranscriptStore", () => {
 		store.apply({ type: "message_update", message: { id: "m-1", role: "assistant", content: "two" } });
 		expect(store.snapshot.filter(item => item.kind === "assistant")).toHaveLength(1);
 		expect(store.snapshot.find(item => item.kind === "assistant")?.text).toBe("two");
+	});
+
+	it("resolves duplicate user messages to chronological branch entries", () => {
+		const store = new TranscriptStore();
+		store.load([
+			{ id: "user-a", role: "user", content: "repeat" },
+			{ id: "assistant-a", role: "assistant", content: [{ type: "text", text: "first" }] },
+			{ id: "user-b", role: "user", content: "repeat" },
+		]);
+		const selected = store.snapshot.findLast(item => item.role === "user");
+		expect(selected).toBeDefined();
+		expect(
+			store.resolveBranchEntry(selected!.id, [
+				{ entryId: "entry-a", text: "repeat" },
+				{ entryId: "entry-b", text: "repeat" },
+			]),
+		).toEqual({ entryId: "entry-b", text: "repeat" });
 	});
 });
 

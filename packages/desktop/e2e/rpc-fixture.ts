@@ -14,7 +14,7 @@ const FIXTURE_PNG = Buffer.from(
 );
 
 type AttachmentKind = "file" | "prompt" | "image";
-type AttachmentRoute = "prompt" | "steer" | "follow_up";
+type AttachmentRoute = "prompt" | "steer" | "steer_queued" | "follow_up";
 
 type ParsedEnvelope = {
   kind: AttachmentKind;
@@ -1159,6 +1159,14 @@ function handleFrame(frame) {
     sendAgentHubUpdate();
     return;
   }
+  if (command.type === "agent_hub_clear") {
+    const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
+    if (!agent || agent.kind === "advisor" || agent.readOnly || (agent.status !== "parked" && agent.status !== "aborted")) return response(undefined, false);
+    fixtureAgents = fixtureAgents.filter(candidate => candidate.id !== agent.id);
+    response({ agentId: agent.id });
+    sendAgentHubUpdate();
+    return;
+  }
   if (command.type === "agent_hub_revive") {
     const agent = fixtureAgents.find(candidate => candidate.id === command.agentId);
     if (!agent || agent.kind === "advisor" || agent.readOnly || agent.status !== "parked") return response(undefined, false);
@@ -1193,6 +1201,11 @@ function handleFrame(frame) {
     }
     response({ accepted: true });
     if (heldPrompt) finishHeld(command);
+    return;
+  }
+  if (command.type === "steer_queued") {
+    captureCommand(command, "steer_queued");
+    response({ accepted: true });
     return;
   }
   if (command.type === "follow_up") {

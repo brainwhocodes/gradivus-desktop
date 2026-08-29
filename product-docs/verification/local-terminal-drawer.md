@@ -1,6 +1,6 @@
 # Verify the Local terminal drawer
 
-**Documentation status:** drafted. The passing items below come from fixture-backed Playwright journeys in the actual Electron application, executed on Windows x64 where the drawer uses the `wterm-dom` engine. Source-only and unit-only claims remain blocked. Evidence date: 2026-08-28. Working tree anchored at `ac5f533bb245ef7f911dfc165c7c39356a2ac639` with the uncommitted cross-platform terminal-renderer cutover applied; relevant desktop sources and tests may be modified or untracked. The earlier macOS arm64 evidence from 2026-08-25 remains recorded in the feature document.
+**Documentation status:** drafted. The passing items below come from fixture-backed Playwright journeys in the actual Electron application, executed on Windows x64. The Local terminal drawer uses the `ghostty-web` WebAssembly renderer on every supported platform; source-only and unit-only claims remain blocked. Evidence date: 2026-08-28. Working tree anchored at `ac5f533bb245ef7f911dfc165c7c39356a2ac639` with the uncommitted terminal-renderer cutover applied; relevant desktop sources and tests may be modified or untracked. The earlier macOS arm64 evidence from 2026-08-25 remains recorded in the feature document.
 
 ## LT-01 — Show reveals the drawer and updates the control state
 
@@ -18,7 +18,7 @@
 - **Steps:** Focus the **Shell terminal** region, type a `printf` command, press Enter, and inspect the rendered byte offset.
 - **Expected result:** The shell remains running and its rendered output offset advances after the command.
 - **Priority:** P1
-- **Device or environment:** Windows x64; mounted Electron application with local fixture workspace runtime; `wterm-dom` engine.
+- **Device or environment:** Windows x64; mounted Electron application with local fixture workspace runtime; `ghostty-web` renderer.
 - **Evidence:** **Observed and Tested.** Executed `packages/desktop/e2e/desktop.spec.ts:2053-2060`, the terminal journey, in the 36/36-passing Electron run.
 - **Result:** pass
 
@@ -79,7 +79,7 @@
 - **Expected result:** Columns and rows update without restarting the PTY, losing focus permanently, duplicating output, or changing the conversation transcript.
 - **Priority:** P2
 - **Device or environment:** Any supported host; mounted Electron application at wide and narrow viewports.
-- **Evidence:** **Code-established, not executed.** `packages/desktop/src/renderer/ui/organisms/ChatTerminalDrawer.svelte:77-85` forwards measured resizes; `wterm-renderer.ts:75-84` and `ghostty-web-renderer.ts:43-51` clamp and deduplicate them. The executed journey changed viewport size before opening but did not resize while output was active.
+- **Evidence:** **Code-established, not executed.** `packages/desktop/src/renderer/ui/organisms/ChatTerminalDrawer.svelte:77-85` forwards measured resizes; `ghostty-web-renderer.ts:43-51` clamps and deduplicates them. The executed journey changed viewport size before opening but did not resize while output was active.
 - **Result:** blocked
 
 ## LT-09 — Renderer reload reattaches without losing or duplicating shell output
@@ -152,27 +152,27 @@
 - **Evidence:** **Verification blocker filed in triage.** Source assigns chat-terminal cwd from the session in `packages/desktop/src/main/workspace-host.ts:1363-1474` but consumes Application `workspace.defaultPath` in a different terminal path. The user-facing mismatch is tracked in [`CHAT-008`](../bug-triage.md#chat-008--default-root-directory-does-not-set-the-new-workspace-default).
 - **Result:** blocked
 
-## LT-16 — The drawer reports the platform-selected terminal renderer
+## LT-16 — The drawer reports the Ghostty Web terminal renderer
 
 - **Setup:** Launch the packaged Electron application on a known host platform and open the terminal drawer.
 - **Steps:** Inspect `data-terminal-renderer` on the drawer shell before and after a shell restart.
-- **Expected result:** The attribute is `wterm-dom` on Windows and `ghostty-web` on macOS/Linux, and it does not change across restarts.
+- **Expected result:** The attribute is `ghostty-web` on every supported platform and does not change across restarts.
 - **Priority:** P1
-- **Device or environment:** Windows x64 executed; macOS/Linux asserted by the same spec but not run in this pass.
-- **Evidence:** **Observed and Tested.** `packages/desktop/e2e/desktop.spec.ts:1986-1988,2053-2054` asserts the attribute against `process.platform`; passed as `wterm-dom` in the 36/36-passing Electron run. `packages/desktop/test/terminal-renderer-selection.test.ts` passed 4/4 on Windows x64 for the routing contract.
+- **Device or environment:** Windows x64 executed; other supported hosts were not run in this pass.
+- **Evidence:** **Observed and Tested.** `packages/desktop/e2e/desktop.spec.ts:1986-1988,2053-2054` asserts the attribute as `ghostty-web` for the host platform; passed on Windows x64 in the 36/36-passing Electron run. `packages/desktop/test/terminal-renderer-selection.test.ts` passed all platform cases on Windows x64 for the platform-neutral routing contract.
 - **Result:** pass
 
 ## LT-17 — A failed WebAssembly fetch is visible and recoverable
 
 - **Setup:** Open the terminal drawer with the first `.wasm` request forced to fail with a synthetic 404.
 - **Steps:** Observe the drawer, restore the original fetch, activate **Restart shell**, and capture `.wasm` responses, page errors, and console errors during the retry.
-- **Expected result:** The drawer shows an alert and **Restart shell** without falling back to the other engine; the restart produces a real HTTP 200 `.wasm` response and no page or console errors.
+- **Expected result:** The drawer shows an alert and **Restart shell** without claiming that a shell is running; the restart produces a real HTTP 200 `.wasm` response and no page or console errors.
 - **Priority:** P1
 - **Device or environment:** Windows x64; packaged Electron application served through its custom protocol, exercising the emitted asset path.
 - **Evidence:** **Observed and Tested.** `packages/desktop/e2e/desktop.spec.ts:1966-2026` runs the synthetic-404-to-recovery journey, including `wasmResponses` containing 200 and empty `pageErrors`/`consoleErrors`; passed in the 36/36-passing Electron run.
 - **Result:** pass
 
-## LT-18 — The macOS/Linux renderer journey passes on its own host
+## LT-18 — The Ghostty Web renderer journey passes on its own host
 
 - **Setup:** On a macOS or Linux host, run the same terminal journey.
 - **Steps:** Execute `packages/desktop/e2e/desktop.spec.ts` **“opens the current chat terminal drawer without changing chat state.”**

@@ -28,6 +28,7 @@ import {
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
+	getAgentDismissedPath,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 	type RegistryEvent,
@@ -40,6 +41,14 @@ const AGENT_RELEASE_GRACE_MS = 5000;
 async function persistAgentTombstone(sessionFile: string): Promise<void> {
 	try {
 		await fs.writeFile(getAgentTombstonePath(sessionFile), "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+}
+
+async function persistAgentDismissal(sessionFile: string): Promise<void> {
+	try {
+		await fs.writeFile(getAgentDismissedPath(sessionFile), "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}
@@ -409,12 +418,17 @@ export class AgentLifecycleManager {
 	 * By default the ref is unregistered (teardown / one-shot removal). Pass
 	 * `tombstone: true` for an explicit kill: the ref is kept registered as a
 	 * terminal `aborted` row (session detached) instead of being removed, so a
-	 * later persisted-subagent scan (e.g. Agent Hub reopen) skips it via its
-	 * `if (!registry.get(id))` guard rather than re-adopting the surviving
-	 * on-disk transcript as a fresh `parked` row. Mirrors
-	 * `finalizeSubagentLifecycle`'s genuine-kill path.
+	 * later persisted-subagent scan skips it rather than re-adopting the
+	 * surviving on-disk transcript as a fresh `parked` row. Pass `remove: true`
+	 * together with `tombstone` to dismiss the row while retaining its
+	 * transcript. Pass `dismiss: true` to persist a dismissal marker that
+	 * prevents a later scan from rehydrating the row.
 	 */
-	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	async release(
+		id: string,
+		expected?: AgentRefExpectation,
+		options?: { tombstone?: boolean; remove?: boolean; dismiss?: boolean },
+	): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
@@ -442,6 +456,7 @@ export class AgentLifecycleManager {
 			if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
 			this.#registry.setStatus(id, "aborted", ref);
 		}
+		if (options?.dismiss && ref.sessionFile) await persistAgentDismissal(ref.sessionFile);
 		const live = this.#registry.get(id) === ref ? ref.session : null;
 		if (options?.tombstone) this.#registry.detachSession(id, ref);
 		if (live) {
@@ -451,7 +466,7 @@ export class AgentLifecycleManager {
 				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
 			}
 		}
-		if (!options?.tombstone) this.#registry.unregister(id, ref);
+		if (!options?.tombstone || options.remove) this.#registry.unregister(id, ref);
 		return true;
 	}
 

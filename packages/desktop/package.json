@@ -54,9 +54,7 @@
     "vite": "catalog:",
     "vitest": "catalog:",
     "bulma": "catalog:",
-    "odiff-bin": "4.5.0",
-    "@wterm/dom": "catalog:",
-    "@wterm/ghostty": "catalog:"
+    "odiff-bin": "4.5.0"
   },
   "config": {
     "forge": "forge.config.ts"

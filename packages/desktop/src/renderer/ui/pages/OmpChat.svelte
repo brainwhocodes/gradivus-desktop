@@ -194,10 +194,32 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     reconciliation: "awaiting-ack" | "running" | "completed" | "rolled-back";
     resultReceived?: boolean;
   }
+  interface MessageEditState {
+    sessionId: string;
+    timelineItemId: string;
+    originalText: string;
+    value: string;
+    saving: boolean;
+  }
+  interface QueuedPrompt {
+    sessionId: string;
+    optimisticId: string;
+    text: string;
+    displayText: string;
+    batch: AttachmentBatch;
+    status: "queued" | "steering" | "steered";
+    canonicalUserId?: string;
+    canonicalItem?: TimelineItem;
+  }
+  let queuedPrompts = new Map<string, QueuedPrompt>();
   let pendingTurns = new Map<string, PendingTurn>();
+  let messageEdit: MessageEditState | undefined;
+  let messageEditTextarea: HTMLTextAreaElement | undefined;
+  let messageEditComposing = false;
   let admittedAttachmentBatches = new Map<string, AttachmentBatch>();
   let earlyPromptResults = new Map<string, GradivusEvent>();
   let explicitStopSessions = new Set<string>();
+  let canceledPromptTextsBySession = new Map<string, string[]>();
   let turnStartTime: number | null = null;
   let elapsedSeconds = 0;
   let isScrolledUp = false;
@@ -596,6 +618,26 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   $: isTurnActive = Boolean((current && pendingTurns.has(current.record.id)) || current?.state === "running");
   $: isRunning = isTurnActive;
   $: canCompose = ensureCanCompose(current?.record.id, sessionSelectionToken, current, activeId, loading);
+  $: canEditMessages = Boolean(
+    current &&
+    canCompose &&
+    !isTurnActive &&
+    current.state === "ready" &&
+    current.queuedMessageCount === 0
+  );
+  $: messageEditSubmitDisabled = !messageEdit ||
+    messageEdit.saving ||
+    !messageEdit.value.trim() ||
+    messageEdit.value.trim() === messageEdit.originalText.trim();
+  $: if (messageEdit && (current?.record.id !== messageEdit.sessionId || activeId !== messageEdit.sessionId)) {
+    messageEdit = undefined;
+    messageEditTextarea = undefined;
+    messageEditComposing = false;
+  } else if (messageEdit && !messageEdit.saving && !canEditMessages) {
+    messageEdit = undefined;
+    messageEditTextarea = undefined;
+    messageEditComposing = false;
+  }
   $: timelineItems = projectTimeline(current?.record.kind ?? "work", current?.timeline ?? []);
   $: visibleTimeline = timelineItems;
   $: turnFileSummaries = projectTurnFileSummaries(visibleTimeline);
@@ -955,7 +997,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     loading = true;
     try {
       current = await window.gradivus.stop(id);
-      clearPendingTurn(id, false);
+      clearPendingTurn(id, true);
       updateSessionStatus(id, "idle");
       errorMessage = "";
     } catch (error) {
@@ -1246,6 +1288,221 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     await releaseAttachmentBatch(sessionId, batch);
   }
 
+  async function focusMessageEdit(timelineItemId: string): Promise<void> {
+    await tick();
+    if (messageEdit?.timelineItemId !== timelineItemId || !messageEditTextarea) return;
+    messageEditTextarea.focus({ preventScroll: true });
+    const caret = messageEditTextarea.value.length;
+    messageEditTextarea.setSelectionRange(caret, caret);
+  }
+
+  function focusMessageEditAction(timelineItemId: string): void {
+    void tick().then(() => {
+      const buttons = timelineContent?.querySelectorAll<HTMLButtonElement>(".message-edit-button");
+      const button = Array.from(buttons ?? []).find(candidate => candidate.dataset.timelineItemId === timelineItemId);
+      button?.focus({ preventScroll: true });
+    });
+  }
+
+  function startMessageEdit(item: TimelineItem): void {
+    if (!current || item.kind !== "user" || !canEditMessages) return;
+    messageEdit = {
+      sessionId: current.record.id,
+      timelineItemId: item.id,
+      originalText: item.text,
+      value: item.text,
+      saving: false,
+    };
+    messageEditComposing = false;
+    void focusMessageEdit(item.id);
+  }
+
+  function updateMessageEditValue(value: string): void {
+    if (!messageEdit || messageEdit.saving) return;
+    messageEdit = { ...messageEdit, value };
+  }
+
+  function cancelMessageEdit(): void {
+    if (!messageEdit || messageEdit.saving) return;
+    const timelineItemId = messageEdit.timelineItemId;
+    messageEdit = undefined;
+    messageEditTextarea = undefined;
+    messageEditComposing = false;
+    focusMessageEditAction(timelineItemId);
+  }
+
+  function removePendingTurnState(sessionId: string): void {
+    if (!pendingTurns.has(sessionId)) return;
+    const next = new Map(pendingTurns);
+    next.delete(sessionId);
+    pendingTurns = next;
+  }
+
+  function restoreEditedComposerText(sessionId: string, text: string): void {
+    if (current?.record.id === sessionId && activeId === sessionId) {
+      restoreDraftAfterFailure(text);
+      commandMenuDismissed = false;
+      return;
+    }
+    const savedDraft = draftBySession.get(sessionId) ?? "";
+    draftBySession.set(sessionId, savedDraft ? `${text}\n\n${savedDraft}` : text);
+  }
+
+  async function submitMessageEdit(): Promise<void> {
+    const editor = messageEdit;
+    if (!editor || messageEditSubmitDisabled || !current || current.record.id !== editor.sessionId || !canEditMessages) return;
+    const selectedIndex = current.timeline.findIndex(item => item.id === editor.timelineItemId);
+    if (selectedIndex < 0) {
+      showError("The message is no longer available to edit.");
+      messageEdit = undefined;
+      messageEditTextarea = undefined;
+      return;
+    }
+
+    const preEditSnapshot = current;
+    const editedText = editor.value.trim();
+    const sessionId = editor.sessionId;
+    const now = Date.now();
+    const optimisticUserId = `opt-user-${now}-${++optimisticMessageSequence}`;
+    const optimisticAssistantId = `opt-ast-${now}-${++optimisticMessageSequence}`;
+    const optimisticUser: TimelineItem = {
+      id: optimisticUserId,
+      kind: "user",
+      text: editedText,
+      role: "user",
+      createdAt: now,
+    };
+    const optimisticAssistant: TimelineItem = {
+      id: optimisticAssistantId,
+      kind: "thinking",
+      text: "Reasoning & preparing response...",
+      status: "running",
+      role: "assistant",
+      createdAt: now,
+    };
+    const timelineStart = preEditSnapshot.timelineStart ?? 0;
+    const timeline = [
+      ...preEditSnapshot.timeline.slice(0, selectedIndex),
+      optimisticUser,
+      optimisticAssistant,
+    ];
+    const timelineTotal = timelineStart + timeline.length;
+    const shouldFollowTimeline = followIntent(sessionId);
+
+    messageEdit = { ...editor, saving: true };
+    errorMessage = "";
+    promptFailure = "";
+    current = {
+      ...preEditSnapshot,
+      state: "running",
+      timeline,
+      timelineStart,
+      timelineTotal,
+    };
+    pendingTurns = new Map(pendingTurns).set(sessionId, {
+      draft: editor.value,
+      attachmentIds: [],
+      attachments: [],
+      optimisticUserId,
+      optimisticAssistantId,
+      startedAt: now,
+      reconciliation: "awaiting-ack",
+    });
+    updateSessionStatus(sessionId, "running");
+    setFollowIntent(sessionId, shouldFollowTimeline);
+    if (shouldFollowTimeline) void scrollTimelineToEnd(true, sessionId);
+
+    try {
+      const result = await window.gradivus.editMessage(sessionId, editor.timelineItemId, editedText);
+      if (result.cancelled) {
+        removePendingTurnState(sessionId);
+        earlyPromptResults.delete(sessionId);
+        updateSessionStatus(sessionId, "idle");
+        if (current?.record.id === sessionId && activeId === sessionId) {
+          current = preEditSnapshot;
+          if (messageEdit?.sessionId === sessionId) {
+            messageEdit = { ...editor, saving: false };
+            void focusMessageEdit(editor.timelineItemId);
+          }
+        }
+        return;
+      }
+
+      if (result.error || !result.requestId) {
+        const message = result.error ?? "OMP did not start the edited message.";
+        removePendingTurnState(sessionId);
+        earlyPromptResults.delete(sessionId);
+        if (current?.record.id === sessionId && activeId === sessionId) current = result.snapshot;
+        restoreEditedComposerText(sessionId, editor.value);
+        if (messageEdit?.sessionId === sessionId) {
+          messageEdit = undefined;
+          messageEditTextarea = undefined;
+          messageEditComposing = false;
+        }
+        promptFailure = message;
+        updateSessionStatus(
+          sessionId,
+          result.snapshot.state === "running" ? "running" : result.snapshot.state === "error" ? "error" : "idle",
+        );
+        showError(message);
+        return;
+      }
+
+      const pending = pendingTurns.get(sessionId);
+      if (!pending || pending.reconciliation === "rolled-back") return;
+      pendingTurns = new Map(pendingTurns).set(sessionId, {
+        ...pending,
+        requestId: result.requestId,
+        reconciliation: "running",
+      });
+      if (messageEdit?.sessionId === sessionId) {
+        messageEdit = undefined;
+        messageEditTextarea = undefined;
+        messageEditComposing = false;
+      }
+      const early = earlyPromptResults.get(sessionId);
+      if (early && (!early.requestId || early.requestId === result.requestId)) {
+        promptFailure = "";
+        earlyPromptResults.delete(sessionId);
+        await reconcilePromptResult(early);
+      }
+    } catch (error) {
+      removePendingTurnState(sessionId);
+      earlyPromptResults.delete(sessionId);
+      updateSessionStatus(sessionId, "idle");
+      if (current?.record.id === sessionId && activeId === sessionId) {
+        current = preEditSnapshot;
+        if (messageEdit?.sessionId === sessionId) {
+          messageEdit = { ...editor, saving: false };
+          void focusMessageEdit(editor.timelineItemId);
+        }
+      }
+      showError(error);
+    }
+  }
+
+  function handleMessageEditKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelMessageEdit();
+      return;
+    }
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.isComposing ||
+      messageEditComposing
+    ) return;
+    event.preventDefault();
+    if (!messageEditSubmitDisabled) void submitMessageEdit();
+  }
+
+  function handleMessageEditSubmit(event: SubmitEvent): void {
+    event.preventDefault();
+    if (!messageEditSubmitDisabled) void submitMessageEdit();
+  }
+
   async function sendPrimary(textInput?: string, startedAdmission?: ComposeAdmission): Promise<void> {
     const sessionId = startedAdmission?.sessionId ?? current?.record.id;
     const selectionToken = startedAdmission?.selectionToken ?? sessionSelectionToken;
@@ -1259,18 +1516,18 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       return;
     }
     const text = rawText.trim();
+    const activeTurn = isTurnActive;
+    if (activeTurn) {
+      await queueFollowUp();
+      return;
+    }
     const batch = takeAttachmentBatch();
     const composition = buildPromptComposition(text, batch.views);
     const shouldFollowTimeline = followIntent(sessionId);
-    const activeTurn = isTurnActive;
     draft = "";
     commandMenuDismissed = true;
     errorMessage = "";
     promptFailure = "";
-    if (activeTurn) {
-      await sendSteer(text, batch, rawText, admission);
-      return;
-    }
 
     const now = Date.now();
     const optUserId = `opt-user-${now}-${++optimisticMessageSequence}`;
@@ -1328,39 +1585,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
-  async function sendSteer(
-    text: string,
-    batch: AttachmentBatch,
-    originalDraft: string,
-    startedAdmission: ComposeAdmission,
-  ): Promise<void> {
-    const sessionId = startedAdmission.sessionId;
-    if (!ensureCanCompose(sessionId, startedAdmission.selectionToken)) {
-      if (current?.record.id === sessionId && sessionSelectionToken === startedAdmission.selectionToken) {
-        restoreDraftAfterFailure(originalDraft);
-        restoreAttachmentBatch(batch);
-      } else {
-        await releaseAttachmentBatch(sessionId, batch);
-      }
-      return;
-    }
-    const optimisticId = appendOptimisticUserMessage(sessionId, text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"));
-    try {
-      await window.gradivus.steer(sessionId, buildPromptComposition(text, batch.views));
-      retainAdmittedAttachmentBatch(sessionId, batch);
-      showNotice("Steering message sent", "success", "Steering");
-    } catch (error) {
-      removeOptimisticUserMessage(sessionId, optimisticId);
-      if (current?.record.id === sessionId && sessionSelectionToken === startedAdmission.selectionToken) {
-        restoreDraftAfterFailure(originalDraft);
-        restoreAttachmentBatch(batch);
-      } else {
-        await releaseAttachmentBatch(sessionId, batch);
-      }
-      commandMenuDismissed = false;
-      showError(error);
-    }
-  }
 
   async function queueFollowUp(): Promise<void> {
     const sessionId = current?.record.id;
@@ -1375,6 +1599,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const text = originalDraft.trim();
     const batch = takeAttachmentBatch();
     const optimisticId = appendOptimisticUserMessage(sessionId, text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"));
+    const queued: QueuedPrompt = {
+      sessionId,
+      optimisticId,
+      text,
+      displayText: text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"),
+      batch,
+      status: "queued",
+    };
+    queuedPrompts = new Map(queuedPrompts).set(optimisticId, queued);
     draft = "";
     try {
       await window.gradivus.queueFollowUp(sessionId, buildPromptComposition(text, batch.views));
@@ -1382,6 +1615,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       showNotice("Queued for the next turn", "info", "Queue");
       await refreshSessionMetrics(sessionId);
     } catch (error) {
+      queuedPrompts = withoutQueuedPrompt(optimisticId);
       removeOptimisticUserMessage(sessionId, optimisticId);
       if (current?.record.id === sessionId && sessionSelectionToken === admission.selectionToken) {
         restoreDraftAfterFailure(originalDraft);
@@ -1394,13 +1628,42 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
+  function withoutQueuedPrompt(id: string): Map<string, QueuedPrompt> {
+    const next = new Map(queuedPrompts);
+    next.delete(id);
+    return next;
+  }
+
+  function findQueuedPromptForEvent(sessionId: string, item: TimelineItem): QueuedPrompt | undefined {
+    if (item.kind !== "user" || item.id.startsWith("opt-")) return undefined;
+    return [...queuedPrompts.values()].find(candidate =>
+      candidate.sessionId === sessionId &&
+      !candidate.canonicalUserId &&
+      (candidate.displayText === item.text || candidate.text === item.text),
+    );
+  }
+
+  async function steerQueuedPrompt(id: string): Promise<void> {
+    const queued = queuedPrompts.get(id);
+    if (!queued || queued.status !== "queued") return;
+    queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steering" });
+    try {
+      await window.gradivus.steerQueued(queued.sessionId, buildPromptComposition(queued.text, queued.batch.views));
+      queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steered" });
+      showNotice("Steering message sent", "success", "Steering");
+    } catch (error) {
+      queuedPrompts = new Map(queuedPrompts).set(id, queued);
+      showError(error);
+    }
+  }
+
   async function abortTurn(): Promise<void> {
     if (!current) return;
     const sessionId = current.record.id;
     explicitStopSessions = new Set(explicitStopSessions).add(sessionId);
     try {
       await window.gradivus.abort(sessionId);
-      clearPendingTurn(sessionId, false);
+      clearPendingTurn(sessionId, true);
       errorMessage = "";
       showNotice("Turn stopped", "info", "Turn");
     } catch (error) {
@@ -1409,7 +1672,30 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       showError(error);
     }
   }
+  function rememberCanceledPrompt(sessionId: string, turn: PendingTurn): void {
+    const text = turn.draft.trim();
+    if (!text) return;
+    const next = new Map(canceledPromptTextsBySession);
+    const existing = next.get(sessionId) ?? [];
+    next.set(sessionId, [...existing.filter(candidate => candidate !== text), text].slice(-4));
+    canceledPromptTextsBySession = next;
+  }
+
+  function consumeCanceledPrompt(sessionId: string, text: string): boolean {
+    const normalized = text.trim();
+    if (!normalized) return false;
+    const existing = canceledPromptTextsBySession.get(sessionId);
+    if (!existing?.includes(normalized)) return false;
+    const remaining = existing.filter(candidate => candidate !== normalized);
+    const next = new Map(canceledPromptTextsBySession);
+    if (remaining.length > 0) next.set(sessionId, remaining);
+    else next.delete(sessionId);
+    canceledPromptTextsBySession = next;
+    return true;
+  }
+
   function removeTurnItems(sessionId: string, turn: PendingTurn, removeUser: boolean): void {
+    if (removeUser) rememberCanceledPrompt(sessionId, turn);
     if (current?.record.id !== sessionId) return;
     const removedIds = new Set([turn.optimisticAssistantId, ...(removeUser ? [turn.optimisticUserId, ...(turn.canonicalUserId ? [turn.canonicalUserId] : [])] : [])]);
     const timeline = current.timeline.filter(item => !removedIds.has(item.id));
@@ -1492,17 +1778,60 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     pendingTurns = cleared;
   }
 
+  function preserveQueuedPrompts(sessionId: string, snapshot: SessionSnapshot): SessionSnapshot {
+    const local = [...queuedPrompts.values()].filter(candidate => candidate.sessionId === sessionId);
+    if (local.length === 0) return snapshot;
+    let timeline = snapshot.timeline;
+    let timelineTotal = snapshot.timelineTotal ?? snapshot.timeline.length;
+    const settled: string[] = [];
+    for (const queued of local) {
+      const canonicalPresent = queued.canonicalUserId
+        ? timeline.some(item =>
+            item.id === queued.canonicalUserId ||
+            (item.kind === "user" && item.text === queued.canonicalItem?.text),
+          )
+        : false;
+      if (canonicalPresent) {
+        settled.push(queued.optimisticId);
+        continue;
+      }
+      if (timeline.some(item => item.id === queued.optimisticId)) continue;
+      const item = queued.canonicalItem ?? {
+        id: queued.optimisticId,
+        kind: "user" as const,
+        text: queued.displayText,
+        role: "user",
+        createdAt: Date.now(),
+      };
+      timeline = appendTimeline(timeline, item);
+      timelineTotal += 1;
+    }
+    if (settled.length > 0) {
+      const next = new Map(queuedPrompts);
+      for (const id of settled) next.delete(id);
+      queuedPrompts = next;
+    }
+    if (timeline === snapshot.timeline) return snapshot;
+    return {
+      ...snapshot,
+      timeline,
+      timelineStart: Math.max(0, timelineTotal - timeline.length),
+      timelineTotal,
+    };
+  }
+
   async function refreshSessionMetrics(sessionId: string): Promise<void> {
     if (current?.record.id !== sessionId) return;
     try {
       const snapshot = await window.gradivus.openSession(sessionId);
-      if (current?.record.id === sessionId) current = snapshot;
+      const mergedSnapshot = preserveQueuedPrompts(sessionId, snapshot);
+      if (current?.record.id === sessionId) current = mergedSnapshot;
       if (bootstrap) {
         bootstrap = {
           ...bootstrap,
           registry: {
             ...bootstrap.registry,
-            sessions: bootstrap.registry.sessions.map(session => session.id === sessionId ? snapshot.record : session),
+            sessions: bootstrap.registry.sessions.map(session => session.id === sessionId ? mergedSnapshot.record : session),
           },
         };
       }
@@ -2310,6 +2639,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const fromByte = reset ? 0 : agentHubMessageByte;
     agentHubMessagesLoading = true;
     agentHubMessageError = "";
+    await tick();
     try {
       const page: AgentHubMessagePage = await window.gradivus.getAgentHubMessages(sessionId, agentId, fromByte);
       if (requestToken !== agentHubRequestToken || current?.record.id !== sessionId || agentHubSelectedAgentId !== agentId) return;
@@ -2384,6 +2714,21 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     agentHubActionBusy = "revive";
     try {
       await window.gradivus.agentHubRevive(sessionId, agentId);
+      await refreshAgentHub(sessionId);
+    } catch (error) {
+      agentHubMessageError = error instanceof Error ? error.message : String(error);
+    } finally {
+      agentHubActionBusy = "";
+    }
+  }
+
+  async function clearAgentHubAgent(agentId: string): Promise<void> {
+    const sessionId = current?.record.id;
+    if (!sessionId || agentHubActionBusy) return;
+    agentHubActionBusy = "clear";
+    agentHubMessageError = "";
+    try {
+      await window.gradivus.agentHubClear(sessionId, agentId);
       await refreshAgentHub(sessionId);
     } catch (error) {
       agentHubMessageError = error instanceof Error ? error.message : String(error);
@@ -2612,13 +2957,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           const next = new Set(explicitStopSessions);
           next.delete(event.sessionId);
           explicitStopSessions = next;
-          clearPendingTurn(event.sessionId, false);
+          clearPendingTurn(event.sessionId, true);
           if (event.sessionId === activeId) {
             errorMessage = "";
             notice = undefined;
           }
         } else {
-          clearPendingTurn(event.sessionId, false);
+          clearPendingTurn(event.sessionId, true);
         }
       }
     }
@@ -2673,14 +3018,23 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       if (event.item) {
         const baseTimeline = current.timeline ?? [];
         const pendingTurn = pendingTurns.get(event.sessionId);
+        const queuedPrompt = findQueuedPromptForEvent(event.sessionId, event.item);
+        const isCanceledPromptUser = event.item.kind === "user"
+          && !event.item.id.startsWith("opt-")
+          && !pendingTurn
+          && !queuedPrompt
+          && consumeCanceledPrompt(event.sessionId, event.item.text);
+        if (isCanceledPromptUser) return;
         const isCanonicalPromptUser = event.item.kind === "user"
           && !event.item.id.startsWith("opt-")
           && Boolean(pendingTurn && !pendingTurn.canonicalUserId);
         const optimisticIndex = event.item.id.startsWith("opt-")
           ? baseTimeline.findIndex(candidate => candidate.id === event.item?.id)
-          : isCanonicalPromptUser
-            ? baseTimeline.findIndex(candidate => candidate.id === pendingTurn?.optimisticUserId)
-            : -1;
+          : queuedPrompt
+            ? baseTimeline.findIndex(candidate => candidate.id === queuedPrompt.optimisticId)
+            : isCanonicalPromptUser
+              ? baseTimeline.findIndex(candidate => candidate.id === pendingTurn?.optimisticUserId)
+              : -1;
         const visibleItem: TimelineItem = isCanonicalPromptUser && pendingTurn
           ? { ...event.item, text: pendingTurn.draft }
           : event.item;
@@ -2690,6 +3044,14 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           : appendTimeline(baseTimeline, visibleItem);
         const timelineTotal = (current.timelineTotal ?? current.timeline.length) + (existed ? 0 : 1);
         current = { ...current, timeline, timelineStart: Math.max(0, timelineTotal - timeline.length), timelineTotal };
+        if (queuedPrompt) {
+          queuedPrompts = new Map(queuedPrompts).set(queuedPrompt.optimisticId, {
+            ...queuedPrompt,
+            status: "steered",
+            canonicalUserId: event.item.id,
+            canonicalItem: visibleItem,
+          });
+        }
         if (isCanonicalPromptUser && pendingTurn) {
           pendingTurns = new Map(pendingTurns).set(event.sessionId, { ...pendingTurn, canonicalUserId: event.item.id });
         }
@@ -2903,15 +3265,47 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           {#if current.timeline.length === 0 && current.state === "ready"}<StateCard variant="empty"><h3>What outcome should we pursue?</h3><p>Ask for research, a summary, an implementation plan, or a review of the current tree.</p><div class="suggestion-grid"><button onclick={() => draft = "Find the important documents in this workspace and explain them."}>Find important documents<span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button><button onclick={() => draft = "Review the current repository for risks and open issues."}>Review repository risks<span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button></div></StateCard>{/if}
           {#if hiddenTimelineCount > 0}<button class="secondary-button older-entries" onclick={() => void revealOlder()} disabled={loadingOlder}>Load 100 older entries <span>({hiddenTimelineCount} remaining)</span></button>{/if}
           {#each visibleTimeline as item (item.id)}
-            <TimelineEntry
-              item={item}
-              kind={current?.record.kind ?? "work"}
-              reasoningLoading={reasoningLoading}
-              openReasoning={openReasoning}
-              onReasoning={loadReasoning}
-              onCopyText={copyMarkdownText}
-              showToolDetails={appSettings?.ui.showToolDetails ?? true}
-            />
+            {@const queuedPrompt = queuedPrompts.get(item.id)}
+            {#if messageEdit?.sessionId === current?.record.id && messageEdit.timelineItemId === item.id}
+              <article class="timeline-item item-user timeline-editing-item" data-timeline-id={item.id}>
+                <div class="timeline-gutter"><span>YOU</span></div>
+                <div class="timeline-body">
+                  <form class="message-edit-form" aria-label="Edit sent message" aria-busy={messageEdit.saving} onsubmit={handleMessageEditSubmit}>
+                    <textarea
+                      bind:this={messageEditTextarea}
+                      class="message-edit-input"
+                      rows="4"
+                      aria-label="Edit message text"
+                      value={messageEdit.value}
+                      disabled={messageEdit.saving}
+                      oninput={(event) => updateMessageEditValue(event.currentTarget.value)}
+                      onkeydown={handleMessageEditKeydown}
+                      oncompositionstart={() => (messageEditComposing = true)}
+                      oncompositionend={() => (messageEditComposing = false)}
+                    ></textarea>
+                    <div class="message-edit-actions">
+                      <button type="button" class="secondary-button compact" disabled={messageEdit.saving} onclick={cancelMessageEdit}>Cancel</button>
+                      <button type="submit" class="primary-button" disabled={messageEditSubmitDisabled}>Save and send</button>
+                    </div>
+                  </form>
+                </div>
+              </article>
+            {:else}
+              <TimelineEntry
+                item={item}
+                kind={current?.record.kind ?? "work"}
+                reasoningLoading={reasoningLoading}
+                openReasoning={openReasoning}
+                onReasoning={loadReasoning}
+                onCopyText={copyMarkdownText}
+                showToolDetails={appSettings?.ui.showToolDetails ?? true}
+                queued={Boolean(queuedPrompt && queuedPrompt.status !== "steered")}
+                queuedSteering={queuedPrompt?.status === "steering"}
+                onSteer={() => void steerQueuedPrompt(item.id)}
+                canEdit={canEditMessages && !messageEdit}
+                onEdit={startMessageEdit}
+              />
+            {/if}
             {@const fileSummary = turnFileSummaries.get(item.id)}
             {#if fileSummary}
               <TurnFileSummary
@@ -3084,9 +3478,10 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             actionBusy={agentHubActionBusy}
             messages={agentHubMessages}
             onSelect={(agentId) => void selectAgentHubAgent(agentId)}
-            onLoadMessages={() => void loadAgentHubMessages()}
+            onLoadMessages={() => loadAgentHubMessages()}
             onSend={(message) => void sendAgentHubMessage(message)}
             onKill={(agentId) => void killAgentHubAgent(agentId)}
+            onClear={(agentId) => void clearAgentHubAgent(agentId)}
             onRevive={(agentId) => void reviveAgentHubAgent(agentId)}
           />
         {:else}
@@ -3138,10 +3533,11 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             messageError={agentHubMessageError}
             actionBusy={agentHubActionBusy}
             onSelect={(agentId) => void selectAgentHubAgent(agentId)}
-            onLoadMessages={() => void loadAgentHubMessages()}
+            onLoadMessages={() => loadAgentHubMessages()}
             onSend={(message) => void sendAgentHubMessage(message)}
             onKill={(agentId) => void killAgentHubAgent(agentId)}
             onRevive={(agentId) => void reviveAgentHubAgent(agentId)}
+            onClear={(agentId) => void clearAgentHubAgent(agentId)}
           />
         </div>
       </dialog>

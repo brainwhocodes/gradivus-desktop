@@ -22,6 +22,13 @@ const processHarness = vi.hoisted(() => ({
 	promptResolvers: new Map<string, () => void>(),
 	promptCalls: [] as Array<{ text: string; images?: unknown[] }>,
 	requestCalls: [] as Array<Record<string, unknown>>,
+	messages: [] as unknown[],
+	branchedMessages: [] as unknown[],
+	branchMessages: [] as Array<{ entryId: string; text: string }>,
+	branchData: { text: "", images: [] as unknown[], cancelled: false },
+	statePatch: {} as Record<string, unknown>,
+	branchedStatePatch: {} as Record<string, unknown>,
+	branched: false,
 	failNextCommand: false,
 	failNextPrompt: false,
 }));
@@ -98,10 +105,28 @@ vi.mock("../src/main/rpc-process", () => ({
 									tokensPerSecond: null,
 									queuedMessageCount: 0,
 									todoPhases: [],
+									...(processHarness.branched ? processHarness.branchedStatePatch : processHarness.statePatch),
 								},
 							};
 						case "get_messages_page":
-							return { success: true, command: "get_messages_page", data: { messages: [] } };
+							return {
+								success: true,
+								command: "get_messages_page",
+								data: {
+									messages: processHarness.branched
+										? processHarness.branchedMessages
+										: processHarness.messages,
+								},
+							};
+						case "get_branch_messages":
+							return {
+								success: true,
+								command: "get_branch_messages",
+								data: { messages: processHarness.branchMessages },
+							};
+						case "branch":
+							processHarness.branched = processHarness.branchData.cancelled !== true;
+							return { success: true, command: "branch", data: processHarness.branchData };
 						case "get_settings":
 							return {
 								success: true,
@@ -230,6 +255,13 @@ afterEach(async () => {
 	processHarness.requestCalls.length = 0;
 	processHarness.failNextCommand = false;
 	processHarness.failNextPrompt = false;
+	processHarness.messages = [];
+	processHarness.branchedMessages = [];
+	processHarness.branchMessages = [];
+	processHarness.branchData = { text: "", images: [], cancelled: false };
+	processHarness.statePatch = {};
+	processHarness.branchedStatePatch = {};
+	processHarness.branched = false;
 	vi.clearAllMocks();
 });
 
@@ -379,6 +411,51 @@ describe("DesktopHost runtime supervision", () => {
 			error: { message: "account locked", code: "ACCOUNT_UNAVAILABLE" },
 		});
 	});
+	it("coalesces streaming timeline updates by item while preserving distinct order before an urgent result", async () => {
+		const host = await createHost(["one"]);
+		const send = vi.fn();
+		host.setWindow({ webContents: { send } } as never);
+		await host.openSession("one");
+		send.mockClear();
+
+		vi.useFakeTimers();
+		try {
+			const process = processHarness.instances[0];
+			process?.emitEvent({ type: "message_delta", delta: "hello" });
+			process?.emitEvent({ type: "message_delta", delta: " world" });
+			process?.emitEvent({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
+			expect(send).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(15);
+			expect(send).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(send).toHaveBeenCalledTimes(2);
+			const firstBatch = send.mock.calls.map(([, event]) => event as GradivusEvent);
+			expect(firstBatch.map(event => event.type)).toEqual(["timeline", "timeline"]);
+			expect(firstBatch[0]).toMatchObject({
+				type: "timeline",
+				item: { kind: "assistant", text: "hello world", status: "running" },
+			});
+			expect(firstBatch[1]).toMatchObject({
+				type: "timeline",
+				item: { kind: "tool", toolCallId: "tool-1", status: "running" },
+			});
+			expect(firstBatch[0]?.item?.id).not.toBe(firstBatch[1]?.item?.id);
+
+			process?.emitEvent({ type: "message_delta", delta: "!" });
+			process?.emitEvent({ type: "prompt_result", id: "final" });
+			expect(send.mock.calls.slice(2).map(([, event]) => (event as GradivusEvent).type)).toEqual([
+				"timeline",
+				"prompt_result",
+			]);
+			expect(send.mock.calls[2]?.[1]).toMatchObject({
+				type: "timeline",
+				item: { id: firstBatch[0]?.item?.id, text: "hello world!" },
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 	it("resolves one staged batch for prompt, steering, and queued follow-up", async () => {
 		const host = await createHost(["one"]);
 		const [file, image] = await host.stagePromptAttachments("one", [
@@ -417,6 +494,8 @@ describe("DesktopHost runtime supervision", () => {
 			message: expect.stringContaining('File "notes.md": @"'),
 			images: [{ type: "image", mimeType: "image/png" }],
 		});
+		await host.steerQueued("one", orderedComposition);
+		expect(processHarness.requestCalls.filter(request => request.type === "steer_queued")).toHaveLength(1);
 	});
 
 	it("rejects duplicate and cross-session attachment IDs without consuming the staged attachment", async () => {
@@ -511,6 +590,95 @@ describe("DesktopHost runtime supervision", () => {
 			images: [{ type: "image", data: jpegBase64, mimeType: "image/jpeg" }],
 		});
 	});
+	it("rejects message edits while streaming or queued before requesting a branch", async () => {
+		processHarness.messages = [{ id: "user-1", role: "user", content: "original" }];
+		processHarness.branchMessages = [{ entryId: "entry-1", text: "original" }];
+		const host = await createHost(["one"]);
+		const snapshot = await host.openSession("one");
+		const itemId = snapshot.timeline.find(item => item.role === "user")!.id;
+
+		processHarness.statePatch = { isStreaming: true };
+		await expect(host.editMessage("one", itemId, "edited")).rejects.toThrow("session is idle");
+		processHarness.statePatch = { queuedMessageCount: 1 };
+		await expect(host.editMessage("one", itemId, "edited")).rejects.toThrow("session is idle");
+		expect(processHarness.requestCalls.filter(call => call.type === "branch")).toHaveLength(0);
+	});
+
+	it("does not prompt when branching an edited message is cancelled", async () => {
+		processHarness.messages = [{ id: "user-1", role: "user", content: "original" }];
+		processHarness.branchMessages = [{ entryId: "entry-1", text: "original" }];
+		processHarness.branchData = { text: "original", images: [], cancelled: true };
+		const host = await createHost(["one"]);
+		const snapshot = await host.openSession("one");
+		const itemId = snapshot.timeline.find(item => item.role === "user")!.id;
+
+		await expect(host.editMessage("one", itemId, "edited")).resolves.toMatchObject({ cancelled: true });
+		expect(processHarness.promptCalls).toHaveLength(0);
+	});
+
+	it("branches the correct duplicate, persists runtime metadata, preserves images, and returns a truncated base", async () => {
+		processHarness.messages = [
+			{ id: "user-1", role: "user", content: "repeat" },
+			{ id: "assistant-1", role: "assistant", content: [{ type: "text", text: "first" }] },
+			{ id: "user-2", role: "user", content: "repeat" },
+		];
+		processHarness.branchMessages = [
+			{ entryId: "entry-1", text: "repeat" },
+			{ entryId: "entry-2", text: "repeat" },
+		];
+		const image = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		processHarness.branchData = { text: "repeat", images: [image], cancelled: false };
+		processHarness.branchedStatePatch = {
+			sessionId: "omp-branched",
+			sessionFile: "branched.jsonl",
+			queuedMessageCount: 0,
+		};
+		processHarness.branchedMessages = Array.from({ length: 205 }, (_, index) => ({
+			id: `branch-${index}`,
+			role: "user",
+			content: `message ${index}`,
+		}));
+		const host = await createHost(["one"]);
+		const opened = await host.openSession("one");
+		const itemId = opened.timeline.filter(item => item.role === "user").at(-1)!.id;
+
+		const result = await host.editMessage("one", itemId, "edited duplicate");
+
+		expect(processHarness.requestCalls).toContainEqual({ type: "branch", entryId: "entry-2" });
+		expect(processHarness.promptCalls.at(-1)).toEqual({ text: "edited duplicate", images: [image] });
+		expect(result).toMatchObject({
+			cancelled: false,
+			requestId: "gradivus-test",
+			snapshot: {
+				record: { ompSessionId: "omp-branched", sessionFile: "branched.jsonl" },
+				timelineStart: 5,
+				timelineTotal: 205,
+			},
+		});
+		expect(result.snapshot.timeline).toHaveLength(200);
+	});
+
+	it("returns the committed branch snapshot when starting the edited prompt fails", async () => {
+		processHarness.messages = [{ id: "user-1", role: "user", content: "original" }];
+		processHarness.branchMessages = [{ entryId: "entry-1", text: "original" }];
+		processHarness.branchData = { text: "original", images: [], cancelled: false };
+		processHarness.branchedStatePatch = { sessionId: "omp-branched", sessionFile: "branched.jsonl" };
+		processHarness.branchedMessages = [{ id: "user-1", role: "user", content: "original" }];
+		const host = await createHost(["one"]);
+		const opened = await host.openSession("one");
+		processHarness.failNextPrompt = true;
+
+		const result = await host.editMessage("one", opened.timeline[0]!.id, "edited");
+
+		expect(result).toMatchObject({
+			cancelled: false,
+			error: "prompt failed",
+			snapshot: { record: { ompSessionId: "omp-branched", sessionFile: "branched.jsonl" } },
+		});
+		expect(result.requestId).toBeUndefined();
+		expect(processHarness.promptCalls).toHaveLength(1);
+	});
+
 	it("resolves only active same-workspace agent sessions for selection", async () => {
 		const host = await createHost(["session-a", "session-b"]);
 		const now = Date.now();

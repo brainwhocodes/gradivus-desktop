@@ -13,6 +13,7 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
+	getAgentDismissedPath,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
@@ -428,6 +429,12 @@ async function registerPersistedSubagentsFromDir(
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
 			tombstoned = true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+		}
+		try {
+			await fs.promises.access(getAgentDismissedPath(sessionFile));
+			continue;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
 		}

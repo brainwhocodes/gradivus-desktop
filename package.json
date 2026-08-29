@@ -71,8 +71,6 @@
       "@types/react": "^19.2.17",
       "@types/react-dom": "^19.2.3",
       "@typescript/native-preview": "7.0.0-dev.20260707.2",
-      "@wterm/dom": "0.3.4",
-      "@wterm/ghostty": "0.3.4",
       "bulma": "1.0.4",
       "chart.js": "^4.5.1",
       "chromium-bidi": "12.1.0",

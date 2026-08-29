@@ -13,7 +13,7 @@ This documentation describes the **Gradivus desktop application** in full: the w
 - primary turns, streaming, steering, queued follow-ups, Stop, rollback, and recovery;
 - the conversation transcript, paging, follow state, disclosures, tool activity, and semantic entries;
 - Agent Hub, Files, current-diff review, and extension requests;
-- the chat-local terminal drawer with its platform-selected terminal engines;
+- the chat-local terminal drawer with its `ghostty-web` WebAssembly terminal engine;
 - Settings and provider/account flows; and
 - in-app notifications and shell-level feedback.
 
@@ -83,9 +83,9 @@ The following commands exercised real Electron windows with isolated temporary u
 
 | Command | Result | What it establishes |
 | --- | --- | --- |
-| `bunx playwright test` (desktop and selection specs) | **36 passed** in 4.2 minutes (after the composer footer fix; the first run of the day was 35/36) | Shell, browser tabs, chat journeys, composer, attachments, transcript, settings, inspectors, terminal (including WASM failure recovery on the `wterm-dom` engine), themes, density, focus, Axe, and all eight selection journeys. The composer failure was [CHAT-012](../bug-triage.md#chat-012--the-composer-footer-loses-its-attachment-bar-at-narrow-widths), resolved the same day. |
+| `bunx playwright test` (desktop and selection specs) | **36 passed** in 4.2 minutes (after the composer footer fix; the first run of the day was 35/36) | Shell, browser tabs, chat journeys, composer, attachments, transcript, settings, inspectors, terminal (including WASM failure recovery), themes, density, focus, Axe, and all eight selection journeys. The composer failure was [CHAT-012](../bug-triage.md#chat-012--the-composer-footer-loses-its-attachment-bar-at-narrow-widths), resolved the same day. |
 | `GRADIVUS_REAL_OMP=1 bunx playwright test --config playwright.real.config.ts` | **1 passed** in 6.1 s | The compiled real OMP runtime boots through the Electron chat path and answers `/context`. |
-| `bunx vitest run test/terminal-renderer-selection.test.ts test/theme-palette.test.ts` | **14 passed** | Platform-to-terminal-engine routing and shared terminal palette contrast guarantees. |
+| `bunx vitest run test/terminal-renderer-selection.test.ts test/theme-palette.test.ts` | **15 passed** | Platform-neutral `ghostty-web` renderer selection and shared terminal palette contrast guarantees. |
 | `bun run check` | **clean** | Biome (93 files), TypeScript/Svelte types (37 files, 0 errors), and Sass accept the current tree. |
 
 The fixture starts a real Electron main process and Svelte renderer, an isolated local workspace runtime, loopback gRPC, and a deterministic chat RPC process. It requires no external provider credentials or provider request for the seeded chat journey. It is not a total network sandbox: browser panes may still navigate HTTP/HTTPS and the launch environment begins from the parent environment before overriding user-data paths.
@@ -122,6 +122,6 @@ A direct launch outside the Playwright harness was not used as verification. The
 - The composer footer geometry was broken at the start of this pass (CHAT-012) and repaired within it; composer one-surface claims rest on the post-fix 36/36 run only.
 - No multi-device, remote-human collaboration, operating-system notification, offline queue, or read-only workspace mode exists in the inspected product surface.
 - Current-diff review is a live workspace diff, not a historical record of the tool operation that introduced the path.
-- Runtime visibility established by Playwright does not settle subjective animation feel or every platform's native focus behavior; the macOS/Linux terminal-engine journey (LT-18) has not been rerun since the renderer cutover.
+- Runtime visibility established by Playwright does not settle subjective animation feel or every platform's native focus behavior; the terminal renderer journey has not been rerun on every supported host since the `ghostty-web` cutover.
 
 These limitations remain explicit in feature checklists and triage rather than being converted into guarantees.

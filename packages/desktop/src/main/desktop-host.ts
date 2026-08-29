@@ -19,6 +19,7 @@ import type {
 	AuthAccountView,
 	AuthEvent,
 	BootstrapSnapshot,
+	EditMessageResult,
 	ExtensionView,
 	FileChangeDisposition,
 	FileDiffView,
@@ -43,7 +44,11 @@ import type {
 	TimelinePage,
 	WorkspaceImagePreview,
 } from "../shared/contracts";
-import { MAX_PROMPT_IMAGE_BYTES } from "../shared/contracts";
+import {
+	MAX_PROMPT_ATTACHMENT_BATCH_BYTES,
+	MAX_PROMPT_ATTACHMENT_COUNT,
+	MAX_PROMPT_IMAGE_BYTES,
+} from "../shared/contracts";
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "../shared/rpc-wire";
 import { loadPersistedGradivusSettings } from "./app-settings";
 import {
@@ -148,11 +153,11 @@ type RuntimeSession = {
 
 type TimerHandle = NodeJS.Timeout;
 const FILE_DIFF_CACHE_TTL_MS = 1_000;
+const EVENT_BATCH_DELAY_MS = 16;
 const MAX_WORKSPACE_IMAGE_DIMENSION = 8_192;
 const MAX_WORKSPACE_IMAGE_PIXELS = 4_194_304;
 const MIN_IMAGE_PREVIEW_DIMENSION = 64;
 const MAX_IMAGE_PREVIEW_DIMENSION = 2_048;
-
 interface StateData {
 	sessionId: string;
 	sessionFile?: string;
@@ -167,6 +172,7 @@ interface StateData {
 	autoRetryEnabled: boolean;
 	contextUsage?: { tokens: number; contextWindow: number };
 	tokensPerSecond: number | null;
+	isStreaming?: boolean;
 	queuedMessageCount: number;
 	todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 }
@@ -193,6 +199,41 @@ async function loadHistory(client: RpcClient): Promise<unknown[]> {
 	throw new Error(response?.error ?? "History page load failed");
 }
 
+function normalizeBranchMessages(value: unknown): Array<{ entryId: string; text: string }> {
+	if (!isRecord(value) || !Array.isArray(value.messages)) throw new Error("Branch messages response was invalid");
+	return value.messages.map(message => {
+		if (!isRecord(message) || typeof message.entryId !== "string" || typeof message.text !== "string") {
+			throw new Error("Branch message was invalid");
+		}
+		return { entryId: message.entryId, text: message.text };
+	});
+}
+
+function normalizeBranchImages(value: unknown): PromptImageContent[] {
+	if (!Array.isArray(value)) throw new Error("Branch images response was invalid");
+	if (value.length > MAX_PROMPT_ATTACHMENT_COUNT) throw new Error("Branch images exceed the count limit");
+	let totalBytes = 0;
+	return value.map(image => {
+		if (
+			!isRecord(image) ||
+			image.type !== "image" ||
+			typeof image.data !== "string" ||
+			image.data.length === 0 ||
+			(image.mimeType !== "image/png" &&
+				image.mimeType !== "image/jpeg" &&
+				image.mimeType !== "image/gif" &&
+				image.mimeType !== "image/webp")
+		) {
+			throw new Error("Branch image was invalid");
+		}
+		const bytes = Buffer.byteLength(image.data, "base64");
+		if (bytes > MAX_PROMPT_IMAGE_BYTES) throw new Error("Branch image exceeds the size limit");
+		totalBytes += bytes;
+		if (totalBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) throw new Error("Branch images exceed the batch size limit");
+		return { type: "image", data: image.data, mimeType: image.mimeType };
+	});
+}
+
 function isWindowUsable(window?: BrowserWindow): boolean {
 	if (!window) return false;
 	if (typeof window.isDestroyed === "function" && window.isDestroyed()) return false;
@@ -208,6 +249,7 @@ export class DesktopHost {
 	#runtimes = new Map<string, RuntimeSession>();
 	#supervisor: RuntimeSupervisor;
 	#eventQueues = new Map<string, GradivusEvent[]>();
+	#eventQueueIndexes = new Map<string, Map<string, number>>();
 	#eventTimers = new Map<string, TimerHandle>();
 	#warning: string | undefined;
 	#authProcess: RpcProcess | undefined;
@@ -563,6 +605,7 @@ export class DesktopHost {
 	async stop(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
 		await this.#supervisor.stop(record.id);
+		this.#flushEvents(record.id);
 		return this.#snapshot(this.#requiredRuntime(record.id));
 	}
 
@@ -586,6 +629,7 @@ export class DesktopHost {
 		if (typeof idInput !== "string") throw new TypeError("invalid session id");
 		const record = this.#record(idInput);
 		await this.#supervisor.stop(record.id);
+		this.#flushEvents(record.id);
 		await this.#supervisor.unregister(record.id);
 		const runtime = this.#runtimes.get(record.id);
 		if (runtime) await runtime.attachments.close();
@@ -616,6 +660,102 @@ export class DesktopHost {
 		return this.#runWithRuntime(id, async (runtime, client) => {
 			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
 			return client.prompt(resolved.text, resolved.images.length > 0 ? resolved.images : undefined);
+		});
+	}
+
+	async editMessage(idInput: unknown, timelineItemIdInput: unknown, textInput: unknown): Promise<EditMessageResult> {
+		if (typeof timelineItemIdInput !== "string" || timelineItemIdInput.trim().length === 0) {
+			throw new TypeError("invalid timeline item id");
+		}
+		const editedText = assertBoundedText(textInput, "edited text");
+		if (editedText.trim().length === 0) throw new RangeError("edited text cannot be blank");
+
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			const stateResponse = await client.request({ type: "get_state" });
+			if (!stateResponse.success || stateResponse.command !== "get_state") {
+				throw new Error(
+					stateResponse.success
+						? "OMP state response was invalid"
+						: (stateResponse.error ?? "OMP state request failed"),
+				);
+			}
+			const liveState = stateResponse.data as StateData;
+			if (liveState.isStreaming === true || liveState.queuedMessageCount > 0) {
+				throw new Error("Messages can only be edited while the session is idle");
+			}
+
+			const branchMessagesResponse = await client.request({ type: "get_branch_messages" });
+			if (!branchMessagesResponse.success || branchMessagesResponse.command !== "get_branch_messages") {
+				throw new Error(
+					branchMessagesResponse.success
+						? "OMP branch messages response was invalid"
+						: (branchMessagesResponse.error ?? "OMP branch messages request failed"),
+				);
+			}
+			const branchMessages = normalizeBranchMessages(branchMessagesResponse.data);
+			const branchTarget = runtime.timeline.resolveBranchEntry(timelineItemIdInput, branchMessages);
+			if (!branchTarget) throw new Error("The selected user message is not available for branching");
+
+			const branchResponse = await client.request({ type: "branch", entryId: branchTarget.entryId });
+			if (!branchResponse.success || branchResponse.command !== "branch") {
+				throw new Error(
+					branchResponse.success
+						? "OMP branch response was invalid"
+						: (branchResponse.error ?? "OMP branch failed"),
+				);
+			}
+			if (
+				!isRecord(branchResponse.data) ||
+				typeof branchResponse.data.cancelled !== "boolean" ||
+				typeof branchResponse.data.text !== "string"
+			) {
+				throw new Error("OMP branch response was invalid");
+			}
+			const branchImages = normalizeBranchImages(branchResponse.data.images);
+			if (branchResponse.data.cancelled) {
+				return { cancelled: true, snapshot: this.#snapshot(runtime) };
+			}
+
+			const refreshedStateResponse = await client.request({ type: "get_state" });
+			if (!refreshedStateResponse.success || refreshedStateResponse.command !== "get_state") {
+				throw new Error(
+					refreshedStateResponse.success
+						? "OMP state response after branching was invalid"
+						: (refreshedStateResponse.error ?? "OMP state refresh after branching failed"),
+				);
+			}
+			const refreshedState = refreshedStateResponse.data as StateData;
+			if (typeof refreshedState.sessionId !== "string" || refreshedState.sessionId.length === 0) {
+				throw new Error("OMP state response after branching was invalid");
+			}
+			const lastOpenedAt = new Date().toISOString();
+			runtime.record = {
+				...runtime.record,
+				ompSessionId: refreshedState.sessionId,
+				sessionFile: refreshedState.sessionFile ?? runtime.record.sessionFile,
+				lastOpenedAt,
+			};
+			await this.#registry.update(runtime.record.id, {
+				ompSessionId: runtime.record.ompSessionId,
+				sessionFile: runtime.record.sessionFile,
+				lastOpenedAt,
+			});
+			runtime.timeline.load(await loadHistory(client));
+			runtime.subagents = [];
+			runtime.agentHub = undefined;
+			runtime.queuedMessageCount = refreshedState.queuedMessageCount;
+			const snapshot = this.#snapshot(runtime);
+
+			try {
+				const requestId = await client.prompt(editedText, branchImages.length > 0 ? branchImages : undefined);
+				return { cancelled: false, snapshot, requestId };
+			} catch (error) {
+				return {
+					cancelled: false,
+					snapshot,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
 		});
 	}
 
@@ -864,6 +1004,16 @@ export class DesktopHost {
 			if (!response.success) throw new Error(response.error);
 		});
 	}
+	async steerQueued(id: unknown, compositionInput: unknown): Promise<void> {
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
+			const response = await client.request({
+				type: "steer_queued",
+				message: resolved.text,
+			});
+			if (!response.success) throw new Error(response.error);
+		});
+	}
 
 	async queueFollowUp(id: unknown, compositionInput: unknown): Promise<void> {
 		await this.#runWithRuntime(id, async (runtime, client) => {
@@ -1085,6 +1235,14 @@ export class DesktopHost {
 		});
 	}
 
+	async agentHubClear(idInput: unknown, agentIdInput: unknown): Promise<void> {
+		const agentId = assertAgentHubId(agentIdInput);
+		await this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "agent_hub_clear", agentId });
+			if (!response.success) throw new Error(response.error ?? "Agent Hub clear failed");
+		});
+	}
+
 	async agentHubRevive(idInput: unknown, agentIdInput: unknown): Promise<void> {
 		const agentId = assertAgentHubId(agentIdInput);
 		await this.#runWithRuntime(idInput, async (_runtime, client) => {
@@ -1188,6 +1346,7 @@ export class DesktopHost {
 
 	async stopAll(): Promise<void> {
 		await this.#supervisor.close();
+		this.#flushAllEvents();
 	}
 	async close(): Promise<void> {
 		this.#authPrompt = undefined;
@@ -1195,6 +1354,7 @@ export class DesktopHost {
 		this.#authProcess = undefined;
 		this.#authClient = undefined;
 		await Promise.all([this.#supervisor.close(), authProcess?.stop().catch(() => {})]);
+		this.#flushAllEvents();
 		await Promise.all([...this.#runtimes.values()].map(runtime => runtime.attachments.close()));
 	}
 
@@ -1556,7 +1716,7 @@ export class DesktopHost {
 	}
 
 	#onEvent(runtime: RuntimeSession, event: unknown): void {
-		this.#supervisor.touch(runtime.record.id);
+		this.#supervisor.touch(runtime.record.id, false);
 		const frame = event as Record<string, unknown>;
 		if (frame.type === "prompt_result") {
 			const rawError = isRecord(frame.error) ? frame.error : undefined;
@@ -1584,7 +1744,7 @@ export class DesktopHost {
 			try {
 				const snapshot = normalizeAgentHubSnapshot(frame);
 				runtime.agentHub = snapshot;
-				this.#emitUrgent({ sessionId: runtime.record.id, type: "agent_hub_update", agentHub: snapshot });
+				this.#queueEvent({ sessionId: runtime.record.id, type: "agent_hub_update", agentHub: snapshot });
 			} catch {
 				// Ignore malformed push payloads; the RPC stream must remain usable.
 			}
@@ -1662,7 +1822,7 @@ export class DesktopHost {
 		if (items.some(item => item.status === "complete" && item.isError !== true && item.files?.length)) {
 			runtime.fileDiffCache.clear();
 		}
-		for (const item of items) this.#emitUrgent({ sessionId: runtime.record.id, type: "timeline", item });
+		for (const item of items) this.#queueEvent({ sessionId: runtime.record.id, type: "timeline", item });
 	}
 
 	#updateSubagents(runtime: RuntimeSession, frame: Record<string, unknown>): void {
@@ -1724,30 +1884,56 @@ export class DesktopHost {
 		this.#emitUrgent({ sessionId: runtime.record.id, type: "extension", extension });
 	}
 
+	// Stream updates wait one frame; urgent lifecycle/control events flush this queue in arrival order.
 	#queueEvent(event: GradivusEvent): void {
+		const key =
+			event.type === "timeline"
+				? typeof event.item?.id === "string"
+					? `timeline:${event.item.id}`
+					: undefined
+				: event.type === "subagents" || event.type === "agent_hub_update"
+					? event.type
+					: undefined;
 		const queue = this.#eventQueues.get(event.sessionId) ?? [];
-		queue.push(event);
+		const indexes = this.#eventQueueIndexes.get(event.sessionId) ?? new Map<string, number>();
+		if (key !== undefined) {
+			const index = indexes.get(key);
+			if (index !== undefined) {
+				queue[index] = event;
+			} else {
+				indexes.set(key, queue.length);
+				queue.push(event);
+			}
+		} else {
+			queue.push(event);
+		}
 		this.#eventQueues.set(event.sessionId, queue);
+		this.#eventQueueIndexes.set(event.sessionId, indexes);
 		if (!this.#eventTimers.has(event.sessionId))
 			this.#eventTimers.set(
 				event.sessionId,
-				setTimeout(() => this.#flush(event.sessionId), 16),
+				setTimeout(() => this.#flushEvents(event.sessionId), EVENT_BATCH_DELAY_MS),
 			);
 	}
 
 	#emitUrgent(event: GradivusEvent): void {
 		this.#queueEvent(event);
-		this.#flush(event.sessionId);
+		this.#flushEvents(event.sessionId);
 	}
 
-	#flush(sessionId: string): void {
+	#flushAllEvents(): void {
+		for (const sessionId of this.#eventQueues.keys()) this.#flushEvents(sessionId);
+	}
+
+	#flushEvents(sessionId: string): void {
 		const timer = this.#eventTimers.get(sessionId);
-		if (timer) clearTimeout(timer);
+		clearTimeout(timer);
 
 		this.#eventTimers.delete(sessionId);
 		const queue = this.#eventQueues.get(sessionId);
-		if (!queue || queue.length === 0) return;
 		this.#eventQueues.delete(sessionId);
+		this.#eventQueueIndexes.delete(sessionId);
+		if (!queue || queue.length === 0) return;
 		if (isWindowUsable(this.#window)) {
 			try {
 				for (const event of queue) this.#window?.webContents.send("gradivus:event", event);

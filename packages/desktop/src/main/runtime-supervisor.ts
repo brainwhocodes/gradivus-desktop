@@ -214,13 +214,13 @@ export class RuntimeSupervisor {
 		return entry.unregisterPromise;
 	}
 
-	touch(id: string): void {
+	touch(id: string, notify = true): void {
 		const entry = this.#entries.get(id);
 		if (!entry?.resident) return;
 		entry.lastUsedAt = this.#clock();
 		this.#clearIdleTimer(entry);
 		this.#ensureIdleTimer(entry);
-		this.#notify(entry);
+		if (notify) this.#notify(entry);
 	}
 
 	close(): Promise<void> {

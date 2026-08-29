@@ -32,10 +32,10 @@ The browser-tab and browser-pane area beside OMP Chat, including per-pane addres
 The Minimize, Maximize/Restore, and Close controls in the custom title bar. Window geometry does not persist across relaunch.
 
 **Local terminal drawer**
-The chat-local drawer opened from the transcript header with the terminal toggle. Its interactive area is a region named **Shell terminal**, rendered by a platform-selected terminal engine. The shell does not add its input or output to OMP context or the conversation transcript.
+The chat-local drawer opened from the transcript header with the terminal toggle. Its interactive area is a region named **Shell terminal**, rendered by the `ghostty-web` WebAssembly terminal engine on every supported platform. The shell does not add its input or output to OMP context or the conversation transcript.
 
 **terminal engine**
-The platform-selected renderer inside the Local terminal drawer: `wterm-dom` (DOM rows with the libghostty WebAssembly core) on Windows, and `ghostty-web` (canvas with the Ghostty Web WebAssembly core) on macOS and Linux. Exposed on the drawer as `data-terminal-renderer`.
+The `ghostty-web` renderer inside the Local terminal drawer, using its Ghostty WebAssembly core on every supported platform. Exposed on the drawer as `data-terminal-renderer`.
 
 ## Containers and persistence
 

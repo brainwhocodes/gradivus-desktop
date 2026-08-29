@@ -33,6 +33,12 @@ export async function createGhosttyWebRenderer(options: CreateTerminalRendererOp
 	});
 
 	terminal.open(options.element);
+	// Ghostty uses the host as its editable keyboard surface and overwrites its
+	// ARIA role/name. Keep that behavior while exposing the host as the drawer's
+	// shell region; Ghostty's nested textarea remains the input textbox.
+	options.element.setAttribute("role", "region");
+	options.element.setAttribute("aria-label", "Shell terminal");
+	options.element.removeAttribute("aria-multiline");
 	const fitAddon = new FitAddon();
 	terminal.loadAddon(fitAddon);
 

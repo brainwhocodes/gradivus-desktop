@@ -702,6 +702,31 @@ describe("AgentLifecycleManager", () => {
 		expect(restoredRegistry.get(workerId)?.status).toBe("aborted");
 	});
 
+	it("dismiss release removes the row and prevents persisted Agent Hub rehydration", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-dismiss-");
+		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerId = "Dismissed-Sub";
+		const workerSessionFile = path.join(tempDir.path(), "main", `${workerId}.jsonl`);
+		await Bun.write(rootSessionFile, "");
+		await Bun.write(workerSessionFile, "");
+		const session = { dispose: async () => {} } as unknown as AgentSession;
+		const ref = registry.register({
+			id: workerId,
+			displayName: "task",
+			kind: "sub",
+			session,
+			sessionFile: workerSessionFile,
+			status: "parked",
+		});
+
+		expect(await lifecycle.release(workerId, ref, { tombstone: true, remove: true, dismiss: true })).toBe(true);
+		expect(registry.get(workerId)).toBeUndefined();
+		expect(await Bun.file(`${workerSessionFile}.dismissed`).exists()).toBe(true);
+		const restoredRegistry = new AgentRegistry();
+		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
+		expect(restoredRegistry.get(workerId)).toBeUndefined();
+	});
+
 	it("a cold revive whose factory resolves after dispose rejects without adopting or arming a TTL", async () => {
 		vi.useFakeTimers();
 		const gate = deferred();

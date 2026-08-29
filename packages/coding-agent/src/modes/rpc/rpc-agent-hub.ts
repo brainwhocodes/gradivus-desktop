@@ -122,6 +122,22 @@ export class RpcAgentHub {
 		return { agentId };
 	}
 
+	/**
+	 * Dismiss a retained agent from the roster without deleting its transcript.
+	 * Only parked or already-aborted task agents may be cleared. A tombstone
+	 * keeps a cleared parked transcript from being rehydrated as a new row.
+	 */
+	async clear(agentId: string): Promise<RpcAgentHubActionResult> {
+		const ref = this.#requireRef(agentId);
+		if (ref.kind === "advisor" || ref.history?.readOnly === true)
+			throw new Error(`Agent "${agentId}" is read-only and cannot be cleared`);
+		if (ref.status !== "parked" && ref.status !== "aborted")
+			throw new Error(`Agent "${agentId}" is ${ref.status} — only parked or aborted agents can be cleared`);
+		const released = await this.#lifecycle.release(agentId, ref, { tombstone: true, remove: true, dismiss: true });
+		if (!released) throw new Error(`Agent "${agentId}" changed before it could be cleared`);
+		return { agentId };
+	}
+
 	#requireRef(agentId: string): AgentRef {
 		if (!agentId || agentId === MAIN_AGENT_ID)
 			throw new Error(`Unknown Agent Hub agent: ${agentId || MAIN_AGENT_ID}`);

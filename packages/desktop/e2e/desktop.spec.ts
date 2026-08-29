@@ -13,7 +13,7 @@ import { teardownElectronTest } from "./electron-teardown";
 
 type AttachmentCapture = {
 	sequence: number;
-	route: "prompt" | "steer" | "follow_up";
+	route: "prompt" | "steer" | "steer_queued" | "follow_up";
 	requestId: string;
 	messageBytes: number;
 	baseTextBytes: number;
@@ -742,7 +742,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				const surfaceWidth = narrowGeometry.surfaceRect?.width ?? 0;
 				expect(surfaceWidth).toBeGreaterThan(0);
 				expect(surfaceWidth).toBeLessThan(width);
-				expect(narrowGeometry.primaryLabel).toMatch(/^(Send message|Steer current turn)$/);
+				expect(narrowGeometry.primaryLabel).toMatch(/^(Send message|Queue for the next turn)$/);
 				expect(narrowGeometry.footerDisplay).toBe("flex");
 				expect(narrowGeometry.footerFlexWrap).toBe("nowrap");
 				expect(narrowGeometry.shelfAboveInput).toBe(true);
@@ -1776,10 +1776,16 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
 		const browserTab = page.getByRole("tab", { name: "Browser", exact: true });
 		await expect(browserTab).toBeVisible();
-		await page.getByRole("tab", { name: /Gradivus/ }).click();
+		const nativeTab = page.getByRole("tab", { name: /Gradivus/ });
+		await nativeTab.click();
+		await expect(nativeTab).toHaveAttribute("aria-selected", "true");
 		await composer.fill("activity wave");
 		await composer.press("Enter");
 		await expect(timeline).toContainText("Wave assistant complete 1.", { timeout: 12_000 });
+		await nativeTab.click();
+		await expect(nativeTab).toHaveAttribute("aria-selected", "true");
+		await expect(composer).toBeVisible({ timeout: 20_000 });
+		await expect(composer).toBeEnabled();
 		await composer.fill("normal streaming turn");
 		await composer.press("Enter");
 		await expect(timeline).toContainText("Fixture completed the requested work.", { timeout: 12_000 });
@@ -1819,11 +1825,15 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await expect(showDetails).toBeVisible();
 		await expect(agentHubWindow.locator(".selected-agent-metrics")).toBeHidden();
 		await expect(agentHubWindow.locator(".agent-hub-window-header p")).toHaveCount(0);
-		const refreshTranscript = agentHubWindow.locator(".transcript-toolbar").getByRole("button", { name: /Refresh/ });
+		const refreshTranscript = agentHubWindow.getByRole("button", { name: "Refresh transcript", exact: true });
+		await expect(refreshTranscript).toHaveAccessibleName("Refresh transcript");
+		await expect(refreshTranscript.locator("svg")).toHaveCount(1);
+		await expect(refreshTranscript).toBeEnabled();
 		await refreshTranscript.click();
-		await expect(refreshTranscript).toHaveText("Refreshing…");
 		await expect(verifierTranscript).toContainText("Fixture collaborator transcript.");
-		await expect(refreshTranscript).toHaveText("Refresh transcript", { timeout: 8_000 });
+		await expect(refreshTranscript).toHaveAccessibleName("Refresh transcript", { timeout: 8_000 });
+		await expect(refreshTranscript).toHaveAttribute("aria-busy", "false");
+		await expect(refreshTranscript).toBeEnabled();
 		const transcriptPriority = await agentHubWindow.evaluate(dialog => {
 			const transcript = dialog.querySelector<HTMLElement>(".transcript-region")?.getBoundingClientRect();
 			const dialogBounds = dialog.getBoundingClientRect();
@@ -1909,7 +1919,8 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		page.once("dialog", dialog => void dialog.accept());
 		await page.getByRole("button", { name: "Kill agent", exact: true }).click();
 		await expect(verifier).toHaveAttribute("aria-label", /aborted/);
-		await page.getByRole("button", { name: "Close Agent Hub session", exact: true }).click();
+		await page.getByRole("button", { name: "Close Agent Hub session", exact: true }).click({ force: true });
+		await expect(agentHubWindow).toBeHidden();
 		await advisor.click();
 		await expect(page.locator(".agent-hub-window")).toBeVisible();
 		await expect(page.getByRole("log", { name: "Fixture Advisor transcript" })).toContainText("Fixture collaborator transcript.");
@@ -1955,6 +1966,16 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await page.getByRole("tab", { name: "Agent Hub", exact: true }).click();
 		await verifier.click();
 		await expect(agentHubWindow).toBeVisible();
+		const showVerifierDetails = agentHubWindow.getByRole("button", { name: "Show details", exact: true });
+		await expect(showVerifierDetails).toBeVisible();
+		await showVerifierDetails.click();
+		await expect(agentHubWindow.getByRole("button", { name: "Hide details", exact: true })).toBeVisible();
+		const clearVerifier = agentHubWindow.getByRole("button", { name: "Clear from Hub", exact: true });
+		await expect(clearVerifier).toBeVisible();
+		page.once("dialog", dialog => void dialog.accept());
+		await clearVerifier.click();
+		await expect(verifier).toHaveCount(0);
+		await expect(page.getByRole("button", { name: /Fixture Advisor/ })).toBeVisible();
 		await browserTab.click();
 		await expect(agentHubWindow).toBeHidden();
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
@@ -2011,7 +2032,7 @@ test("opens the current chat terminal drawer without changing chat state", async
 		await expect(terminalToggle).toHaveAttribute("aria-expanded", "true");
 		await expect(terminalPanel).toBeVisible();
 
-		const expectedRenderer = process.platform === "win32" ? "wterm-dom" : "ghostty-web";
+		const expectedRenderer = "ghostty-web";
 		const initialShell = page.locator(".chat-terminal-shell");
 		await expect(initialShell).toHaveAttribute("data-terminal-renderer", expectedRenderer);
 
@@ -2064,6 +2085,8 @@ test("opens the current chat terminal drawer without changing chat state", async
 		const paneWidth = await page.locator(".transcript-pane").evaluate(element => element.getBoundingClientRect().width);
 		expect(panelWidth).toBeCloseTo(paneWidth, 0);
 		await expect(terminalRegion).toBeVisible();
+		await expect(terminalRegion).not.toHaveAttribute("aria-multiline");
+		await expect(terminalRegion.getByRole("textbox", { name: "Terminal input", exact: true })).toHaveCount(1);
 		await expect(page.getByRole("button", { name: "Agent activity", exact: true })).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Shell", exact: true })).toHaveCount(0);
 
@@ -2231,7 +2254,7 @@ test("replays a backgrounded extension request when returning to its chat", asyn
 	}
 });
 
-test("routes Enter to steering while a turn is active", async () => {
+test("queues Enter for the next turn while a turn is active", async () => {
 	const userData = await createUserData("gradivus-e2e-steer-"); const workspace = path.join(userData, "workspace"); await seed(userData, workspace, ["fixture-steer-chat"]); const app = await launch(userData, workspace);
 	try {
 		const page = await app.firstWindow();
@@ -2248,9 +2271,9 @@ test("routes Enter to steering while a turn is active", async () => {
 		await composer.press("Enter");
 		await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/, { timeout: 8_000 });
 		await expect(composerShell.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
-		const steer = composerShell.getByRole("button", { name: "Steer current turn", exact: true });
-		await expect(steer).toHaveCount(1);
-		await expect(steer).toBeDisabled();
+		const queue = composerShell.getByRole("button", { name: "Queue for the next turn", exact: true });
+		await expect(queue).toHaveCount(1);
+		await expect(queue).toBeDisabled();
 		const moreActions = composerShell.locator("summary.action-menu-trigger");
 		await expect(moreActions).toHaveCount(1);
 		await expect(moreActions).toBeEnabled();
@@ -2259,16 +2282,18 @@ test("routes Enter to steering while a turn is active", async () => {
 		await expect(page.locator(".turn-stop-btn")).toHaveCount(1);
 		await expect(stop).toHaveAccessibleName("Stop generation");
 		await expect(stop).toBeEnabled();
-		await expect(composerShell.getByRole("button", { name: "Queue for the next turn", exact: true })).toBeHidden();
 
-		await composer.fill("steer the current turn");
-		await expect(steer).toBeEnabled();
-		await moreActions.click();
-		const queue = composerShell.getByRole("button", { name: "Queue for the next turn", exact: true });
-		await expect(queue).toBeVisible();
+		const queuedText = "queue the next turn";
+		await composer.fill(queuedText);
 		await expect(queue).toBeEnabled();
 		await composer.press("Enter");
-		await expect(page.locator(".timeline-scroll")).toContainText("Held turn completed after steering.", { timeout: 15_000 });
+		await expect(composer).toHaveValue("");
+		const timeline = page.locator(".timeline-scroll");
+		await expect(timeline.getByText(queuedText, { exact: true })).toHaveCount(1);
+		const queuedRow = timeline.locator(".timeline-item.is-queued").filter({ hasText: queuedText });
+		await expect(queuedRow).toHaveCount(1);
+		await expect(queuedRow.getByRole("button", { name: "Steer queued message", exact: true })).toHaveCount(1);
+		await expect(timeline).toContainText("Follow-up completed after the active turn.", { timeout: 15_000 });
 	} finally { await teardownElectronTest(app, userData); }
 });
 
@@ -2470,39 +2495,32 @@ test("applies AAA neutral palettes in dark and light modes", async () => {
 			canvasHeight: number;
 			nonBackgroundPixels: number;
 		}> =>
-			page.evaluate(
-				(known: { width: number; height: number }) => {
-					const shell = document.querySelector<HTMLElement>(".chat-terminal-shell");
-					const canvas = document.querySelector<HTMLCanvasElement>(".chat-terminal-canvas canvas");
-					const domHost = document.querySelector<HTMLElement>(".chat-terminal-canvas.wterm");
-					const rows = document.querySelectorAll(".chat-terminal-canvas .term-row");
-					const context = canvas?.getContext("2d");
-					const image = canvas && context ? context.getImageData(0, 0, canvas.width, canvas.height) : undefined;
-					let nonBackgroundPixels = 0;
-					if (image && image.data.length >= 4) {
-						const background = image.data.slice(0, 4);
-						for (let index = 4; index < image.data.length; index += 4) {
-							if (
-								image.data[index] !== background[0] ||
-								image.data[index + 1] !== background[1] ||
-								image.data[index + 2] !== background[2] ||
-								image.data[index + 3] !== background[3]
-							) {
-								nonBackgroundPixels++;
-							}
+			page.evaluate(() => {
+				const shell = document.querySelector<HTMLElement>(".chat-terminal-shell");
+				const canvas = document.querySelector<HTMLCanvasElement>(".chat-terminal-canvas canvas");
+				const context = canvas?.getContext("2d");
+				const image = canvas && context ? context.getImageData(0, 0, canvas.width, canvas.height) : undefined;
+				let nonBackgroundPixels = 0;
+				if (image && image.data.length >= 4) {
+					const background = image.data.slice(0, 4);
+					for (let index = 4; index < image.data.length; index += 4) {
+						if (
+							image.data[index] !== background[0] ||
+							image.data[index + 1] !== background[1] ||
+							image.data[index + 2] !== background[2] ||
+							image.data[index + 3] !== background[3]
+						) {
+							nonBackgroundPixels++;
 						}
-					} else if (domHost && rows.length > 0) {
-						nonBackgroundPixels = rows.length;
 					}
-					return {
-						offset: Number(shell?.dataset.renderedOffset ?? 0),
-						canvasWidth: canvas?.width ?? (known.width || domHost?.clientWidth || 0),
-						canvasHeight: canvas?.height ?? (known.height || domHost?.clientHeight || 0),
-						nonBackgroundPixels,
-					};
-				},
-				{ width: replayCanvasWidth, height: replayCanvasHeight },
-			);
+				}
+				return {
+					offset: Number(shell?.dataset.renderedOffset ?? 0),
+					canvasWidth: canvas?.width ?? 0,
+					canvasHeight: canvas?.height ?? 0,
+					nonBackgroundPixels,
+				};
+			});
 		let replayOffset = 0;
 		let replayCanvasWidth = 0;
 		let replayCanvasHeight = 0;

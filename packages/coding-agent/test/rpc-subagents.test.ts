@@ -25,6 +25,11 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempPaths: string[] = [];
+const historicalBranchImage: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
 
 afterEach(() => {
 	for (const tempPath of tempPaths.splice(0)) {
@@ -211,9 +216,22 @@ describe("RPC subagent registry", () => {
 			{
 				command: { type: "branch", entryId: "entry-1" },
 				session: createSessionChangeSession({
-					branch: { selectedText: "Branch text", selectedImages: [], cancelled: false },
+					branch: { selectedText: "Branch text", selectedImages: [historicalBranchImage], cancelled: false },
 				}),
-				expected: { type: "branch", data: { text: "Branch text", cancelled: false } },
+				expected: {
+					type: "branch",
+					data: {
+						text: "Branch text",
+						images: [
+							{
+								type: "image",
+								data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+								mimeType: "image/png",
+							},
+						],
+						cancelled: false,
+					},
+				},
 			},
 		];
 
@@ -252,7 +270,7 @@ describe("RPC subagent registry", () => {
 			{
 				command: { type: "branch", entryId: "entry-1" },
 				session: createSessionChangeSession({ branch: { selectedText: "", selectedImages: [], cancelled: true } }),
-				expected: { type: "branch", data: { text: "", cancelled: true } },
+				expected: { type: "branch", data: { text: "", images: [], cancelled: true } },
 			},
 		];
 

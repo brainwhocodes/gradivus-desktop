@@ -35,11 +35,13 @@
 		<span class="toast-icon" aria-hidden="true"><Icon size={16} /></span>
 	{/if}
 	{#if rich}
-		{#if title}<strong>{title}</strong>{/if}
-			<span>{message}</span>
+		<span class="toast-copy">
+			{#if title}<strong>{title}</strong>{/if}
+			<span class="toast-message">{message}</span>
 			{#if onaction}
 				<button type="button" class="toast-action" onclick={onaction}>{actionLabel ?? "Retry"}</button>
 			{/if}
+		</span>
 		{#if ondismiss}
 			<button type="button" aria-label={dismissLabel} onclick={ondismiss}><CloseCircle size={14} aria-hidden="true" /></button>
 		{/if}

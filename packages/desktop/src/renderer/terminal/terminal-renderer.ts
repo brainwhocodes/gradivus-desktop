@@ -1,8 +1,7 @@
 import type { DesktopTerminalTheme } from "../../shared/theme-palette";
 import { createGhosttyWebRenderer } from "./ghostty-web-renderer";
-import { createWtermRenderer } from "./wterm-renderer";
 
-export type TerminalRendererKind = "ghostty-web" | "wterm-dom";
+export type TerminalRendererKind = "ghostty-web";
 
 export interface TerminalRendererConfiguration {
 	fontSize: number;
@@ -33,17 +32,13 @@ export interface TerminalRenderer {
 	dispose(): void;
 }
 
-export function selectTerminalRenderer(platform: NodeJS.Platform): TerminalRendererKind {
-	return platform === "win32" ? "wterm-dom" : "ghostty-web";
+export function selectTerminalRenderer(_platform: NodeJS.Platform): TerminalRendererKind {
+	return "ghostty-web";
 }
 
 export async function createTerminalRenderer(
-	platform: NodeJS.Platform,
+	_platform: NodeJS.Platform,
 	options: CreateTerminalRendererOptions,
 ): Promise<TerminalRenderer> {
-	const kind = selectTerminalRenderer(platform);
-	if (kind === "wterm-dom") {
-		return createWtermRenderer(options);
-	}
 	return createGhosttyWebRenderer(options);
 }

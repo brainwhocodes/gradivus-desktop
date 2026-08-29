@@ -17,8 +17,10 @@
 - Added an OAuth account manager to Providers settings for choosing, adding, and removing stored accounts and configuring failover.
 - Added configured and active OAuth account routing details to interactive and headless `/usage` reports.
 - Added process uptime and memory metrics to RPC state so supervisors can monitor resident agent runtimes.
-- Added scoped Agent Hub RPC commands (`get_agent_hub`, transcript reads, messaging, kill, and revive) plus full `agent_hub_update` snapshots for retained subagents and bounded active progress.
+- Added scoped Agent Hub RPC commands (`get_agent_hub`, transcript reads, messaging, kill, revive, and clear) plus full `agent_hub_update` snapshots for retained subagents and bounded active progress.
+- Added selective queued follow-up promotion to steering through the `steer_queued` RPC command, preserving queued message companions and avoiding duplicate delivery.
 - Added a credential-safe RPC settings catalog covering expanded OMP defaults with truthful immediate and next-session apply timing.
+- Added selected image payloads to RPC branch responses so external hosts can preserve historical image prompts when branching and resending.
 
 ### Changed
 

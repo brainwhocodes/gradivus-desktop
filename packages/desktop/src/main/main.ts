@@ -644,10 +644,20 @@ function registerIpc(): void {
 		const { host: h } = await ensureServices();
 		return h.prompt(id, composition);
 	});
+	ipcMain.handle("gradivus:edit-message", async (event, id: unknown, timelineItemId: unknown, text: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.editMessage(id, timelineItemId, text);
+	});
 	ipcMain.handle("gradivus:steer", async (event, id: unknown, composition: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.steer(id, composition);
+	});
+	ipcMain.handle("gradivus:steer-queued", async (event, id: unknown, composition: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.steerQueued(id, composition);
 	});
 	ipcMain.handle("gradivus:queue", async (event, id: unknown, composition: unknown) => {
 		assertTrustedSender(event);
@@ -728,6 +738,11 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.agentHubKill(id, agentId);
+	});
+	ipcMain.handle("gradivus:agent-hub-clear", async (event, id: unknown, agentId: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.agentHubClear(id, agentId);
 	});
 	ipcMain.handle("gradivus:agent-hub-revive", async (event, id: unknown, agentId: unknown) => {
 		assertTrustedSender(event);

@@ -114,6 +114,7 @@
 	.turn-file-summary {
 		width: min(100%, 620px);
 		margin-top: 10px;
+		margin-inline: auto;
 		overflow: hidden;
 		border: 1px solid var(--line-soft);
 		border-radius: 10px;

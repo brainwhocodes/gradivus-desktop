@@ -118,6 +118,8 @@ class OptimisticChatHarness {
 	current: SessionViewModel;
 	draft = "";
 	optimisticPendingTurn = false;
+	pendingPromptText = "";
+	canceledPromptTexts = new Set<string>();
 	turnStartTime: number | null = null;
 	elapsedSeconds = 0;
 	errorMessage = "";
@@ -142,6 +144,7 @@ class OptimisticChatHarness {
 		const text = (typeof textInput === "string" ? textInput : this.draft).trim();
 		this.draft = "";
 		this.commandMenuDismissed = true;
+		this.pendingPromptText = text;
 		this.errorMessage = "";
 		this.optimisticPendingTurn = true;
 		this.turnStartTime = Date.now();
@@ -228,6 +231,9 @@ class OptimisticChatHarness {
 		}
 
 		if (event.type === "timeline" && event.item) {
+			if (event.item.kind === "user" && this.canceledPromptTexts.delete(event.item.text.trim())) {
+				return;
+			}
 			let baseTimeline = this.current.timeline;
 			if (!event.item.id.startsWith("opt-") && baseTimeline.some(candidate => candidate.id.startsWith("opt-ast-"))) {
 				const cleaned = baseTimeline.filter(candidate => !candidate.id.startsWith("opt-ast-"));
@@ -272,8 +278,21 @@ class OptimisticChatHarness {
 	abortTurn(): void {
 		this.optimisticPendingTurn = false;
 		this.turnStartTime = null;
+		if (this.pendingPromptText) {
+			this.canceledPromptTexts.add(this.pendingPromptText);
+			this.pendingPromptText = "";
+		}
 		if (this.current) {
-			this.current = { ...this.current, state: "ready" };
+			const timeline = this.current.timeline.filter(item => !item.id.startsWith("opt-"));
+			const removed = this.current.timeline.length - timeline.length;
+			const timelineTotal = Math.max(0, (this.current.timelineTotal ?? this.current.timeline.length) - removed);
+			this.current = {
+				...this.current,
+				state: "ready",
+				timeline,
+				timelineStart: Math.max(0, timelineTotal - timeline.length),
+				timelineTotal,
+			};
 		}
 	}
 
@@ -712,6 +731,26 @@ describe("Chat Progress Feedback", () => {
 			expect(harness.isRunning).toBe(false);
 			expect(harness.turnStartTime).toBeNull();
 			expect(harness.optimisticPendingTurn).toBe(false);
+		});
+		it("removes the optimistic prompt and ignores a late canonical user event after abort", async () => {
+			const harness = new OptimisticChatHarness(createMockSession({ state: "ready" }));
+			const prompt = "Do not add this canceled prompt";
+			await harness.sendPrimary(prompt);
+
+			harness.abortTurn();
+			harness.handleEvent({
+				sessionId: harness.current.record.id,
+				type: "timeline",
+				item: {
+					id: "canonical-canceled-user",
+					kind: "user",
+					text: prompt,
+					role: "user",
+				},
+			});
+
+			expect(harness.current.timeline.filter(item => item.kind === "user")).toHaveLength(0);
+			expect(harness.draft).toBe("");
 		});
 	});
 });

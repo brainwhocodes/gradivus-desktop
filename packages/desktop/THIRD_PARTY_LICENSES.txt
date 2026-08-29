@@ -26,9 +26,6 @@ ghostty-web 0.4.0
 Copyright (c) 2025 Coder
 MIT License: https://github.com/coder/ghostty-web/blob/v0.4.0/LICENSE
 
-@wterm/dom 0.3.4, @wterm/core 0.3.4, and @wterm/ghostty 0.3.4
-Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
-
 Font software is licensed under the SIL Open Font License 1.1.
 https://scripts.sil.org/OFL
 

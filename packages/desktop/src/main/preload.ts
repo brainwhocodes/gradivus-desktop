@@ -13,6 +13,7 @@ import type {
 	ChatTerminalViewState,
 	CreateBrowserInput,
 	CreateTerminalInput,
+	EditMessageResult,
 	ElementEditState,
 	FileDiffView,
 	GradivusApi,
@@ -150,6 +151,18 @@ function sessionName(value: unknown): string {
 function sessionId(value: unknown): string {
 	if (typeof value !== "string" || value.length < 8 || value.length > 100) throw new TypeError("invalid session id");
 	return value;
+}
+
+function timelineItemId(value: unknown): string {
+	const id = text(value, "timeline item id").trim();
+	if (id.length === 0) throw new RangeError("timeline item id cannot be empty");
+	return id;
+}
+
+function editedMessageText(value: unknown): string {
+	const edited = text(value, "edited text");
+	if (edited.trim().length === 0) throw new RangeError("edited text cannot be blank");
+	return edited;
 }
 
 function agentHubId(value: unknown): string {
@@ -394,8 +407,17 @@ const api: GradivusApi = {
 		) as Promise<void>,
 	prompt: (id, composition) =>
 		ipcRenderer.invoke("gradivus:prompt", sessionId(id), promptComposition(composition)) as Promise<string>,
+	editMessage: (id, itemId, editedText) =>
+		ipcRenderer.invoke(
+			"gradivus:edit-message",
+			sessionId(id),
+			timelineItemId(itemId),
+			editedMessageText(editedText),
+		) as Promise<EditMessageResult>,
 	steer: (id, composition) =>
 		ipcRenderer.invoke("gradivus:steer", sessionId(id), promptComposition(composition)) as Promise<void>,
+	steerQueued: (id, composition) =>
+		ipcRenderer.invoke("gradivus:steer-queued", sessionId(id), promptComposition(composition)) as Promise<void>,
 	queueFollowUp: (id, composition) =>
 		ipcRenderer.invoke("gradivus:queue", sessionId(id), promptComposition(composition)) as Promise<void>,
 	abort: id => ipcRenderer.invoke("gradivus:abort", sessionId(id)) as Promise<void>,
@@ -463,6 +485,8 @@ const api: GradivusApi = {
 		ipcRenderer.invoke("gradivus:agent-hub-kill", sessionId(id), agentHubId(agentId)) as Promise<void>,
 	agentHubRevive: (id, agentId) =>
 		ipcRenderer.invoke("gradivus:agent-hub-revive", sessionId(id), agentHubId(agentId)) as Promise<void>,
+	agentHubClear: (id, agentId) =>
+		ipcRenderer.invoke("gradivus:agent-hub-clear", sessionId(id), agentHubId(agentId)) as Promise<void>,
 	loadFileDiff: (id, target) =>
 		ipcRenderer.invoke("gradivus:file-diff", sessionId(id), text(target, "file diff path")) as Promise<FileDiffView>,
 	loadWorkspaceImage: (id, target, maxDimension) => {

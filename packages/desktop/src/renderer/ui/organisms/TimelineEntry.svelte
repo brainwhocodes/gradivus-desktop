@@ -1,6 +1,7 @@
 <script lang="ts">
   import CheckCircle from "@solar-icons/svelte/linear/check-circle";
   import DangerCircle from "@solar-icons/svelte/linear/danger-circle";
+  import Pen2 from "@solar-icons/svelte/linear/pen-2";
   import Stars from "@solar-icons/svelte/linear/stars";
   import type { SessionKind, TimelineImage, TimelineItem, TimelineToolActivity } from "../../../shared/contracts";
   import TimelinePresentation from "./TimelinePresentation.svelte";
@@ -13,7 +14,11 @@
   export let onReasoning: (item: TimelineItem) => void;
   export let onCopyText: (text: string) => Promise<void>;
   export let showToolDetails = true;
-  // Matches the desktop-host hydration cap for thinking records (dehydrateTimelineItem).
+  export let queued = false;
+  export let queuedSteering = false;
+  export let onSteer: () => void = () => undefined;
+  export let canEdit = false;
+  export let onEdit: (item: TimelineItem) => void = () => undefined;
   const REASONING_PREVIEW_LIMIT = 64 * 1024;
   function toolLabel(value: TimelineItem): string {
     return value.toolName === "generate_image" ? "Generate image" : value.toolName ?? value.text;
@@ -46,8 +51,11 @@
     const args = item.args;
     if (!args || typeof args !== "object") return [];
     const record = args as Record<string, unknown>;
+    const isEditTool = item.toolName === "edit" || item.toolActivity?.operation === "edit";
     const badges: Array<{ key: string; value: string }> = [];
-    const priorityKeys = ["path", "file", "pattern", "command", "query", "url", "action", "key", "signal", "name"];
+    const priorityKeys = isEditTool
+      ? ["path", "file"]
+      : ["path", "file", "pattern", "command", "query", "url", "action", "key", "signal", "name"];
 
     for (const key of priorityKeys) {
       if (key in record) {
@@ -58,7 +66,7 @@
       }
     }
 
-    if (badges.length === 0) {
+    if (!isEditTool && badges.length === 0) {
       for (const [k, v] of Object.entries(record)) {
         if (badges.length >= 2) break;
         if (v !== undefined && v !== null && typeof v !== "object") {
@@ -137,7 +145,7 @@
   $: toolArgBadges = item.kind === "tool" ? extractToolArgBadges(item) : [];
 </script>
 
-<article class="timeline-item item-{item.kind}" data-timeline-id={item.id} class:has-error={item.isError} class:is-running={item.status === "running"}>
+<article class="timeline-item item-{item.kind}" data-timeline-id={item.id} class:has-error={item.isError} class:is-running={item.status === "running"} class:is-queued={queued}>
   <div class="timeline-gutter"><span>{gutterLabel(item)}</span></div>
   <div class="timeline-body">
     {#if item.kind === "tool"}
@@ -223,13 +231,41 @@
       <div class="timeline-special-fallback" aria-label="Unhandled event"><div class="marker-row"><span class="marker-label">LOG</span><span>{item.text}</span></div>{#if item.detail && kind === "code"}<details class="technical-details"><summary>Technical details</summary><pre>{item.detail}</pre></details>{/if}</div>
     {:else}
       {#if item.text}
-        <MarkdownBody
-          value={item.text}
-          streaming={item.kind === "assistant" && item.status === "running"}
-          showResponseCopy={item.kind === "assistant" && item.status !== "running"}
-          onCopyText={item.kind === "assistant" ? onCopyText : undefined}
-          className="message-copy"
-        />
+        <div
+          class="message-row"
+          class:queued-message-row={queued}
+          class:editable-message-row={item.kind === "user" && canEdit && !queued}
+        >
+          <div class="message-row-copy">
+            <MarkdownBody
+              value={item.text}
+              streaming={item.kind === "assistant" && item.status === "running"}
+              showResponseCopy={item.kind === "assistant" && item.status !== "running"}
+              onCopyText={item.kind === "assistant" ? onCopyText : undefined}
+              className="message-copy"
+            />
+          </div>
+          {#if item.kind === "user" && canEdit && !queued}
+            <button
+              type="button"
+              class="message-edit-button"
+              data-timeline-item-id={item.id}
+              aria-label="Edit message"
+              title="Edit message"
+              onclick={() => onEdit(item)}
+            ><Pen2 size={13} aria-hidden="true" /><span>Edit</span></button>
+          {/if}
+          {#if queued}
+            <button
+              type="button"
+              class="queued-steer-button"
+              aria-label="Steer queued message"
+              title="Steer queued message"
+              disabled={queuedSteering}
+              onclick={onSteer}
+            >{queuedSteering ? "Steering…" : "Steer"}</button>
+          {/if}
+        </div>
         {#if item.kind === "assistant" && item.status === "running"}<span class="typing-cursor-blink" aria-hidden="true">▌</span>{/if}
       {/if}
       {#if item.kind === "assistant" && item.presentation?.type === "assistant-outcome"}

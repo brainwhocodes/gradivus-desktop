@@ -6,6 +6,7 @@
  * metadata.
  */
 
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
@@ -117,7 +118,7 @@ export type RpcSessionChangeCommand = Extract<
 export type RpcSessionChangeResult =
 	| { type: "new_session"; data: { cancelled: boolean } }
 	| { type: "switch_session"; data: { cancelled: boolean } }
-	| { type: "branch"; data: { text: string; cancelled: boolean } };
+	| { type: "branch"; data: { text: string; images: ImageContent[]; cancelled: boolean } };
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
@@ -498,7 +499,10 @@ export async function handleRpcSessionChange(
 		case "branch": {
 			const result = await session.branch(command.entryId);
 			if (!result.cancelled) subagentRegistry?.clear();
-			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
+			return {
+				type: "branch",
+				data: { text: result.selectedText, images: result.selectedImages, cancelled: result.cancelled },
+			};
 		}
 	}
 	throw new Error("Unsupported RPC session change command");
@@ -1184,6 +1188,13 @@ export async function runRpcMode(
 				return success(id, "steer");
 			}
 
+			case "steer_queued": {
+				if (!session.steerQueuedMessage(command.message)) {
+					throw new Error("Queued follow-up message was not found");
+				}
+				return success(id, "steer_queued");
+			}
+
 			case "follow_up": {
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
@@ -1405,6 +1416,14 @@ export async function runRpcMode(
 					return success(id, "agent_hub_revive", await agentHub.revive(command.agentId));
 				} catch (err) {
 					return error(id, "agent_hub_revive", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "agent_hub_clear": {
+				try {
+					return success(id, "agent_hub_clear", await agentHub.clear(command.agentId));
+				} catch (err) {
+					return error(id, "agent_hub_clear", err instanceof Error ? err.message : String(err));
 				}
 			}
 

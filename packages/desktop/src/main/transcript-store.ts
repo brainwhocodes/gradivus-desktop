@@ -9,6 +9,11 @@ import type {
 import { promptAttachmentDisplayText } from "./prompt-attachments";
 import { presentAssistantOutcome, presentEvent, presentMessage, stableMessageKey } from "./transcript-presentation";
 
+export interface BranchMessageCandidate {
+	entryId: string;
+	text: string;
+}
+
 export class TranscriptStore {
 	#items: TimelineItem[] = [];
 	#toolById = new Map<string, TimelineItem>();
@@ -38,6 +43,30 @@ export class TranscriptStore {
 	find(id: string): TimelineItem | undefined {
 		const item = this.#items.find(candidate => candidate.id === id);
 		return item ? { ...item } : undefined;
+	}
+
+	resolveBranchEntry(
+		timelineItemId: string,
+		candidates: readonly BranchMessageCandidate[],
+	): BranchMessageCandidate | undefined {
+		const selected = this.#items.find(item => item.id === timelineItemId);
+		if (selected?.role !== "user") return undefined;
+
+		let candidateIndex = 0;
+		for (const item of this.#items) {
+			if (item.role !== "user") continue;
+			while (
+				candidateIndex < candidates.length &&
+				promptAttachmentDisplayText(candidates[candidateIndex]?.text ?? "") !== item.text
+			) {
+				candidateIndex++;
+			}
+			const candidate = candidates[candidateIndex];
+			if (!candidate) return undefined;
+			if (item.id === timelineItemId) return candidate;
+			candidateIndex++;
+		}
+		return undefined;
 	}
 
 	setWriteDisposition(toolCallId: string, disposition: FileChangeDisposition): TimelineItem | undefined {
@@ -464,15 +493,11 @@ function extractToolActivity(
 		const files = extractFileChanges(toolName, args);
 		const paths = files?.slice(0, MAX_EDIT_DIFF_LINES).map(file => file.path) ?? extractLocalPaths(args.paths);
 		if (paths.length === 0) return undefined;
-		const source =
-			typeof args.input === "string"
-				? args.input
-				: typeof args.patch === "string"
-					? args.patch
-					: typeof args.diff === "string"
-						? args.diff
-						: "";
-		return { operation: "edit", paths, diff: boundedLines(source, MAX_EDIT_DIFF_LINES) };
+		return {
+			operation: "edit",
+			paths,
+			diff: boundedLines(editResultDiff(result), MAX_EDIT_DIFF_LINES),
+		};
 	}
 	if (toolName === "hub" && isRecord(args)) {
 		const operationName = boundedScalar(args.op, 64);
@@ -501,6 +526,23 @@ function readPreviewText(value: unknown): string {
 		return value.displayContent.text;
 	if (typeof value.text === "string") return value.text;
 	return extractText(value.content);
+}
+
+function editResultDiff(value: unknown): string {
+	if (!isRecord(value) || !isRecord(value.details)) return "";
+	const { details } = value;
+	if (typeof details.diff === "string" && details.diff.trim()) return details.diff;
+	if (!Array.isArray(details.perFileResults)) return "";
+
+	const diffs: string[] = [];
+	const seen = new Set<string>();
+	for (const perFileResult of details.perFileResults) {
+		if (!isRecord(perFileResult) || typeof perFileResult.diff !== "string" || !perFileResult.diff.trim()) continue;
+		if (seen.has(perFileResult.diff)) continue;
+		seen.add(perFileResult.diff);
+		diffs.push(perFileResult.diff);
+	}
+	return diffs.join("\n");
 }
 
 function boundedLines(value: string, maxLines: number): string[] {

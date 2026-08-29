@@ -529,6 +529,150 @@
 	max-width: var(--chat-message-width);
 }
 
+.message-row {
+	min-width: 0;
+}
+
+.editable-message-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: start;
+	gap: var(--space-2);
+	max-width: var(--chat-message-width);
+}
+
+.editable-message-row .message-copy {
+	max-width: none;
+}
+
+.message-row-copy {
+	min-width: 0;
+}
+
+.message-edit-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-1);
+	min-height: calc(var(--control-height) - var(--space-2));
+	padding: 0 var(--space-2);
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	color: var(--foreground-muted);
+	background: transparent;
+	font: inherit;
+	font-weight: 650;
+	line-height: 1;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.message-edit-button:hover {
+	border-color: var(--line-soft);
+	color: var(--foreground-strong);
+	background: var(--shell-hover);
+}
+
+.message-edit-button:focus-visible {
+	border-color: var(--accent-boundary);
+	color: var(--selection-foreground);
+	background: var(--selection-surface);
+}
+
+.message-edit-form {
+	display: flex;
+	max-width: var(--chat-message-width);
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.message-edit-input {
+	width: 100%;
+	min-height: calc(var(--control-height) + var(--control-height) + var(--control-height));
+	resize: vertical;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-medium);
+	padding: var(--space-2) var(--space-3);
+	color: var(--foreground);
+	background: var(--shell-raised);
+	line-height: 1.5;
+	caret-color: var(--accent);
+}
+
+.message-edit-input:hover:not(:disabled) {
+	border-color: var(--line-soft);
+}
+
+.message-edit-input:focus-visible {
+	border-color: var(--accent-boundary);
+}
+
+.message-edit-input:disabled {
+	background: var(--shell);
+}
+
+.message-edit-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--space-2);
+}
+
+.message-edit-actions .primary-button,
+.message-edit-actions .secondary-button {
+	height: calc(var(--control-height) - var(--space-1));
+	min-height: calc(var(--control-height) - var(--space-1));
+	padding-inline: var(--space-3);
+}
+
+.queued-message-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: start;
+	gap: 12px;
+	max-width: var(--chat-message-width);
+	padding: 10px 12px;
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-small);
+	background: var(--shell-raised);
+}
+
+.queued-message-row .message-copy {
+	max-width: none;
+}
+
+.queued-steer-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 28px;
+	padding: 4px 9px;
+	border: 1px solid var(--accent-boundary);
+	border-radius: var(--radius-small);
+	color: var(--accent-foreground);
+	background: var(--accent);
+	font: 650 11px/1 var(--font-ui);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.queued-steer-button:hover:not(:disabled) {
+	background: var(--accent-hover);
+}
+
+.queued-steer-button:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+	box-shadow: 0 0 0 3px var(--focus-ring-contrast);
+}
+
+.queued-steer-button:disabled {
+	color: var(--foreground-disabled);
+	background: var(--shell);
+	border-color: var(--line-soft);
+	cursor: wait;
+}
+
 .message-copy p,
 .reasoning-copy p {
 	margin: 0 0 10px;
@@ -1940,103 +2084,6 @@
 	width: 100%;
 }
 
-
-.chat-terminal-canvas.wterm {
-	padding: 0;
-	border-radius: 0;
-	box-shadow: none;
-	background: var(--term-bg);
-	width: 100%;
-	height: 100%;
-	flex: 1;
-	min-height: 0;
-	box-sizing: border-box;
-
-	&::selection,
-	*::selection {
-		background: var(--term-selection-bg, rgba(86, 156, 214, 0.3));
-		color: var(--term-selection-fg, inherit);
-	}
-
-	&[data-terminal-cursor-style="bar"] {
-		.term-cursor {
-			outline: none;
-			box-shadow: inset 2px 0 0 0 var(--term-cursor);
-			background: transparent;
-			color: inherit;
-		}
-
-		&.focused .term-cursor {
-			outline: none;
-			box-shadow: inset 2px 0 0 0 var(--term-cursor);
-			background: transparent;
-			color: inherit;
-		}
-
-		&.focused.cursor-blink .term-cursor {
-			animation: wterm-cursor-blink-bar 1s step-end infinite;
-		}
-	}
-
-	&[data-terminal-cursor-style="underline"] {
-		.term-cursor {
-			outline: none;
-			box-shadow: inset 0 -2px 0 0 var(--term-cursor);
-			background: transparent;
-			color: inherit;
-		}
-
-		&.focused .term-cursor {
-			outline: none;
-			box-shadow: inset 0 -2px 0 0 var(--term-cursor);
-			background: transparent;
-			color: inherit;
-		}
-
-		&.focused.cursor-blink .term-cursor {
-			animation: wterm-cursor-blink-underline 1s step-end infinite;
-		}
-	}
-
-	&[data-terminal-cursor-style="block"],
-	&:not([data-terminal-cursor-style]) {
-		&.focused.cursor-blink .term-cursor {
-			animation: wterm-cursor-blink-block 1s step-end infinite;
-		}
-	}
-}
-
-@keyframes wterm-cursor-blink-bar {
-	0%,
-	100% {
-		box-shadow: inset 2px 0 0 0 var(--term-cursor);
-	}
-	50% {
-		box-shadow: none;
-	}
-}
-
-@keyframes wterm-cursor-blink-underline {
-	0%,
-	100% {
-		box-shadow: inset 0 -2px 0 0 var(--term-cursor);
-	}
-	50% {
-		box-shadow: none;
-	}
-}
-
-@keyframes wterm-cursor-blink-block {
-	0%,
-	100% {
-		background: var(--term-cursor);
-		color: var(--term-bg);
-	}
-	50% {
-		background: transparent;
-		color: inherit;
-	}
-}
 .composer-wrap {
 	position: relative;
 	flex: 0 0 auto;
@@ -2824,9 +2871,9 @@
 	bottom: 18px;
 	z-index: var(--z-toast);
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	gap: 9px;
-	max-width: min(430px, calc(100vw - 36px));
+	width: min(430px, calc(100vw - 36px));
 	border: 1px solid var(--line);
 	border-radius: var(--radius-medium);
 	padding: 10px 12px;
@@ -2870,6 +2917,33 @@
 
 .notice-toast {
 	min-width: 0;
+}
+
+.toast-copy {
+	display: grid;
+	min-width: 0;
+	flex: 1 1 auto;
+	gap: 3px;
+	overflow-wrap: anywhere;
+}
+
+.toast-copy strong,
+.toast-copy .toast-message {
+	min-width: 0;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.toast-copy .toast-action {
+	justify-self: start;
+	max-width: 100%;
+	white-space: normal;
+	text-align: left;
+}
+
+.toast > button:last-child {
+	flex: 0 0 auto;
+	align-self: flex-start;
 }
 
 .toast-icon {
@@ -3312,6 +3386,8 @@
 	.jump-to-latest-pill,
 	.line-added,
 	.line-removed,
+	.message-edit-button,
+	.message-edit-input,
 	.line-hunk {
 		border-color: CanvasText;
 	}
