@@ -183,7 +183,7 @@ function systemChromiumCandidates(
 				"/usr/bin/ungoogled-chromium",
 				"/usr/bin/ungoogled-chromium-browser",
 				`/var/lib/flatpak/exports/bin/${UNGOOGLED_CHROMIUM_FLATPAK_ID}`,
-				path.join(home, ".local/share/flatpak/exports/bin", UNGOOGLED_CHROMIUM_FLATPAK_ID),
+				path.posix.join(home, ".local/share/flatpak/exports/bin", UNGOOGLED_CHROMIUM_FLATPAK_ID),
 			);
 			break;
 		}

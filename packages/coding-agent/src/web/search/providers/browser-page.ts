@@ -1,5 +1,5 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { getProjectDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Browser, Page } from "playwright-core";
 import { applyStealthPatches, applyViewport, BROWSER_PROTOCOL_TIMEOUT_MS } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
@@ -94,7 +94,7 @@ async function browseHtmlPage(
 		acquireBrowser(
 			{ kind: "headless", headless: true },
 			{
-				cwd: process.cwd(),
+				cwd: getProjectDir(),
 				signal,
 			},
 		),

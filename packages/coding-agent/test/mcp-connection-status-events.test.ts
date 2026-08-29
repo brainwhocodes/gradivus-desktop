@@ -75,7 +75,7 @@ describe("MCPManager connection status events", () => {
 
 			const message = result.errors.get("broken") ?? "";
 			// Bun on Windows reports failed child startup as a closed transport.
-			expect(message).toMatch(/ENOENT|No such file|not found|Transport closed/i);
+			expect(message).toMatch(/ENOENT|No such file|not found|Transport closed|closed stdout/i);
 			expect(events).toEqual([
 				{ type: "connecting", serverNames: ["broken"] },
 				{

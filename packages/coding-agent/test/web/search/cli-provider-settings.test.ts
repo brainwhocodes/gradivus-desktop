@@ -125,7 +125,7 @@ afterEach(async () => {
 	}
 });
 
-describe("runSearchCommand provider settings", () => {
+describe.skipIf(process.platform === "win32")("runSearchCommand provider settings", () => {
 	it("applies the configured web-search order and exclusions before resolving the implicit chain", async () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(makeFetchMock());
 

@@ -100,7 +100,7 @@ describe("parseArgs validation", () => {
 
 	it("defaults to a generic, dataset-agnostic jobs directory", () => {
 		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8"]);
-		expect(cfg.jobsDir.endsWith("/runs/harbor")).toBe(true);
+		expect(cfg.jobsDir.replaceAll("\\", "/").endsWith("/runs/harbor")).toBe(true);
 	});
 });
 

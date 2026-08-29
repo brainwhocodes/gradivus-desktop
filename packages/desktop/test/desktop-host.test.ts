@@ -24,6 +24,9 @@ const processHarness = vi.hoisted(() => ({
 	requestCalls: [] as Array<Record<string, unknown>>,
 	messages: [] as unknown[],
 	branchedMessages: [] as unknown[],
+	subagentViews: [] as unknown[],
+	subagentMessages: { fromByte: 0, nextByte: 0, reset: false, entries: [], messages: [] } as Record<string, unknown>,
+	agentHubAgents: [] as unknown[],
 	branchMessages: [] as Array<{ entryId: string; text: string }>,
 	branchData: { text: "", images: [] as unknown[], cancelled: false },
 	statePatch: {} as Record<string, unknown>,
@@ -34,6 +37,7 @@ const processHarness = vi.hoisted(() => ({
 }));
 
 vi.mock("electron", () => ({
+	app: { isPackaged: false, getPath: vi.fn(() => os.tmpdir()) },
 	dialog: { showOpenDialog: vi.fn() },
 	shell: { openExternal: vi.fn(), openPath: vi.fn(), showItemInFolder: vi.fn() },
 }));
@@ -184,7 +188,23 @@ vi.mock("../src/main/rpc-process", () => ({
 								},
 							};
 						case "get_subagents":
-							return { success: true, command: "get_subagents", data: { subagents: [] } };
+							return {
+								success: true,
+								command: "get_subagents",
+								data: { subagents: processHarness.subagentViews },
+							};
+						case "get_subagent_messages":
+							return {
+								success: true,
+								command: "get_subagent_messages",
+								data: processHarness.subagentMessages,
+							};
+						case "get_agent_hub":
+							return {
+								success: true,
+								command: "get_agent_hub",
+								data: { agents: processHarness.agentHubAgents },
+							};
 						default:
 							return { success: true, command: request.type, data: {} };
 					}
@@ -257,6 +277,9 @@ afterEach(async () => {
 	processHarness.failNextPrompt = false;
 	processHarness.messages = [];
 	processHarness.branchedMessages = [];
+	processHarness.subagentViews = [];
+	processHarness.subagentMessages = { fromByte: 0, nextByte: 0, reset: false, entries: [], messages: [] };
+	processHarness.agentHubAgents = [];
 	processHarness.branchMessages = [];
 	processHarness.branchData = { text: "", images: [], cancelled: false };
 	processHarness.statePatch = {};
@@ -677,6 +700,110 @@ describe("DesktopHost runtime supervision", () => {
 		});
 		expect(result.requestId).toBeUndefined();
 		expect(processHarness.promptCalls).toHaveLength(1);
+	});
+
+	it("preserves nested subagents across snapshots, events, and transcript retrieval", async () => {
+		const now = Date.now();
+		processHarness.subagentViews = [
+			{ id: "parent", agent: "planner", status: "running", task: "Plan work" },
+			{ id: "child", agent: "builder", status: "running", task: "Build feature", parentToolCallId: "parent" },
+			{
+				id: "grandchild",
+				agent: "reviewer",
+				status: "running",
+				task: "Review feature",
+				parentToolCallId: "child",
+			},
+			{ id: "parked", agent: "idle", status: "parked", task: "Paused work" },
+		];
+		processHarness.agentHubAgents = [
+			{
+				id: "parent",
+				displayName: "Planner",
+				kind: "sub",
+				status: "running",
+				createdAt: now,
+				lastActivity: now,
+				transcriptAvailable: true,
+				readOnly: false,
+			},
+			{
+				id: "child",
+				displayName: "Builder",
+				kind: "sub",
+				parentId: "parent",
+				status: "running",
+				createdAt: now,
+				lastActivity: now,
+				transcriptAvailable: true,
+				readOnly: false,
+			},
+			{
+				id: "grandchild",
+				displayName: "Reviewer",
+				kind: "sub",
+				parentId: "child",
+				status: "running",
+				createdAt: now,
+				lastActivity: now,
+				transcriptAvailable: true,
+				readOnly: true,
+			},
+			{
+				id: "parked",
+				displayName: "Paused",
+				kind: "sub",
+				status: "parked",
+				createdAt: now,
+				lastActivity: now,
+				transcriptAvailable: true,
+				readOnly: false,
+			},
+		];
+		processHarness.subagentMessages = {
+			fromByte: 0,
+			nextByte: 18,
+			reset: false,
+			entries: [],
+			messages: [{ role: "assistant", content: "nested result" }],
+		};
+		const host = await createHost(["one"]);
+		const send = vi.fn();
+		host.setWindow({ webContents: { send } } as never);
+
+		const snapshot = await host.openSession("one");
+		expect(snapshot.subagents.map(agent => [agent.id, agent.parentToolCallId, agent.status])).toEqual([
+			["parent", undefined, "running"],
+			["child", "parent", "running"],
+			["grandchild", "child", "running"],
+			["parked", undefined, "parked"],
+		]);
+		expect(snapshot.agentHub?.agents.map(agent => [agent.id, agent.parentId, agent.status])).toEqual([
+			["parent", undefined, "running"],
+			["child", "parent", "running"],
+			["grandchild", "child", "running"],
+			["parked", undefined, "parked"],
+		]);
+		expect(snapshot.agentHub?.agents.filter(agent => agent.status === "running")).toHaveLength(3);
+
+		await expect(host.getSubagentMessages("one", "grandchild", 4)).resolves.toEqual(processHarness.subagentMessages);
+
+		send.mockClear();
+		processHarness.instances[0]!.emitEvent({
+			type: "subagent_progress",
+			payload: { id: "grandchild", status: "running", progress: { currentTool: "read" } },
+		});
+		await vi.waitFor(() =>
+			expect(send.mock.calls.some(([, event]) => (event as GradivusEvent).type === "subagents")).toBe(true),
+		);
+		const event = send.mock.calls.find(([, value]) => (value as GradivusEvent).type === "subagents")?.[1] as Extract<
+			GradivusEvent,
+			{ type: "subagents" }
+		>;
+		expect(event.subagents?.find(agent => agent.id === "grandchild")).toMatchObject({
+			parentToolCallId: "child",
+			progress: { currentTool: "read" },
+		});
 	});
 
 	it("resolves only active same-workspace agent sessions for selection", async () => {
