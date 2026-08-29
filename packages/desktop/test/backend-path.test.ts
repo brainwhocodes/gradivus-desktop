@@ -8,65 +8,68 @@ vi.mock("electron", () => ({
 import { resolveOmpExecutablePath } from "../src/main/backend-path";
 
 describe("OMP executable resolution", () => {
+	const repo = path.resolve("/repo");
+	const desktopDir = path.join(repo, "packages/desktop");
+	const ompBinary = path.resolve(repo, "packages/coding-agent/dist/omp");
+
 	it("resolves repository-root launches to the coding-agent binary", () => {
-		const existing = new Set(["/repo/packages/coding-agent/dist/omp"]);
 		const resolved = resolveOmpExecutablePath({
-			cwd: "/repo",
-			module: "/repo/packages/desktop/src/main",
-			resources: "/repo/packages/desktop/resources",
+			cwd: repo,
+			module: path.join(desktopDir, "src/main"),
+			resources: path.join(desktopDir, "resources"),
 			platform: "linux",
-			exists: candidate => existing.has(candidate),
+			exists: candidate => candidate === ompBinary,
 		});
 
-		expect(resolved).toBe("/repo/packages/coding-agent/dist/omp");
+		expect(resolved).toBe(ompBinary);
 	});
 
 	it("resolves desktop-package launches without nesting packages/desktop", () => {
-		const existing = new Set(["/repo/packages/coding-agent/dist/omp"]);
 		const resolved = resolveOmpExecutablePath({
-			cwd: "/repo/packages/desktop",
-			module: "/repo/packages/desktop/src/main",
-			resources: "/repo/packages/desktop/resources",
+			cwd: desktopDir,
+			module: path.join(desktopDir, "src/main"),
+			resources: path.join(desktopDir, "resources"),
 			platform: "linux",
-			exists: candidate => existing.has(candidate),
+			exists: candidate => candidate === ompBinary,
 		});
 
-		expect(resolved).toBe("/repo/packages/coding-agent/dist/omp");
+		expect(resolved).toBe(ompBinary);
 	});
 
 	it("reports every attempted development path when the binary is missing", () => {
 		const result = () =>
 			resolveOmpExecutablePath({
-				cwd: "/repo/packages/desktop",
-				module: "/repo/packages/desktop/src/main",
-				resources: "/repo/packages/desktop/resources",
+				cwd: desktopDir,
+				module: path.join(desktopDir, "src/main"),
+				resources: path.join(desktopDir, "resources"),
 				platform: "linux",
 				exists: () => false,
 			});
 
 		expect(result).toThrowError(
 			expect.objectContaining({
-				message: expect.stringContaining("/repo/packages/desktop/packages/coding-agent/dist/omp"),
+				message: expect.stringContaining(path.resolve(desktopDir, "packages/coding-agent/dist/omp")),
 			}),
 		);
 		expect(result).toThrowError(
 			expect.objectContaining({
-				message: expect.stringContaining("/repo/packages/coding-agent/dist/omp"),
+				message: expect.stringContaining(ompBinary),
 			}),
 		);
 	});
 
 	it("uses only the packaged resources path", () => {
+		const resources = path.resolve("/Applications/Gradivus.app/Contents/Resources");
 		const resolved = resolveOmpExecutablePath({
 			cwd: "/repo/packages/desktop",
 			module: "/repo/packages/desktop/src/main",
-			resources: "/Applications/Gradivus.app/Contents/Resources",
+			resources,
 			platform: "linux",
 			isPackaged: true,
 			exists: () => false,
 		});
 
-		expect(resolved).toBe("/Applications/Gradivus.app/Contents/Resources/omp");
+		expect(resolved).toBe(path.join(resources, "omp"));
 	});
 
 	it("selects the Windows executable name from the supplied platform", () => {

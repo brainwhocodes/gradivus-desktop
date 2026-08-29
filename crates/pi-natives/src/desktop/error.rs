@@ -50,6 +50,7 @@ impl DesktopError {
 		Self { code, message: message.into() }
 	}
 
+	#[expect(dead_code, reason = "symmetric error-constructor API kept for all codes")]
 	pub(crate) fn permission_denied(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::PermissionDenied, message)
 	}

@@ -545,7 +545,9 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 		if (dotIdx <= 0) continue;
 		const primaryName = trimmed.slice(0, dotIdx);
 		if (!primaryName.endsWith(".jsonl")) continue;
-		const primaryPath = path.join(sessionDir, primaryName);
+		// Preserve the storage's separator style. MemorySessionStorage uses
+		// logical slash paths even when the host platform is Windows.
+		const primaryPath = `${backup.slice(0, backup.length - name.length)}${primaryName}`;
 		let mtimeMs = 0;
 		try {
 			mtimeMs = storage.statSync(backup).mtimeMs;

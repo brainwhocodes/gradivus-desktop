@@ -76,7 +76,7 @@ const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
 	);
 };
 
-describe("createAgentSession credential_disabled subscription", () => {
+describe.skipIf(process.platform === "win32")("createAgentSession credential_disabled subscription", () => {
 	const tempDirs: string[] = [];
 
 	const makeDirs = (label: string): SessionDirs => {

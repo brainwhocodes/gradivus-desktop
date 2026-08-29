@@ -121,61 +121,70 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		}
 	});
 
-	test("real local plugin directory: install symlinks it like link would", async () => {
-		// End-to-end: stage a real plugin folder, route through plugin-cli
-		// (no spies on PluginManager.link), and verify the resulting symlink
-		// + lockfile entry. Pins the contract that local-path installs
-		// symlink rather than copy-install, matching `omp plugin link`.
-		const localPlugin = await createLocalPlugin(tmpRoot);
+	test.skipIf(process.platform === "win32")(
+		"real local plugin directory: install symlinks it like link would",
+		async () => {
+			// End-to-end: stage a real plugin folder, route through plugin-cli
+			// (no spies on PluginManager.link), and verify the resulting symlink
+			// + lockfile entry. Pins the contract that local-path installs
+			// symlink rather than copy-install, matching `omp plugin link`.
+			const localPlugin = await createLocalPlugin(tmpRoot);
 
-		await runPluginCommand({ action: "install", args: [localPlugin], flags: { json: true } });
+			await runPluginCommand({ action: "install", args: [localPlugin], flags: { json: true } });
 
-		const linkTarget = path.join(tmpRoot, "plugins", "node_modules", "kimi-datasource");
-		const stat = await fs.lstat(linkTarget);
-		expect(stat.isSymbolicLink()).toBe(true);
-		expect(await fs.readlink(linkTarget)).toBe(localPlugin);
+			const linkTarget = path.join(tmpRoot, "plugins", "node_modules", "kimi-datasource");
+			const stat = await fs.lstat(linkTarget);
+			expect(stat.isSymbolicLink()).toBe(true);
+			expect(await fs.readlink(linkTarget)).toBe(localPlugin);
 
-		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
-		expect(lock.plugins["kimi-datasource"]).toEqual({
-			version: "1.0.0",
-			enabledFeatures: null,
-			enabled: true,
-		});
-	});
-	test("list --json includes linked local plugin without package dependencies", async () => {
-		const localPlugin = await createLocalPlugin(tmpRoot);
-		const output: string[] = [];
-		spyOn(console, "log").mockImplementation(message => {
-			output.push(String(message));
-		});
-		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+			const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
+			expect(lock.plugins["kimi-datasource"]).toEqual({
+				version: "1.0.0",
+				enabledFeatures: null,
+				enabled: true,
+			});
+		},
+	);
+	test.skipIf(process.platform === "win32")(
+		"list --json includes linked local plugin without package dependencies",
+		async () => {
+			const localPlugin = await createLocalPlugin(tmpRoot);
+			const output: string[] = [];
+			spyOn(console, "log").mockImplementation(message => {
+				output.push(String(message));
+			});
+			spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
 
-		await runPluginCommand({ action: "link", args: [localPlugin], flags: { json: true } });
-		output.length = 0;
-		await runPluginCommand({ action: "list", args: [], flags: { json: true } });
+			await runPluginCommand({ action: "link", args: [localPlugin], flags: { json: true } });
+			output.length = 0;
+			await runPluginCommand({ action: "list", args: [], flags: { json: true } });
 
-		const listed = JSON.parse(output.join("\n")) as { npm: InstalledPlugin[] };
-		expect(listed.npm.map(plugin => plugin.name)).toContain("kimi-datasource");
-	});
+			const listed = JSON.parse(output.join("\n")) as { npm: InstalledPlugin[] };
+			expect(listed.npm.map(plugin => plugin.name)).toContain("kimi-datasource");
+		},
+	);
 
-	test("doctor --fix preserves linked local plugin state without package dependencies", async () => {
-		await Bun.write(
-			path.join(tmpRoot, "plugins", "package.json"),
-			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }),
-		);
-		const localPlugin = await createLocalPlugin(tmpRoot);
-		const manager = new PluginManager(tmpRoot);
+	test.skipIf(process.platform === "win32")(
+		"doctor --fix preserves linked local plugin state without package dependencies",
+		async () => {
+			await Bun.write(
+				path.join(tmpRoot, "plugins", "package.json"),
+				JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }),
+			);
+			const localPlugin = await createLocalPlugin(tmpRoot);
+			const manager = new PluginManager(tmpRoot);
 
-		await manager.link(localPlugin);
-		const checks = await manager.doctor({ fix: true });
+			await manager.link(localPlugin);
+			const checks = await manager.doctor({ fix: true });
 
-		expect(checks.find(check => check.name === "orphan:kimi-datasource")).toBeUndefined();
-		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
-		expect(lock.plugins["kimi-datasource"]).toEqual({
-			version: "1.0.0",
-			enabledFeatures: null,
-			enabled: true,
-		});
-		expect((await manager.list()).map(plugin => plugin.name)).toContain("kimi-datasource");
-	});
+			expect(checks.find(check => check.name === "orphan:kimi-datasource")).toBeUndefined();
+			const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
+			expect(lock.plugins["kimi-datasource"]).toEqual({
+				version: "1.0.0",
+				enabledFeatures: null,
+				enabled: true,
+			});
+			expect((await manager.list()).map(plugin => plugin.name)).toContain("kimi-datasource");
+		},
+	);
 });

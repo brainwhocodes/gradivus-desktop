@@ -54,7 +54,7 @@ describe("PromptAttachmentStore", () => {
 		const stagedPath = resolved.text.match(/@"([^"]+)"/)?.[1];
 
 		expect(stagedPath).toContain("gradivus-prompt-");
-		await expect(fs.access(stagedPath!)).resolves.toBeUndefined();
+		await fs.access(stagedPath!);
 		await store.release([view!.id]);
 		await expect(fs.access(stagedPath!)).rejects.toMatchObject({ code: "ENOENT" });
 		await expect(
@@ -71,7 +71,7 @@ describe("PromptAttachmentStore", () => {
 		);
 		const stagedPath = resolved.text.match(/@"([^"]+)"/)?.[1];
 		const tempDir = path.dirname(stagedPath!);
-		await expect(fs.access(tempDir)).resolves.toBeUndefined();
+		await fs.access(tempDir);
 
 		await store.release([view!.id]);
 		await expect(fs.access(tempDir)).rejects.toMatchObject({ code: "ENOENT" });

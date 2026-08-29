@@ -101,7 +101,6 @@ impl Process {
 		self.inner.identity_token()
 	}
 
-
 	/// Parent process id for this process, when available.
 	#[napi(getter)]
 	pub fn ppid(&self) -> Option<i32> {

@@ -126,7 +126,9 @@ describe("AgentSession queued steer delivery", () => {
 		const content: unknown = message.content;
 		if (typeof content === "string") return content;
 		if (!Array.isArray(content)) return "";
-		const text = content.find(part => typeof part === "object" && part !== null && "type" in part && part.type === "text");
+		const text = content.find(
+			part => typeof part === "object" && part !== null && "type" in part && part.type === "text",
+		);
 		return text && typeof text === "object" && "text" in text && typeof text.text === "string" ? text.text : "";
 	}
 
@@ -336,10 +338,11 @@ describe("AgentSession queued steer delivery", () => {
 			expect(session.steerQueuedMessage("promote this")).toBe(true);
 			expect(session.steerQueuedMessage("missing")).toBe(false);
 			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
-			expect(session.agent.peekSteeringQueue().map(message => message.role === "custom" ? message.customType : message.role)).toEqual([
-				"ultrathink-notice",
-				"user",
-			]);
+			expect(
+				session.agent
+					.peekSteeringQueue()
+					.map(message => (message.role === "custom" ? message.customType : message.role)),
+			).toEqual(["ultrathink-notice", "user"]);
 		});
 
 		await session.prompt("hello");
@@ -347,5 +350,4 @@ describe("AgentSession queued steer delivery", () => {
 		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
 		expect(session.agent.state.messages.filter(message => queueText(message) === "promote this")).toHaveLength(1);
 	});
-
 });

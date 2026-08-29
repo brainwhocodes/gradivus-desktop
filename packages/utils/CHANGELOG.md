@@ -14,6 +14,11 @@
 ### Fixed
 
 - Fixed `TempDir.create()` and `TempDir.createSync()` with nested custom prefixes by creating missing parent directories before allocation.
+## [17.3.8] - 2026-08-19
+
+### Added
+
+- Exported `BINARY_SNIFF_BYTES`, the header window `isProbablyBinary` sniffs, so a caller holding the whole file in memory can classify the identical prefix through `isProbablyBinaryHeader` instead of reopening the file.
 
 ## [17.3.5] - 2026-08-16
 

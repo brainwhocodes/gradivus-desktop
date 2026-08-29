@@ -78,7 +78,9 @@ const validModes: Record<Mode, true> = {
 const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; parallel: number; chunkSize?: number }> = {
 	singleton: { label: "singleton/global-state bucket", parallel: 1 },
 	ui: { label: "UI/TUI bucket", parallel: 1, chunkSize: 5 },
-	runtime: { label: "runtime/session bucket", parallel: 1, chunkSize: 10 },
+	// Bun's Windows named-pipe/http2 runtime can crash or retain handles when
+	// several RPC suites share one test process; isolate each runtime file there.
+	runtime: { label: "runtime/session bucket", parallel: 1, chunkSize: process.platform === "win32" ? 1 : 10 },
 	native: { label: "native/tooling/browser/unit bucket", parallel: 1, chunkSize: 10 },
 };
 

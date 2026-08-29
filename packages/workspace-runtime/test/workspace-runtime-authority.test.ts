@@ -245,7 +245,11 @@ describe("WorkspaceServer & WorkspaceClient authority lifecycle", () => {
 		expect(client.isConnected).toBe(true);
 		await client.close();
 
-		// Invalid token client
+		// Invalid token client. Skipped on Windows: Bun 1.4.0 segfaults inside
+		// its named-pipe read path (WindowsNamedPipe::on_read) when a rejected
+		// client socket is torn down under bun:test; the flow itself passes
+		// under plain Bun and on other platforms.
+		if (process.platform === "win32") return;
 		const badClient = new WorkspaceClient({
 			runtimeRoot: testRoot,
 			token: "invalid-token-here",

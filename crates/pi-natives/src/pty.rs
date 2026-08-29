@@ -335,10 +335,18 @@ fn run_pty_sync(
 			cmd
 		},
 	};
-	if let Some(cwd) = config.cwd.as_ref() {
-		cmd.cwd(cwd);
-	}
+	// ConPTY on Windows produces no output when the child is spawned without an
+	// explicit working directory; default to the current directory.
+	let cwd = match config.cwd {
+		Some(dir) => dir,
+		None => std::env::current_dir()
+			.map_or_else(|_| ".".to_string(), |dir| dir.to_string_lossy().to_string()),
+	};
+	cmd.cwd(&cwd);
 	if let Some(env) = config.env.as_ref() {
+		// An explicit env map is exact: drop the inherited base environment so
+		// reserved variables from the parent process cannot leak through.
+		cmd.env_clear();
 		for (key, value) in env {
 			cmd.env(key, value);
 		}

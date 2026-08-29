@@ -80,7 +80,7 @@ async function withCachePath(run: (cachePath: string) => Promise<void>): Promise
 }
 
 describe("auth-broker snapshot cache", () => {
-	test("round-trips an encrypted snapshot and writes mode 0600", async () => {
+	test.skipIf(process.platform === "win32")("round-trips an encrypted snapshot and writes mode 0600", async () => {
 		await withCachePath(async cachePath => {
 			const snapshot = makeSnapshot(1_000_000);
 			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });

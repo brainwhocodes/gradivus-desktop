@@ -152,7 +152,9 @@ export class WorkspaceClient {
 					}
 					if (msg.type === "auth.error") {
 						clearTimeout(timer);
-						socket.destroy();
+						// Destroying re-entrantly from the socket read callback trips a
+						// Bun 1.4 Windows named-pipe free bug; defer to the next tick.
+						queueMicrotask(() => socket.end());
 						reject(new WorkspaceRuntimeError("unauthorized", `Authentication failed: ${String(msg.message)}`));
 						continue;
 					}

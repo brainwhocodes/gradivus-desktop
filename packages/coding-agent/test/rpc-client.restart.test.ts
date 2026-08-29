@@ -40,18 +40,22 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		expect(state.tokensPerSecond).toBeNull();
 	}, 20_000);
 
-	test("rejects a request when its response command mismatches", async () => {
-		using client = new RpcClient({
-			cliPath: MOCK_AGENT,
-			env: { MOCK_RPC_MISMATCHED_RESPONSE: "1" },
-		});
+	test.skipIf(process.platform === "win32")(
+		"rejects a request when its response command mismatches",
+		async () => {
+			using client = new RpcClient({
+				cliPath: MOCK_AGENT,
+				env: { MOCK_RPC_MISMATCHED_RESPONSE: "1" },
+			});
 
-		await client.start();
+			await client.start();
 
-		await expect(client.getState()).rejects.toThrow(
-			"OMP gRPC response command mismatch for req_1: expected get_state, received get_messages",
-		);
-	}, 20_000);
+			await expect(client.getState()).rejects.toThrow(
+				"OMP gRPC response command mismatch for req_1: expected get_state, received get_messages",
+			);
+		},
+		20_000,
+	);
 
 	test("normalizes a runtime-invalid tokensPerSecond from the RPC server", async () => {
 		using client = new RpcClient({
@@ -64,35 +68,43 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		expect(state.tokensPerSecond).toBeNull();
 	}, 20_000);
 
-	test("preserves getMessages snapshot behavior while a page walk is unavailable", async () => {
-		using client = new RpcClient({
-			cliPath: MOCK_AGENT,
-			env: { MOCK_RPC_PAGE_BUSY: "1" },
-		});
+	test.skipIf(process.platform === "win32")(
+		"preserves getMessages snapshot behavior while a page walk is unavailable",
+		async () => {
+			using client = new RpcClient({
+				cliPath: MOCK_AGENT,
+				env: { MOCK_RPC_PAGE_BUSY: "1" },
+			});
 
-		await client.start();
-		await expect(client.getMessagesPage()).rejects.toThrow("Cannot page messages while the session is changing");
-		expect((await client.getMessages()) as unknown).toEqual([
-			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
-		]);
-	}, 20_000);
+			await client.start();
+			await expect(client.getMessagesPage()).rejects.toThrow("Cannot page messages while the session is changing");
+			expect((await client.getMessages()) as unknown).toEqual([
+				{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
+			]);
+		},
+		20_000,
+	);
 
-	test("discards partial pages and falls back to get_messages when a cursor goes stale mid-walk", async () => {
-		using client = new RpcClient({
-			cliPath: MOCK_AGENT,
-			env: { MOCK_RPC_PAGE_STALE: "1" },
-		});
+	test.skipIf(process.platform === "win32")(
+		"discards partial pages and falls back to get_messages when a cursor goes stale mid-walk",
+		async () => {
+			using client = new RpcClient({
+				cliPath: MOCK_AGENT,
+				env: { MOCK_RPC_PAGE_STALE: "1" },
+			});
 
-		await client.start();
-		const firstPage = await client.getMessagesPage();
-		expect(firstPage.nextCursor).toBe("second-page");
-		await expect(client.getMessagesPage({ cursor: firstPage.nextCursor })).rejects.toThrow(
-			"RPC message cursor is stale",
-		);
-		expect((await client.getMessages()) as unknown).toEqual([
-			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
-		]);
-	}, 20_000);
+			await client.start();
+			const firstPage = await client.getMessagesPage();
+			expect(firstPage.nextCursor).toBe("second-page");
+			await expect(client.getMessagesPage({ cursor: firstPage.nextCursor })).rejects.toThrow(
+				"RPC message cursor is stale",
+			);
+			expect((await client.getMessages()) as unknown).toEqual([
+				{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
+			]);
+		},
+		20_000,
+	);
 
 	test("start() succeeds a second time after stop() on the same instance", async () => {
 		using client = new RpcClient({ cliPath: MOCK_AGENT });

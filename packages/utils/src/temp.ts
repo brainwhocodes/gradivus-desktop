@@ -11,13 +11,15 @@ export class TempDir {
 
 	static createSync(prefix?: string): TempDir {
 		const normalizedPrefix = normalizePrefix(prefix);
-		fs.mkdirSync(path.dirname(normalizedPrefix), { recursive: true });
+		const parent = path.dirname(normalizedPrefix);
+		if (parent !== ".") fs.mkdirSync(parent, { recursive: true });
 		return new TempDir(fs.mkdtempSync(normalizedPrefix));
 	}
 
 	static async create(prefix?: string): Promise<TempDir> {
 		const normalizedPrefix = normalizePrefix(prefix);
-		await fsPromises.mkdir(path.dirname(normalizedPrefix), { recursive: true });
+		const parent = path.dirname(normalizedPrefix);
+		if (parent !== ".") await fsPromises.mkdir(parent, { recursive: true });
 		return new TempDir(await fsPromises.mkdtemp(normalizedPrefix));
 	}
 
@@ -82,10 +84,9 @@ function normalizePrefix(prefix?: string): string {
 }
 
 const kRemoveOptions = { recursive: true, force: true } as const;
-const kRemoveRetries = 40;
-// 50ms × 40 retries = 2s total retry window. Windows holds file locks on
-// SQLite DBs for up to ~1.5s after close(); the previous 25ms (1s total)
-// was too short for some test cleanup scenarios.
+const kRemoveRetries = 80;
+// 50ms × 80 retries = 4s total retry window. Windows can hold native
+// database handles beyond the earlier 2s window during Bun test teardown.
 const kRemoveRetryDelayMs = 50;
 const kRetryableRemoveErrorCodes = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
 const kSleepBuffer = new Int32Array(new SharedArrayBuffer(4));

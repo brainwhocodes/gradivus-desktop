@@ -39,9 +39,12 @@ const ENV_KEYS = [
 ] as const;
 
 function quoteForConfig(p: string): string {
+	if (process.platform === "win32") {
+		// TOML literal strings preserve Windows backslashes; basic strings
+		// interpret them as escapes before the credential tokenizer sees them.
+		return `'${p}'`;
+	}
 	if (!/[\s"]/.test(p)) return p;
-	// Wrap in double quotes; our tokenizer preserves backslashes so Windows
-	// paths survive without further escaping.
 	return `"${p.replace(/(["])/g, "\\$1")}"`;
 }
 

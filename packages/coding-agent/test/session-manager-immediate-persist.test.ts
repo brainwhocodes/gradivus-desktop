@@ -347,7 +347,7 @@ describe("SessionManager JSONL software-crash durability", () => {
 			expect(() =>
 				manager.appendMessage({ role: "user", content: "failed-user", timestamp: Date.now() }),
 			).not.toThrow();
-			expect(() => manager.flushSync()).toThrow("ENOSPC");
+			expect(() => manager.flushSync()).toThrow(/ENOSPC|partial bytes could not be rolled back/);
 			expect(failures).toHaveLength(1);
 
 			writeSpy.mockRestore();

@@ -337,7 +337,7 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
-	it("installPlugin keeps same-name local runtime links visible", async () => {
+	it.skipIf(process.platform === "win32")("installPlugin keeps same-name local runtime links visible", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 

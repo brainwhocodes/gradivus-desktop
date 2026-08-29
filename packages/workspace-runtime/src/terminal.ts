@@ -143,31 +143,20 @@ export class WorkspaceTerminalSession {
 		};
 
 		try {
-			const runPromise =
-				this.#args.length > 0
-					? pty.startArgv(
-							{
-								application: this.#shell,
-								args: this.#args,
-								cwd: this.#cwd,
-								env: this.#env,
-								cols: this.#cols,
-								rows: this.#rows,
-							},
-							onChunk,
-							onStart,
-						)
-					: pty.start(
-							{
-								command: this.#shell,
-								cwd: this.#cwd,
-								env: this.#env,
-								cols: this.#cols,
-								rows: this.#rows,
-							},
-							onChunk,
-							onStart,
-						);
+			// Always spawn the shell as argv: pty.start would wrap it in `sh -lc`
+			// (or cmd /c), which mangles Windows paths and adds needless indirection.
+			const runPromise = pty.startArgv(
+				{
+					application: this.#shell,
+					args: this.#args,
+					cwd: this.#cwd,
+					env: this.#env,
+					cols: this.#cols,
+					rows: this.#rows,
+				},
+				onChunk,
+				onStart,
+			);
 
 			this.#runPromise = runPromise;
 

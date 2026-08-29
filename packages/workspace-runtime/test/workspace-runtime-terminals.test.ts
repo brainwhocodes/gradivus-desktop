@@ -172,16 +172,24 @@ describe("WorkspaceServer terminal authority", () => {
 		});
 		expect(opened.status).toBe("accepted");
 
+		const isWindows = process.platform === "win32";
+		let terminalOutput = "";
 		const marker = Promise.withResolvers<string>();
 		const removeOutput = client.onTerminalOutput("term-authoritative", frame => {
-			if (frame.data.includes("runtime-terminal-marker")) marker.resolve(frame.data);
+			terminalOutput += frame.data;
+			// ConPTY soft-wraps output at the terminal width, which can split the
+			// marker across lines; unwrap before matching.
+			if (terminalOutput.replace(/\r?\n/g, "").includes("runtime-terminal-marker")) marker.resolve(terminalOutput);
 		});
 		const snapshot = await client.subscribeTerminal("term-authoritative", 0);
 		expect(snapshot.status).toBe("running");
-		await client.sendTerminalInput("term-authoritative", "printf 'runtime-terminal-marker\\n'\\n");
+		await client.sendTerminalInput(
+			"term-authoritative",
+			isWindows ? "echo runtime-terminal-marker\r\n" : "printf 'runtime-terminal-marker\\n'\r\n",
+		);
 		const output = await Promise.race([marker.promise, Bun.sleep(5000).then(() => "")]);
 		removeOutput();
-		expect(output).toContain("runtime-terminal-marker");
+		expect(output.replace(/\r?\n/g, "")).toContain("runtime-terminal-marker");
 
 		const current = await client.getDocument();
 		const closed = await client.executeCommand({
@@ -371,12 +379,13 @@ describe("WorkspaceServer terminal authority", () => {
 		const marker = Promise.withResolvers<void>();
 		const removeOutput = client.onTerminalOutput("term-env-family", frame => {
 			familyOutput += frame.data;
-			if (familyOutput.includes(expectedFamily)) marker.resolve();
+			// Unwrap ConPTY soft-wrapped lines before matching.
+			if (familyOutput.replace(/\r?\n/g, "").includes(expectedFamily)) marker.resolve();
 		});
 		await client.subscribeTerminal("term-env-family", 0);
 		await marker.promise;
 		removeOutput();
-		expect(familyOutput).toContain(expectedFamily);
+		expect(familyOutput.replace(/\r?\n/g, "")).toContain(expectedFamily);
 		expect(familyOutput).not.toContain("parent-provided");
 
 		const current = await client.getDocument();

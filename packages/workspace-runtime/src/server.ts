@@ -448,13 +448,13 @@ export class WorkspaceServer {
 		if (!session.authenticated) {
 			if (type !== "auth") {
 				this.#sendFrame(session.socket, { type: "auth.error", message: "Authentication required" });
-				session.socket.destroy();
+				session.socket.end();
 				return;
 			}
 			const token = msg.token;
 			if (typeof token !== "string") {
 				this.#sendFrame(session.socket, { type: "auth.error", message: "Invalid control token" });
-				session.socket.destroy();
+				session.socket.end();
 				return;
 			}
 
@@ -546,7 +546,7 @@ export class WorkspaceServer {
 			}
 
 			this.#sendFrame(session.socket, { type: "auth.error", message: "Invalid control token" });
-			session.socket.destroy();
+			session.socket.end();
 			return;
 		}
 

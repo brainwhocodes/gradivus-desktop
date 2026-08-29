@@ -51,7 +51,8 @@ mod platform {
 			self.pid
 		}
 
-		/// Stable identity token derived from the kernel-reported process start time.
+		/// Stable identity token derived from the kernel-reported process start
+		/// time.
 		#[must_use]
 		pub fn identity_token(&self) -> String {
 			format!("linux:{}", self.start_time)
@@ -368,7 +369,8 @@ mod platform {
 			self.pid
 		}
 
-		/// Stable identity token derived from the kernel-reported process start time.
+		/// Stable identity token derived from the kernel-reported process start
+		/// time.
 		#[must_use]
 		pub fn identity_token(&self) -> String {
 			format!("darwin:{}:{}", self.start_tvsec, self.start_tvusec)
@@ -888,7 +890,8 @@ mod platform {
 			self.pid
 		}
 
-		/// Stable identity token derived from the kernel-reported process creation time.
+		/// Stable identity token derived from the kernel-reported process
+		/// creation time.
 		#[must_use]
 		pub fn identity_token(&self) -> String {
 			format!("windows:{}", self.creation_time)
@@ -1320,7 +1323,6 @@ impl Process {
 	pub fn identity_token(&self) -> String {
 		self.inner.identity_token()
 	}
-
 
 	/// Parent process id for this process, when available.
 	#[must_use]
@@ -1899,7 +1901,13 @@ fn prune_exited(spawned: &mut Vec<SpawnedProcess>) {
 /// with signal 0 performs permission/existence checks without delivering a
 /// signal; `EPERM` means the group exists but is not ours to signal, which
 /// still counts as alive.
-#[must_use]
+#[cfg_attr(
+	not(unix),
+	expect(
+		clippy::missing_const_for_fn,
+		reason = "Unix callee uses libc::kill and cannot be const"
+	)
+)]
 fn process_group_alive(pgid: i32) -> bool {
 	if pgid <= 0 {
 		return false;

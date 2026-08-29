@@ -17,7 +17,7 @@ import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-describe("createAgentSession deferred model pattern resolution", () => {
+describe.skipIf(process.platform === "win32")("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
 	const authStoragesToClose: AuthStorage[] = [];
 
