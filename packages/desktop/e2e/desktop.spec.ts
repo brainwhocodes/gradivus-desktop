@@ -26,7 +26,7 @@ const root = path.resolve(".");
 const bundle = path.join(root, ".vite", "build", "main.js");
 const binary = electronExecutablePath();
 const fixture = path.join(root, "e2e", "rpc-fixture.ts");
-async function createUserData(prefix: string): Promise<string> { const realTmp = await fs.realpath(os.tmpdir()); return fs.mkdtemp(path.join(realTmp, prefix)); }
+const browserUrl = `http://127.0.0.1:${process.env.GRADIVUS_E2E_PORT ?? "5173"}/browser-fixture.html`;
 async function seed(userData: string, cwd: string, ids = ["fixture-chat-1"], settingsOverride?: GradivusSettings | GradivusSettings["theme"]): Promise<void> { try { await fs.mkdir(cwd, { recursive: true });
 	const now = new Date().toISOString();
 	await fs.writeFile(path.join(userData, "sessions-v1.json"), JSON.stringify({ version: 1, sessions: ids.map((id, index) => ({ id, kind: "work", cwd, ompSessionId: "", sessionFile: "", title: index ? "Second chat" : null, createdAt: now, lastOpenedAt: now })), activeByKind: { work: ids[0], code: null } }));
@@ -1609,7 +1609,7 @@ test("keeps the browser view detached while sidebar-routed settings are open", a
 		await browserTab.click();
 		const pane = page.getByRole("group", { name: "Browser pane" });
 		const address = pane.getByRole("textbox", { name: "Address" });
-		await address.fill("http://127.0.0.1:5173/browser-fixture.html");
+		await address.fill(browserUrl);
 		await address.press("Enter");
 		const readFixtureView = async (): Promise<{ id: number; url: string } | undefined> =>
 			app.evaluate(({ BrowserWindow }) => {

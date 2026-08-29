@@ -17,7 +17,7 @@ const root = path.resolve(".");
 const bundle = path.join(root, ".vite", "build", "main.js");
 const binary = electronExecutablePath();
 const fixture = path.join(root, "e2e", "rpc-fixture.ts");
-const browserUrl = "http://127.0.0.1:5173/browser-fixture.html";
+const browserUrl = `http://127.0.0.1:${process.env.GRADIVUS_E2E_PORT ?? "5173"}/browser-fixture.html`;
 
 type LaunchOptions = {
 	promptFailure?: boolean;
