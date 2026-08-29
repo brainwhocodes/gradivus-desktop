@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import process from "node:process";
 /**
  * Harbor benchmark runner for the local `omp` build.
  *
@@ -1681,8 +1682,8 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		} catch {
 			/* ignore */
 		}
-		process.off("SIGINT", onSig);
-		process.off("SIGTERM", onSig);
+		(process.off as unknown as (event: string, listener: typeof onSig) => void)("SIGINT", onSig);
+		(process.off as unknown as (event: string, listener: typeof onSig) => void)("SIGTERM", onSig);
 	}
 
 	// final summary (printed to the normal screen)

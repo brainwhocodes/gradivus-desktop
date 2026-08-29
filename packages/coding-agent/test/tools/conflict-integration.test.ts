@@ -703,7 +703,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		const session = createTestSession(tempDir);
 		const write = await getTool(session, "write");
 		await expect(write.execute("write-bulk-empty", { path: "conflict://*", content: "@ours" })).rejects.toThrow(
-			/nothing to resolve/,
+			/nothing to resolve|empty mutation scope/i,
 		);
 	});
 

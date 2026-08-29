@@ -3760,6 +3760,32 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                             disabled={agentSettingsBusy.has(setting.path)}
                             onchange={(checked) => void changeAgentSetting(setting, checked)}
                           />
+                        {:else if setting.control === "multiselect"}
+                          <label class="settings-multiselect">
+                            <span>{setting.label}</span>
+                            <span class="settings-description">{setting.description}</span>
+                            <select
+                              multiple
+                              aria-label={setting.label}
+                              disabled={agentSettingsBusy.has(setting.path)}
+                              onchange={(event) => {
+                                const selected = Array.from(
+                                  (event.currentTarget as HTMLSelectElement).selectedOptions,
+                                  option => option.value,
+                                );
+                                void changeAgentSetting(setting, selected);
+                              }}
+                            >
+                              {#each setting.options ?? [] as option (String(option.value))}
+                                <option
+                                  value={String(option.value)}
+                                  selected={Array.isArray(setting.value) && setting.value.includes(String(option.value))}
+                                >
+                                  {option.label}
+                                </option>
+                              {/each}
+                            </select>
+                          </label>
                         {:else}
                           <LabeledSelect
                             tone="field"

@@ -10,6 +10,7 @@ import {
 	getDefault,
 	getEnumValues,
 	onAppendOnlyModeChanged,
+	onCodeModeChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
@@ -569,6 +570,73 @@ describe("Settings", () => {
 				unsubscribe();
 			}
 		});
+
+		it("signals Code Mode partition inputs picked up from disk", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadFromDisk();
+				expect(signalCount).toBe(0);
+
+				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
+				await settings.reloadFromDisk();
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+
+				// A single reload that changes several partition inputs signals once.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("eval.js")).toBe(false);
+				expect(settings.get("providers.openai-codex.codeModeDirectTools")).toEqual(["bash"]);
+				expect(signalCount).toBe(2);
+
+				// `edit.mode` renames the direct edit tool on the wire.
+				await writeSettings({
+					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					eval: { js: false },
+					edit: { mode: "apply_patch" },
+				});
+				await settings.reloadFromDisk();
+
+				expect(settings.get("edit.mode")).toBe("apply_patch");
+				expect(signalCount).toBe(3);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("signals Code Mode partition inputs supplied by the destination project", async () => {
+			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherProject = tempDir.join("code-mode-project");
+			await Bun.write(
+				path.join(getProjectAgentDir(otherProject), "config.yml"),
+				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
+			);
+			let signalCount = 0;
+			const unsubscribe = onCodeModeChanged(() => {
+				signalCount++;
+			});
+
+			try {
+				await settings.reloadForCwd(otherProject);
+
+				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(signalCount).toBe(1);
+			} finally {
+				unsubscribe();
+			}
+		});
 	});
 
 	describe("get()", () => {
@@ -1048,6 +1116,25 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("compaction method migration", () => {
+		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
+			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
+				"remote",
+				"snapcompact",
+				"handoff",
+				"shake",
+				"soft",
+			]);
+		});
+
+		it("migrates a local-only legacy strategy to soft compaction", async () => {
+			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.methodOrder")).toEqual(["soft"]);
+		});
+	});
 	describe("migrations", () => {
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
 			await writeSettings({

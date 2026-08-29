@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import process from "node:process";
 import { spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
 
 describe("ptree timeout", () => {
@@ -23,7 +24,10 @@ describe("ptree timeout", () => {
 			expect(child.exitReason).toBeInstanceOf(TimeoutError);
 			expect(unhandled.has(child.exitReason)).toBe(false);
 		} finally {
-			process.off("unhandledRejection", onUnhandled);
+			(process.off as unknown as (event: string, listener: typeof onUnhandled) => void)(
+				"unhandledRejection",
+				onUnhandled,
+			);
 		}
 	});
 });

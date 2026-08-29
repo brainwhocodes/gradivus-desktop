@@ -88,12 +88,39 @@ function packagedRuntimePath(packagedBinary: string): string {
 	return path.join(path.dirname(packagedBinary), "resources", "omp.exe");
 }
 
+async function seedWorkSession(userData: string, workspace: string): Promise<void> {
+	const now = new Date().toISOString();
+	await fs.mkdir(workspace, { recursive: true });
+	await fs.writeFile(
+		path.join(userData, "sessions-v1.json"),
+		JSON.stringify({
+			version: 1,
+			sessions: [
+				{
+					id: "packaged-omp-chat",
+					kind: "work",
+					cwd: workspace,
+					ompSessionId: "",
+					sessionFile: "",
+					title: null,
+					createdAt: now,
+					lastOpenedAt: now,
+				},
+			],
+			activeByKind: { work: "packaged-omp-chat", code: null },
+		}),
+	);
+}
+
 test("loads the contained Gradivus app and bundles the OMP runtime", async () => {
 	const packagedBinary = findPackagedBinary();
 	if (!packagedBinary) {
 		throw new Error(`Packaged Gradivus binary not found under ${path.join(desktopRoot, "out")}`);
 	}
 	expect(existsSync(packagedRuntimePath(packagedBinary))).toBe(true);
+	if (process.platform === "win32") {
+		expect(existsSync(path.join(path.dirname(packagedBinary), "resources", "omp.exe"))).toBe(true);
+	}
 
 	const realTmp = await fs.realpath(os.tmpdir());
 	const userData = await fs.mkdtemp(path.join(realTmp, "gradivus-packaged-"));
@@ -105,6 +132,7 @@ test("loads the contained Gradivus app and bundles the OMP runtime", async () =>
 		const tempRoot = path.join(userData, "t");
 		await fs.mkdir(path.join(home, ".config"), { recursive: true });
 		await fs.mkdir(tempRoot, { recursive: true });
+		await seedWorkSession(userData, testWorkspace);
 		child = spawn(packagedBinary, ["--remote-debugging-port=0", `--user-data-dir=${userData}`], {
 			env: {
 				...process.env,
@@ -138,10 +166,14 @@ test("loads the contained Gradivus app and bundles the OMP runtime", async () =>
 
 		await expect.poll(() => page.evaluate(() => document.styleSheets.length), { timeout: DEVTOOLS_TIMEOUT_MS }).toBeGreaterThan(0);
 		await expect(page.getByLabel("Gradivus", { exact: true })).toBeVisible();
-		await expect(page.getByRole("tab", { name: /OMP Chat/ })).toHaveAttribute("aria-selected", "true");
 		await expect(page.getByRole("heading", { name: "Make the next useful thing." })).toBeVisible();
 		await expect(page.getByRole("button", { name: /Choose a workspace/ })).toBeVisible();
 		await expect(page.getByRole("button", { name: "Open browser tab" })).toBeVisible();
+		const composer = page.getByLabel("Message OMP");
+		await expect(composer).toBeVisible({ timeout: DEVTOOLS_TIMEOUT_MS });
+		await composer.fill("/context");
+		await composer.press("Enter");
+		await expect(page.locator(".timeline-scroll")).toContainText(/context window|token/i, { timeout: DEVTOOLS_TIMEOUT_MS });
 		expect(consoleErrors).toEqual([]);
 	} finally {
 		await browser?.close().catch(() => {});

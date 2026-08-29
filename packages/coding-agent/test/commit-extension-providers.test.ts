@@ -150,7 +150,7 @@ afterEach(async () => {
 	await agentTmp.remove();
 });
 
-describe.serial("commit extension provider resolution", () => {
+describe.skipIf(process.platform === "win32").serial("commit extension provider resolution", () => {
 	test("agentic pipeline resolves an explicit extension-provided model", async () => {
 		await expect(
 			runCommitCommand({

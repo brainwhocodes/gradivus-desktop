@@ -118,7 +118,7 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
-export type RpcSettingValue = boolean | string | number;
+export type RpcSettingValue = boolean | string | number | string[];
 export type RpcSettingTab = "appearance" | "model" | "interaction" | "context" | "files" | "shell" | "tools" | "tasks";
 
 export interface RpcSettingOption {
@@ -133,9 +133,10 @@ export interface RpcSettingView {
 	group?: string;
 	label: string;
 	description: string;
-	control: "toggle" | "select";
+	control: "toggle" | "select" | "multiselect";
 	value: RpcSettingValue;
 	options?: RpcSettingOption[];
+	ordered?: boolean;
 	apply: "immediate" | "next-session";
 }
 export interface RpcRuntimeMetrics {
@@ -583,10 +584,22 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcPro
 // ============================================================================
 // Extension UI Events
 // ============================================================================
+/** Positional presentation metadata for an RPC select option. */
+export interface RpcExtensionUISelectOptionDetail {
+	description?: string;
+}
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
-	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "select";
+			title: string;
+			options: string[];
+			optionDetails?: RpcExtensionUISelectOptionDetail[];
+			timeout?: number;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
 			type: "extension_ui_request";
@@ -759,3 +772,12 @@ export type RpcExtensionUIResponse =
 // ============================================================================
 
 export type RpcCommandType = RpcCommand["type"];
+/** Chunk envelope used by the v2 frame reassembler. */
+export interface RpcChunkFrame {
+	type: "rpc_chunk";
+	chunkId: string;
+	index: number;
+	count: number;
+	byteLength: number;
+	data: string;
+}

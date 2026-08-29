@@ -128,8 +128,7 @@ export const RPC_SETTING_DESCRIPTORS: readonly RpcSettingDescriptor[] = [
 	{ path: "retry.usageAwareFallback", apply: "immediate" },
 	{ path: "retry.fallbackRevertPolicy", apply: "immediate" },
 	{ path: "compaction.midTurnEnabled", apply: "immediate" },
-	{ path: "compaction.strategy", apply: "immediate" },
-	{ path: "compaction.remoteEnabled", apply: "immediate" },
+	{ path: "compaction.methodOrder", apply: "immediate" },
 	{ path: "compaction.supersedeReads", apply: "immediate" },
 	{ path: "compaction.dropUseless", apply: "immediate" },
 	{ path: "compaction.enabled", apply: "immediate", effect: autoCompactionEffect },
@@ -256,7 +255,7 @@ export async function setRpcSetting(
 	const path = descriptor.path;
 	const nextValue = validateSettingValue(path, value);
 	const previousValue = session.settings.get(path);
-	if (!isRpcSettingValue(previousValue)) throw new Error(`Setting is not scalar: ${path}`);
+	if (!isRpcSettingValue(previousValue)) throw new Error(`Setting value is not RPC-compatible: ${path}`);
 
 	session.settings.set(path, nextValue as never);
 	try {
@@ -286,7 +285,7 @@ function toRpcSetting(settings: Settings, descriptor: (typeof RPC_SETTING_DESCRI
 	const ui = getUi(path);
 	if (!ui) throw new Error(`Setting has no UI metadata: ${path}`);
 	const value = settings.get(path);
-	if (!isRpcSettingValue(value)) throw new Error(`Setting is not scalar: ${path}`);
+	if (!isRpcSettingValue(value)) throw new Error(`Setting value is not RPC-compatible: ${path}`);
 	const type = getType(path);
 	const options = type === "boolean" ? undefined : getSettingOptions(path);
 	if (type !== "boolean" && (!options || options.length === 0)) {
@@ -298,9 +297,10 @@ function toRpcSetting(settings: Settings, descriptor: (typeof RPC_SETTING_DESCRI
 		group: ui.group,
 		label: ui.label,
 		description: ui.description,
-		control: type === "boolean" ? "toggle" : "select",
+		control: type === "boolean" ? "toggle" : type === "array" ? "multiselect" : "select",
 		value,
 		options,
+		...(type === "array" ? { ordered: ui.ordered === true } : {}),
 		apply: descriptor.apply,
 	};
 }
@@ -332,7 +332,17 @@ function validateSettingValue(path: RpcSettingPath, value: unknown): RpcSettingV
 		if (typeof value !== "boolean") throw new TypeError(`${path} must be boolean`);
 		return value;
 	}
-	if (!isRpcSettingValue(value)) throw new TypeError(`${path} must be a scalar value`);
+	if (type === "array") {
+		if (!Array.isArray(value) || !value.every((entry): entry is string => typeof entry === "string")) {
+			throw new TypeError(`${path} must be an array of strings`);
+		}
+		const options = getSettingOptions(path);
+		if (!options?.length || value.some(entry => !options.some(option => option.value === entry))) {
+			throw new RangeError(`${JSON.stringify(value)} is not a supported value for ${path}`);
+		}
+		return [...value];
+	}
+	if (!isRpcSettingValue(value) || Array.isArray(value)) throw new TypeError(`${path} must be a scalar value`);
 	const options = getSettingOptions(path);
 	if (!options?.some(option => Object.is(option.value, value))) {
 		throw new RangeError(`${String(value)} is not a supported value for ${path}`);
@@ -342,7 +352,10 @@ function validateSettingValue(path: RpcSettingPath, value: unknown): RpcSettingV
 
 function isRpcSettingValue(value: unknown): value is RpcSettingValue {
 	return (
-		typeof value === "boolean" || typeof value === "string" || (typeof value === "number" && Number.isFinite(value))
+		typeof value === "boolean" ||
+		typeof value === "string" ||
+		(typeof value === "number" && Number.isFinite(value)) ||
+		(Array.isArray(value) && value.every(entry => typeof entry === "string"))
 	);
 }
 

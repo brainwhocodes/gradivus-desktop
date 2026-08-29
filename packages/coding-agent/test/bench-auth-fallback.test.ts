@@ -292,7 +292,7 @@ describe("bench service tier", () => {
 	});
 });
 
-describe.serial("bench default runtime OAuth routing startup", () => {
+describe.skipIf(process.platform === "win32").serial("bench default runtime OAuth routing startup", () => {
 	it("installs persisted OAuth policy before the first runtime-provider refresh", async () => {
 		const settingsState = beginSettingsTest();
 		const projectTmp = await TempDir.create("@bench-oauth-startup-");

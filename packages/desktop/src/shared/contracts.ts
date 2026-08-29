@@ -70,7 +70,7 @@ export interface OpenRouterModelRouting {
 	providers: OpenRouterProviderOption[];
 }
 
-export type AgentSettingValue = boolean | string | number;
+export type AgentSettingValue = boolean | string | number | string[];
 export type AgentSettingTab =
 	| "appearance"
 	| "model"
@@ -93,9 +93,10 @@ export interface AgentSettingView {
 	group?: string;
 	label: string;
 	description: string;
-	control: "toggle" | "select";
+	control: "toggle" | "select" | "multiselect";
 	value: AgentSettingValue;
 	options?: AgentSettingOption[];
+	ordered?: boolean;
 	apply: "immediate" | "next-session";
 }
 

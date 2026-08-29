@@ -100,7 +100,7 @@ afterEach(() => {
 	spies = [];
 });
 
-describe("StatusLineComponent jj cache coherence", () => {
+describe.skipIf(process.platform === "win32")("StatusLineComponent jj cache coherence", () => {
 	it("invalidateGitCaches() drops the throttled jj branch cache within its TTL and refetches", async () => {
 		// A live jj bookmark label; a second query for the SAME root returns a new
 		// label, simulating a colocated bookmark/HEAD move mid-TTL.

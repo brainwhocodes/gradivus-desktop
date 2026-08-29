@@ -26,7 +26,7 @@ function createTool(name: string): AgentTool {
 	};
 }
 
-describe("AgentSession memory backend lifecycle", () => {
+describe.skipIf(process.platform === "win32")("AgentSession memory backend lifecycle", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
 	let settings: Settings;

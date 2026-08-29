@@ -1,8 +1,9 @@
 import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
+import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
-import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
+import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
@@ -43,10 +44,6 @@ import type { InteractiveModeContext } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
-	GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE,
-	installOAuthAccountSelectionFromSettings,
-} from "../../session/credential-pin";
-import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
 	foreignSessionSourceName,
@@ -71,7 +68,6 @@ import {
 } from "../../thinking";
 import {
 	isSearchProviderId,
-	setExcludedImageProviders,
 	setExcludedSearchProviders,
 	setImageProviderOrder,
 	setSearchProviderOrder,
@@ -94,13 +90,6 @@ import { LoginDialogComponent } from "../components/login-dialog";
 import { LogoutAccountSelectorComponent } from "../components/logout-account-selector";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
-import {
-	loginOAuthAccount,
-	type OAuthAccountBlockedReason,
-	type OAuthAccountLoginDialogPort,
-	type OAuthAccountManagerActions,
-	removeOAuthAccountCredential,
-} from "../components/oauth-account-manager";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
@@ -115,6 +104,8 @@ import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
+
+const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -199,43 +190,6 @@ export class SelectorController {
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			};
-			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const accountActions: OAuthAccountManagerActions = {
-				login: (
-					provider: OAuthProviderInfo,
-					dialog: OAuthAccountLoginDialogPort,
-					blockedReason?: OAuthAccountBlockedReason,
-				) =>
-					loginOAuthAccount(
-						{
-							authStorage,
-							refreshProvider: (providerId, strategy) =>
-								this.ctx.session.modelRegistry.refreshProvider(providerId, strategy),
-						},
-						provider,
-						dialog,
-						blockedReason,
-					),
-				remove: (
-					storageProvider: string,
-					credentialId: number,
-					refreshProviderId: string,
-					blockedReason?: OAuthAccountBlockedReason,
-					afterRemoved?: () => void,
-				) =>
-					removeOAuthAccountCredential(
-						{
-							authStorage,
-							refreshProvider: (providerId, strategy) =>
-								this.ctx.session.modelRegistry.refreshProvider(providerId, strategy),
-						},
-						storageProvider,
-						credentialId,
-						refreshProviderId,
-						blockedReason,
-						afterRemoved,
-					),
-			};
 			const selector = new SettingsSelectorComponent(
 				{
 					availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
@@ -248,21 +202,7 @@ export class SelectorController {
 					model: this.ctx.session.model,
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
-					oauthAccounts: {
-						settings,
-						authStorage,
-						tui: this.ctx.ui,
-						sessionId: this.ctx.session.sessionId,
-						getLoginMethods: getOAuthProviders,
-						isStreaming: () => this.ctx.session.isStreaming,
-						installPolicy: () => installOAuthAccountSelectionFromSettings(settings, authStorage),
-						invalidate: () => {
-							this.ctx.statusLine.invalidate();
-							this.ctx.ui.invalidate();
-							this.ctx.ui.requestRender();
-						},
-						actions: accountActions,
-					},
+					composerPreviewStatus: this.ctx.statusLine,
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
@@ -285,14 +225,16 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							contextLine: settings.get("statusLine.contextLine"),
 							...previewSettings,
 						});
 						this.ctx.ui.requestRender();
 					},
 					getStatusLinePreview: () => {
-						// Return the rendered status line for inline preview
+						// The bar exactly as the active composer shape renders it (box top
+						// border, claude rule + chip, or the plain standalone bottom bar).
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
@@ -314,6 +256,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							contextLine: settings.get("statusLine.contextLine"),
 						});
 						this.ctx.ui.requestRender();
 					},
@@ -504,6 +447,9 @@ export class SelectorController {
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
+			case "composer.shape":
+				this.ctx.syncComposerShape();
+				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);
 				this.ctx.statusLine.invalidate();
@@ -607,7 +553,7 @@ export class SelectorController {
 				this.ctx.ui.resetDisplay();
 				break;
 			case "omitThinking":
-				this.ctx.session.setOmitThinking(value as boolean);
+				this.ctx.session.agent.hideThinkingSummary = value as boolean;
 				break;
 			case "display.cacheMissMarker":
 				// Rebuild re-runs the usage-based detection under the new setting so
@@ -637,6 +583,10 @@ export class SelectorController {
 
 			case "tui.scrollbackRebuild":
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
+				break;
+
+			case "tui.resizeScrollback":
+				this.ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);
 				break;
 
 			case "tui.renderMermaid":
@@ -674,33 +624,33 @@ export class SelectorController {
 				break;
 			}
 			case "temperature": {
-				const temperature = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ temperature });
+				const temp = typeof value === "number" ? value : Number(value);
+				this.ctx.session.agent.temperature = temp >= 0 ? temp : undefined;
 				break;
 			}
 			case "topP": {
 				const topP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ topP });
+				this.ctx.session.agent.topP = topP >= 0 ? topP : undefined;
 				break;
 			}
 			case "topK": {
 				const topK = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ topK });
+				this.ctx.session.agent.topK = topK >= 0 ? topK : undefined;
 				break;
 			}
 			case "minP": {
 				const minP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ minP });
+				this.ctx.session.agent.minP = minP >= 0 ? minP : undefined;
 				break;
 			}
 			case "presencePenalty": {
 				const presencePenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ presencePenalty });
+				this.ctx.session.agent.presencePenalty = presencePenalty >= 0 ? presencePenalty : undefined;
 				break;
 			}
 			case "repetitionPenalty": {
 				const repetitionPenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ repetitionPenalty });
+				this.ctx.session.agent.repetitionPenalty = repetitionPenalty >= 0 ? repetitionPenalty : undefined;
 				break;
 			}
 			case "git.enabled":
@@ -740,12 +690,6 @@ export class SelectorController {
 				break;
 			}
 
-			case "providers.oauthAccountFailover":
-				installOAuthAccountSelectionFromSettings(settings, this.ctx.session.modelRegistry.authStorage);
-				this.ctx.statusLine.invalidate();
-				this.ctx.ui.invalidate();
-				this.ctx.ui.requestRender();
-				break;
 			// Provider settings - update runtime preferences
 			case "providers.webSearchOrder":
 				if (Array.isArray(value)) {
@@ -760,11 +704,6 @@ export class SelectorController {
 			case "providers.imageOrder":
 				if (Array.isArray(value)) {
 					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
-				}
-				break;
-			case "providers.imageExclude":
-				if (Array.isArray(value)) {
-					setExcludedImageProviders(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 
@@ -914,17 +853,16 @@ export class SelectorController {
 					const releaseDefaultMutation = role === "default" ? await this.#acquireDefaultRoleMutation() : undefined;
 					const configuredStorage = this.ctx.settings.get("modelRoleStorage");
 					const targetScope = configuredStorage === "project" ? (scope ?? "project") : "global";
-					// `auto` is session-global: never baked into a per-role model value
-					// (it can't round-trip through `model:<level>`). Apply it to the session
-					// separately and persist via `defaultThinkingLevel`.
-					const isAuto = thinkingLevel === AUTO_THINKING;
-					const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 					const selectorValue = selector ?? `${model.provider}/${model.id}`;
 					const scopeLabel =
 						configuredStorage === "project" ? `${targetScope === "project" ? "Project" : "Global"} ` : "";
 					const defaultStatusLabel = configuredStorage === "project" ? `${scopeLabel}default` : "Default";
 					try {
 						if (role === "default") {
+							// `auto` on the default role configures the active session. Other roles
+							// persist an explicit `:auto` suffix and must not mutate the current model.
+							const isAuto = thinkingLevel === AUTO_THINKING;
+							const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 							const effectiveProvenance = this.ctx.settings.getModelRoleProvenance("default");
 							const shadowedGlobal =
 								configuredStorage === "project" &&
@@ -977,14 +915,11 @@ export class SelectorController {
 							this.ctx.showStatus(`${defaultStatusLabel} model: ${selector ?? model.id}`);
 						} else {
 							// Other roles (smol, slow, custom): update settings, not the current model.
-							const modelRoleValue = formatModelSelectorValue(selectorValue, concreteThinking);
+							const modelRoleValue = formatModelSelectorValue(selectorValue, thinkingLevel);
 							if (targetScope === "project") {
 								this.ctx.settings.setProjectModelRole(role, modelRoleValue);
 							} else {
 								this.ctx.settings.setModelRole(role, modelRoleValue);
-							}
-							if (isAuto) {
-								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
 							}
 							const roleInfo = getRoleInfo(role, settings);
 							this.ctx.showStatus(
@@ -1735,11 +1670,7 @@ export class SelectorController {
 	 */
 	async #handleOAuthLogin(providerId: string): Promise<boolean> {
 		this.ctx.showStatus(`Logging in to ${providerId}…`);
-		const loginMethod: OAuthProviderInfo = getOAuthProviders().find(provider => provider.id === providerId) ?? {
-			id: providerId,
-			name: providerId,
-			available: true,
-		};
+		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		let restored = false;
 		const restoreEditor = () => {
 			if (restored) return;
@@ -1760,28 +1691,34 @@ export class SelectorController {
 		this.ctx.ui.setFocus(dialog);
 		this.ctx.ui.requestRender();
 		try {
-			const result = await loginOAuthAccount(
-				{
-					authStorage: this.ctx.session.modelRegistry.authStorage,
-					refreshProvider: (refreshProviderId, strategy) =>
-						this.ctx.session.modelRegistry.refreshProvider(refreshProviderId, strategy),
+			const identity = await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
+				signal: dialog.signal,
+				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
+					// The dialog renders the full URL (SSH-safe copy target) and
+					// opens the browser best-effort.
+					dialog.showAuth(info.url, info.instructions, info.launchUrl);
 				},
-				loginMethod,
-				dialog,
-			);
-			if (result.status === "cancelled") return false;
-			if (result.status === "blocked") {
-				this.ctx.showError(`Login failed: ${result.reason}`);
-				return false;
-			}
-			if (result.status === "error") {
-				this.ctx.showError(
-					`Login failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`,
-				);
-				return false;
-			}
-
-			const identity = result.identity;
+				onPrompt: (prompt: { message: string; placeholder?: string }) =>
+					dialog.showPrompt(prompt.message, prompt.placeholder),
+				onProgress: (message: string) => {
+					dialog.showProgress(message);
+				},
+				// Paste-code providers (e.g. Codex) may need the user to paste the
+				// fallback redirect URL when the loopback callback can't complete
+				// (headless/remote/Windows). Mount a focused input in the dialog so
+				// the paste lands somewhere the OAuth flow consumes — the hidden
+				// editor's `/login <url>` path is unreachable while the dialog holds
+				// focus (#5339).
+				onManualCodeInput: useManualInput ? () => dialog.showManualInput(MANUAL_LOGIN_PROMPT) : undefined,
+			});
+			// Scope the post-login refresh to the just-authenticated provider with an
+			// `online` strategy: the default all-provider `online-if-uncached` reuses
+			// a fresh authoritative cache row (e.g. an empty result fetched before
+			// login), so newly persisted credentials would never re-run discovery and
+			// models would stay unavailable in-session (#5780). Unrelated providers
+			// are left untouched. `refreshProvider` swallows discovery failures, so
+			// awaiting cannot reject the login.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -1800,7 +1737,11 @@ export class SelectorController {
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
-			if (dialog.signal.aborted) return false;
+			if (dialog.signal.aborted) {
+				// User-cancelled: the dialog already restored the editor and
+				// surfaced "Login cancelled".
+				return false;
+			}
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {
@@ -1811,28 +1752,18 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const loginMethod = getOAuthProviders().find(candidate => candidate.id === providerId);
-			const storageProvider = loginMethod?.storeCredentialsAs ?? providerId;
-			const result = await removeOAuthAccountCredential(
-				{
-					authStorage,
-					refreshProvider: (refreshProviderId, strategy) =>
-						this.ctx.session.modelRegistry.refreshProvider(refreshProviderId, strategy),
-				},
-				storageProvider,
-				account.credentialId,
-				providerId,
-			);
-			if (result.status === "missing") {
+			const removed = await authStorage.removeCredential(providerId, account.credentialId);
+			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
 				return;
 			}
-			if (result.status === "blocked") {
-				this.ctx.showError(`Logout failed: ${result.reason}`);
-				return;
-			}
-			if (result.status === "error") throw result.error;
 
+			// Provider-scoped online refresh so the removed credential's stale
+			// endpoint/deployment models are invalidated deterministically; the
+			// default all-provider `online-if-uncached` would reuse the fresh
+			// authoritative cache row and keep showing models the credential
+			// unlocked (#5780). Other providers are left untouched.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
@@ -1845,7 +1776,7 @@ export class SelectorController {
 				),
 			);
 			block.addChild(new Text(theme.fg("dim", `Credential removed from ${getAgentDbPath()}`), 1, 0));
-			const remainingSource = authStorage.describeCredentialSource(storageProvider, this.ctx.session.sessionId);
+			const remainingSource = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
 			if (remainingSource) {
 				block.addChild(
 					new Text(theme.fg("warning", `${providerId} is still authenticated via ${remainingSource}`), 1, 0),
@@ -1868,13 +1799,12 @@ export class SelectorController {
 			return;
 		}
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
-		const storageProvider = provider?.storeCredentialsAs ?? providerId;
-		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(storageProvider), {
-			activeIdentity: authStorage.getOAuthAccountIdentity(storageProvider, this.ctx.session.sessionId),
-			activeApiKey: authStorage.getCredentialOrigin(storageProvider)?.kind === "api_key",
+		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
+			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
+			activeApiKey: authStorage.getCredentialOrigin(providerId)?.kind === "api_key",
 		});
 		if (accounts.length === 0) {
-			const source = authStorage.describeCredentialSource(storageProvider, this.ctx.session.sessionId);
+			const source = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
 			const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
 			this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
 			return;
@@ -1911,7 +1841,7 @@ export class SelectorController {
 			await this.#refreshOAuthProviderAuthState();
 			const oauthProviders = getOAuthProviders();
 			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.has(provider.storeCredentialsAs ?? provider.id),
+				this.ctx.session.modelRegistry.authStorage.has(provider.id),
 			);
 			if (loggedInProviders.length === 0) {
 				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
@@ -1959,10 +1889,6 @@ export class SelectorController {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
 			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
-			return;
-		}
-		if (session.model && session.modelRegistry.authStorage.getOAuthAccountSelection(session.model.provider)) {
-			this.ctx.showStatus(GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE);
 			return;
 		}
 		this.ctx.showStatus("Loading provider accounts…", { dim: true });

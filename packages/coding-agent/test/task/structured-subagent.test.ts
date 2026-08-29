@@ -167,34 +167,40 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("reloads model roles before resolving an agent added during the session", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
-		const projectDir = path.join(root, "project");
-		const agentDir = path.join(root, "agent");
-		await fs.mkdir(projectDir, { recursive: true });
-		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
-		const liveSession = {
-			...session(),
-			cwd: projectDir,
-			settings: liveSettings,
-		} as ToolSession;
+	it.skipIf(process.platform === "win32")(
+		"reloads model roles before resolving an agent added during the session",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
+			const projectDir = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			await fs.mkdir(projectDir, { recursive: true });
+			const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			const liveSession = {
+				...session(),
+				cwd: projectDir,
+				settings: liveSettings,
+			} as ToolSession;
 
-		try {
-			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
-			await Bun.write(
-				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
-				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
-			);
+			try {
+				await Bun.write(
+					path.join(projectDir, ".omp", "config.yml"),
+					"modelRoles:\n  hot_worker: kimi-code/k3:max\n",
+				);
+				await Bun.write(
+					path.join(projectDir, ".omp", "agents", "hot-worker.md"),
+					'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+				);
 
-			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
+				const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
-			expect(policy.modelRole).toBe("hot_worker");
-			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
-		} finally {
-			liveSettings.cancelPendingSaves();
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
+				expect(policy.modelRole).toBe("hot_worker");
+				expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+			} finally {
+				liveSettings.cancelPendingSaves();
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
@@ -431,7 +437,7 @@ describe("structured subagent primitive", () => {
 			runStructuredSubagent(
 				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
 			),
-		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 

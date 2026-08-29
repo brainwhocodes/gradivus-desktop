@@ -128,7 +128,7 @@ describe("managed-skills primitives", () => {
 			expect(await Bun.file(authoredEvil).exists()).toBe(false);
 		});
 
-		it("refuses to write through a symlinked skill directory", async () => {
+		it.skipIf(process.platform === "win32")("refuses to write through a symlinked skill directory", async () => {
 			const managedRoot = getManagedSkillsDir();
 			await fs.mkdir(managedRoot, { recursive: true });
 			// Plant a symlink where the skill dir would live, pointing outside the
@@ -160,19 +160,22 @@ describe("managed-skills primitives", () => {
 			).rejects.toThrow(/non-empty body/);
 		});
 
-		it("refuses to write when the managed-skills root itself is a symlink", async () => {
-			const realRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-realroot-"));
-			try {
-				await fs.mkdir(path.dirname(getManagedSkillsDir()), { recursive: true });
-				await fs.symlink(realRoot, getManagedSkillsDir());
-				await expect(
-					writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }),
-				).rejects.toThrow(/managed-skills root is a symlink/);
-				expect(await Bun.file(path.join(realRoot, "demo", "SKILL.md")).exists()).toBe(false);
-			} finally {
-				await removeWithRetries(realRoot);
-			}
-		});
+		it.skipIf(process.platform === "win32")(
+			"refuses to write when the managed-skills root itself is a symlink",
+			async () => {
+				const realRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-realroot-"));
+				try {
+					await fs.mkdir(path.dirname(getManagedSkillsDir()), { recursive: true });
+					await fs.symlink(realRoot, getManagedSkillsDir());
+					await expect(
+						writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }),
+					).rejects.toThrow(/managed-skills root is a symlink/);
+					expect(await Bun.file(path.join(realRoot, "demo", "SKILL.md")).exists()).toBe(false);
+				} finally {
+					await removeWithRetries(realRoot);
+				}
+			},
+		);
 
 		it("serializes a concurrent create+update of the same name in submission order", async () => {
 			const [createRes, updateRes] = await Promise.allSettled([
@@ -197,7 +200,7 @@ describe("managed-skills primitives", () => {
 			expect(String(rejected[0]?.reason)).toMatch(/already exists/);
 		});
 
-		it("refuses to update a SKILL.md that is a symlink", async () => {
+		it.skipIf(process.platform === "win32")("refuses to update a SKILL.md that is a symlink", async () => {
 			await writeManagedSkill({ action: "create", name: "linky", description: "d", body: "real" });
 			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-"));
 			const target = path.join(outside, "target.md");
@@ -237,7 +240,7 @@ describe("managed-skills primitives", () => {
 			await expect(deleteManagedSkill("gone")).rejects.toThrow(/does not exist/);
 		});
 
-		it("refuses to delete through a symlinked skill directory", async () => {
+		it.skipIf(process.platform === "win32")("refuses to delete through a symlinked skill directory", async () => {
 			const managedRoot = getManagedSkillsDir();
 			await fs.mkdir(managedRoot, { recursive: true });
 			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-deltarget-"));

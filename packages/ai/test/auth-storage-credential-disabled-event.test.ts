@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import process from "node:process";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -206,7 +207,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				await Bun.sleep(0);
 				expect(unhandled).toHaveLength(0);
 			} finally {
-				process.off("unhandledRejection", onUnhandled);
+				(process.off as unknown as (event: string, listener: typeof onUnhandled) => void)(
+					"unhandledRejection",
+					onUnhandled,
+				);
 			}
 		});
 	});
@@ -340,7 +344,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 				expect(tailEvents).toHaveLength(1);
 				expect(unhandled).toHaveLength(0);
 			} finally {
-				process.off("unhandledRejection", onUnhandled);
+				(process.off as unknown as (event: string, listener: typeof onUnhandled) => void)(
+					"unhandledRejection",
+					onUnhandled,
+				);
 			}
 		});
 	});

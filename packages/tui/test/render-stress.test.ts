@@ -50,7 +50,7 @@ function installSubprocessCleanup(): void {
 		killAllSubprocesses();
 		// Restore default disposition and re-raise so the process still exits
 		// from the signal instead of hanging on this listener.
-		process.removeListener(signal, onSignal);
+		(process.removeListener as unknown as (event: string, listener: typeof onSignal) => void)(signal, onSignal);
 		process.kill(process.pid, signal);
 	};
 	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

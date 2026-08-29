@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import process from "node:process";
 import { type } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import {
@@ -3047,7 +3048,10 @@ describe("agentLoop event-driven steering watch", () => {
 			expect(watchCanceled).toBe(true);
 			expect(unhandledRejections).toEqual([]);
 		} finally {
-			process.off("unhandledRejection", captureUnhandledRejection);
+			(process.off as unknown as (event: string, listener: typeof captureUnhandledRejection) => void)(
+				"unhandledRejection",
+				captureUnhandledRejection,
+			);
 		}
 	});
 

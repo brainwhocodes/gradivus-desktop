@@ -74,12 +74,12 @@ function getDefaultSessionDirName(cwd: string): {
 	const tempRelative = path.relative(canonicalTempRoot, canonicalCwd);
 	let encodedDirName: string;
 	let scope: "home" | "tmp" | "abs";
-	if (homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))) {
-		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
-		scope = "home";
-	} else if (tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))) {
+	if (tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))) {
 		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
 		scope = "tmp";
+	} else if (homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))) {
+		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
+		scope = "home";
 	} else {
 		encodedDirName = encodeLegacyAbsoluteSessionDirName(canonicalCwd);
 		scope = "abs";
@@ -188,10 +188,13 @@ export function computeDefaultSessionDir(
 	sessionsRoot: string = getSessionsDir(),
 ): string {
 	const { encodedDirName, hashedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
-	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
+	// Migrate the cwd-specific absolute/hashed forms before the broad home
+	// migration, which otherwise mistakes a temp-root path for a home-relative
+	// name on Windows.
 	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
+	migrateHomeSessionDirs(sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
 }

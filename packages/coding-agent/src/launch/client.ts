@@ -6,7 +6,6 @@ import {
 	encodeLocalJsonlFrame,
 	ensureSecureRuntimeRoot,
 	getGlobalDaemonRuntimeDir,
-	isEisdir,
 	isEnoent,
 	LocalJsonlDecoder,
 	logger,
@@ -16,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
+import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
@@ -74,16 +73,6 @@ export interface DaemonBrokerClient {
 
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
-
-async function canonicalProjectDir(projectDir: string): Promise<string> {
-	const resolved = path.resolve(projectDir);
-	try {
-		return await fs.realpath(resolved);
-	} catch (error) {
-		if (isEnoent(error) || isEisdir(error)) return resolved;
-		throw error;
-	}
-}
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	let stat: { isSymbolicLink(): boolean; isDirectory(): boolean };

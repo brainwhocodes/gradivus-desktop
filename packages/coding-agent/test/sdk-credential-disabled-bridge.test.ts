@@ -509,6 +509,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession credential_dis
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				composerShapes: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),

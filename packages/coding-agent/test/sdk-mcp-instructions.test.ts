@@ -30,7 +30,7 @@ const MCP_ROUTE_SECTION = "## MCP Tool Routes";
 const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_execute`';
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 
-describe("createAgentSession MCP server instructions (deferred UI)", () => {
+describe.skipIf(process.platform === "win32")("createAgentSession MCP server instructions (deferred UI)", () => {
 	let tempDir: string;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;

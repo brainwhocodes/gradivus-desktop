@@ -2457,19 +2457,26 @@ function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
 		value.label.length > 512 ||
 		typeof value.description !== "string" ||
 		value.description.length > 8_192 ||
-		(value.control !== "toggle" && value.control !== "select") ||
+		(value.control !== "toggle" && value.control !== "select" && value.control !== "multiselect") ||
 		(value.apply !== "immediate" && value.apply !== "next-session") ||
 		!isAgentSettingValue(value.value)
 	)
 		return undefined;
 	if (value.control === "toggle" && typeof value.value !== "boolean") return undefined;
+	if (
+		value.control === "multiselect" &&
+		(!Array.isArray(value.value) || !value.value.every(item => typeof item === "string"))
+	) {
+		return undefined;
+	}
 	const options = Array.isArray(value.options)
 		? value.options
 				.slice(0, 1_000)
 				.map(normalizeAgentSettingOption)
 				.filter((option): option is AgentSettingOption => option !== undefined)
 		: undefined;
-	if (value.control === "select" && (!options || options.length === 0)) return undefined;
+	if ((value.control === "select" || value.control === "multiselect") && (!options || options.length === 0))
+		return undefined;
 	return {
 		path: value.path,
 		tab: value.tab,
@@ -2479,6 +2486,7 @@ function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
 		control: value.control,
 		value: value.value,
 		options,
+		...(value.control === "multiselect" && typeof value.ordered === "boolean" ? { ordered: value.ordered } : {}),
 		apply: value.apply,
 	};
 }
@@ -2517,7 +2525,10 @@ function isAgentSettingValue(value: unknown): value is AgentSettingValue {
 	return (
 		typeof value === "boolean" ||
 		(typeof value === "string" && value.length <= 2_048) ||
-		(typeof value === "number" && Number.isFinite(value))
+		(typeof value === "number" && Number.isFinite(value)) ||
+		(Array.isArray(value) &&
+			value.length <= 1_000 &&
+			value.every(item => typeof item === "string" && item.length <= 2_048))
 	);
 }
 

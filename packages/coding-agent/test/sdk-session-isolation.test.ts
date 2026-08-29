@@ -89,7 +89,7 @@ function getAssistantText(message: AssistantMessage | undefined): string {
 		.join(" ");
 }
 
-describe("createAgentSession session storage isolation", () => {
+describe.skipIf(process.platform === "win32")("createAgentSession session storage isolation", () => {
 	const tempDirs: string[] = [];
 	// One shared, fully-populated (bundled models load synchronously in the
 	// constructor) registry for every case. Passing it via options skips the

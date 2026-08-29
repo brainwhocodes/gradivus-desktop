@@ -182,7 +182,7 @@ describe("github-cache db layer", () => {
 		expect(db).not.toBeNull();
 	});
 
-	it("does not chmod an existing cache parent directory", async () => {
+	it.skipIf(process.platform === "win32")("does not chmod an existing cache parent directory", async () => {
 		const parent = path.join(tempDir, "caller-owned-parent");
 		await fs.mkdir(parent, { recursive: true, mode: 0o755 });
 		await fs.chmod(parent, 0o755);

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import process from "node:process";
 import { type } from "@oh-my-pi/omptype";
 import { isContextOverflow } from "@oh-my-pi/pi-ai/error";
 import {
@@ -4886,7 +4887,10 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			await Bun.sleep(20);
 			expect(unhandled).toEqual([]);
 		} finally {
-			process.off("unhandledRejection", onUnhandled);
+			(process.off as unknown as (event: string, listener: typeof onUnhandled) => void)(
+				"unhandledRejection",
+				onUnhandled,
+			);
 			if (previousEnabled === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE;
 			else Bun.env.GITLAB_DUO_WORKFLOW_TRACE = previousEnabled;
 			if (previousFile === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE_FILE;
