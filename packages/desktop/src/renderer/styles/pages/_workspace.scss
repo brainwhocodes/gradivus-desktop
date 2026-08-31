@@ -117,6 +117,37 @@
 	}
 }
 
+.browser-close-backdrop {
+	z-index: var(--z-modal);
+}
+
+.browser-close-dialog {
+	width: min(440px, calc(100vw - 32px));
+	border: 1px solid var(--line);
+	border-radius: var(--radius-medium);
+	padding: 18px;
+	color: var(--foreground);
+	background: var(--shell-raised);
+	box-shadow: 0 24px 60px var(--shadow-color);
+}
+
+.browser-close-dialog h2 {
+	margin: 0;
+	color: var(--foreground-strong);
+	font-size: 17px;
+}
+
+.browser-close-dialog p {
+	margin: 8px 0 18px;
+	color: var(--foreground-muted);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.browser-close-dialog .dialog-actions {
+	justify-content: flex-end;
+}
+
 @media (forced-colors: active) {
 	.window-controls button.close-window:hover,
 	.tab-close:hover,

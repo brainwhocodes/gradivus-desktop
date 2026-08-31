@@ -10,7 +10,6 @@ import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
 import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
@@ -75,7 +74,7 @@ export class TanCommandController {
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
-		const toolNames = session.getActiveToolNames();
+		const toolNames = session.getEnabledToolNames();
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
@@ -152,7 +151,7 @@ export class TanCommandController {
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
-							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
+							tools: clone.getEnabledToolNames(),
 						});
 						const abortClone = () => {
 							void clone?.abort();
@@ -161,8 +160,7 @@ export class TanCommandController {
 						// The fork inherits the parent's todo list via session entries;
 						// its reminders would drag the tan back onto the parent's task.
 						// Clear runtime state and persist an empty edit so reloads agree.
-						clone.setTodoPhases([]);
-						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+						clone.commitUserTodoEdit([], clone.getTodoRevision(), "tangent context reset", { removed: true });
 						const injectContextSwitch = () => {
 							clone?.agent.appendMessage({
 								role: "developer",

@@ -432,66 +432,75 @@ describe("agent-plugins discovery", () => {
 		expect(warned(`unexpected frontmatter field "enabled"`)).toBe(true);
 	});
 
-	test("rejects an escaping plugin.json symlink without consuming outside content", async () => {
-		// A fully valid Agent Plugins manifest OUTSIDE the package: if the client
-		// read it through the symlink, classification would succeed and the
-		// bundled skill would load. Rejection proves the bytes were never used.
-		const outside = path.join(tempDir, "outside");
-		await fs.mkdir(outside, { recursive: true });
-		await fs.writeFile(
-			path.join(outside, "manifest.json"),
-			JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "std-plugin" }),
-		);
-		await fs.symlink(path.join(outside, "manifest.json"), path.join(pluginPath, "plugin.json"));
-		await writeSkill("deploy", "name: deploy\ndescription: Deploy things");
-		await writeRegistry(pluginPath);
+	test.skipIf(process.platform === "win32")(
+		"rejects an escaping plugin.json symlink without consuming outside content",
+		async () => {
+			// A fully valid Agent Plugins manifest OUTSIDE the package: if the client
+			// read it through the symlink, classification would succeed and the
+			// bundled skill would load. Rejection proves the bytes were never used.
+			const outside = path.join(tempDir, "outside");
+			await fs.mkdir(outside, { recursive: true });
+			await fs.writeFile(
+				path.join(outside, "manifest.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "std-plugin" }),
+			);
+			await fs.symlink(path.join(outside, "manifest.json"), path.join(pluginPath, "plugin.json"));
+			await writeSkill("deploy", "name: deploy\ndescription: Deploy things");
+			await writeRegistry(pluginPath);
 
-		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
-		expect(skills.all.find(skill => skill.name === "deploy")).toBeUndefined();
-		expect(skills.warnings.some(warning => warning.includes("plugin.json resolves outside"))).toBe(true);
-	});
+			const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+			expect(skills.all.find(skill => skill.name === "deploy")).toBeUndefined();
+			expect(skills.warnings.some(warning => warning.includes("plugin.json resolves outside"))).toBe(true);
+		},
+	);
 
-	test("skips an escaping skill symlink without consuming outside content", async () => {
-		await writeManifest();
-		await writeSkill("good", "name: good\ndescription: Good skill");
-		// A valid skill OUTSIDE the package, reachable only through a symlinked
-		// skill directory. Loading it would prove outside content was consumed.
-		const outside = path.join(tempDir, "outside", "evil");
-		await fs.mkdir(outside, { recursive: true });
-		await fs.writeFile(path.join(outside, "SKILL.md"), "---\nname: evil\ndescription: Escaped\n---\nBody\n");
-		await fs.symlink(outside, path.join(pluginPath, "skills", "evil"));
-		await writeRegistry(pluginPath);
+	test.skipIf(process.platform === "win32")(
+		"skips an escaping skill symlink without consuming outside content",
+		async () => {
+			await writeManifest();
+			await writeSkill("good", "name: good\ndescription: Good skill");
+			// A valid skill OUTSIDE the package, reachable only through a symlinked
+			// skill directory. Loading it would prove outside content was consumed.
+			const outside = path.join(tempDir, "outside", "evil");
+			await fs.mkdir(outside, { recursive: true });
+			await fs.writeFile(path.join(outside, "SKILL.md"), "---\nname: evil\ndescription: Escaped\n---\nBody\n");
+			await fs.symlink(outside, path.join(pluginPath, "skills", "evil"));
+			await writeRegistry(pluginPath);
 
-		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
-		const fromPlugin = skills.all.filter(skill => skill._source.provider === "agent-plugins");
-		expect(fromPlugin.map(skill => skill.name)).toEqual(["good"]);
-		expect(skills.warnings.some(warning => warning.includes("SKILL.md resolves outside"))).toBe(true);
-	});
+			const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+			const fromPlugin = skills.all.filter(skill => skill._source.provider === "agent-plugins");
+			expect(fromPlugin.map(skill => skill.name)).toEqual(["good"]);
+			expect(skills.warnings.some(warning => warning.includes("SKILL.md resolves outside"))).toBe(true);
+		},
+	);
 
-	test("disables MCP for an escaping mcp.json symlink without consuming outside content", async () => {
-		await writeManifest();
-		await writeSkill("deploy", "name: deploy\ndescription: Deploy things");
-		// A valid MCP config OUTSIDE the package: any registered server would
-		// prove the escaping file was read.
-		const outside = path.join(tempDir, "outside");
-		await fs.mkdir(outside, { recursive: true });
-		await fs.writeFile(
-			path.join(outside, "mcp.json"),
-			JSON.stringify({
-				$schema: AGENT_PLUGIN_MCP_SCHEMA,
-				mcpServers: { escaped: { type: "stdio", command: "server" } },
-			}),
-		);
-		await fs.symlink(path.join(outside, "mcp.json"), path.join(pluginPath, "mcp.json"));
-		await writeRegistry(pluginPath);
+	test.skipIf(process.platform === "win32")(
+		"disables MCP for an escaping mcp.json symlink without consuming outside content",
+		async () => {
+			await writeManifest();
+			await writeSkill("deploy", "name: deploy\ndescription: Deploy things");
+			// A valid MCP config OUTSIDE the package: any registered server would
+			// prove the escaping file was read.
+			const outside = path.join(tempDir, "outside");
+			await fs.mkdir(outside, { recursive: true });
+			await fs.writeFile(
+				path.join(outside, "mcp.json"),
+				JSON.stringify({
+					$schema: AGENT_PLUGIN_MCP_SCHEMA,
+					mcpServers: { escaped: { type: "stdio", command: "server" } },
+				}),
+			);
+			await fs.symlink(path.join(outside, "mcp.json"), path.join(pluginPath, "mcp.json"));
+			await writeRegistry(pluginPath);
 
-		const mcps = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
-		expect(mcps.all.filter(server => server.name.startsWith("std-plugin:"))).toEqual([]);
-		expect(mcps.warnings.some(warning => warning.includes("mcp.json resolves outside"))).toBe(true);
-		// Skills keep loading — the failure is isolated to the MCP component type.
-		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
-		expect(skills.all.find(skill => skill.name === "deploy")).toBeDefined();
-	});
+			const mcps = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+			expect(mcps.all.filter(server => server.name.startsWith("std-plugin:"))).toEqual([]);
+			expect(mcps.warnings.some(warning => warning.includes("mcp.json resolves outside"))).toBe(true);
+			// Skills keep loading — the failure is isolated to the MCP component type.
+			const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+			expect(skills.all.find(skill => skill.name === "deploy")).toBeDefined();
+		},
+	);
 
 	test("treats missing component locations as valid absence", async () => {
 		await writeManifest();
@@ -532,27 +541,30 @@ describe("agent-plugins discovery", () => {
 		}
 	});
 
-	test("falls back to the directory name when --plugin-dir plugin.json escapes the root", async () => {
-		// A valid manifest OUTSIDE the plugin dir: consuming it would name the
-		// synthetic root "renamed-plugin" instead of the directory basename.
-		const outside = path.join(tempDir, "outside");
-		await fs.mkdir(outside, { recursive: true });
-		await fs.writeFile(
-			path.join(outside, "manifest.json"),
-			JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "renamed-plugin" }),
-		);
-		const dirPath = path.join(tempDir, "plugins", "escape-dir");
-		await fs.mkdir(dirPath, { recursive: true });
-		await fs.symlink(path.join(outside, "manifest.json"), path.join(dirPath, "plugin.json"));
+	test.skipIf(process.platform === "win32")(
+		"falls back to the directory name when --plugin-dir plugin.json escapes the root",
+		async () => {
+			// A valid manifest OUTSIDE the plugin dir: consuming it would name the
+			// synthetic root "renamed-plugin" instead of the directory basename.
+			const outside = path.join(tempDir, "outside");
+			await fs.mkdir(outside, { recursive: true });
+			await fs.writeFile(
+				path.join(outside, "manifest.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "renamed-plugin" }),
+			);
+			const dirPath = path.join(tempDir, "plugins", "escape-dir");
+			await fs.mkdir(dirPath, { recursive: true });
+			await fs.symlink(path.join(outside, "manifest.json"), path.join(dirPath, "plugin.json"));
 
-		try {
-			await injectPluginDirRoots(tempDir, [dirPath], tempDir);
-			const { roots } = await listClaudePluginRoots(tempDir, tempDir);
-			expect(roots.find(root => root.path === dirPath)?.plugin).toBe("escape-dir");
-		} finally {
-			await injectPluginDirRoots(tempDir, []);
-		}
-	});
+			try {
+				await injectPluginDirRoots(tempDir, [dirPath], tempDir);
+				const { roots } = await listClaudePluginRoots(tempDir, tempDir);
+				expect(roots.find(root => root.path === dirPath)?.plugin).toBe("escape-dir");
+			} finally {
+				await injectPluginDirRoots(tempDir, []);
+			}
+		},
+	);
 
 	test("rejects malformed or repaired YAML frontmatter per skill", async () => {
 		await writeManifest();

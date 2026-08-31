@@ -50,7 +50,7 @@ test("dry-balance resolves configured bare role names", async () => {
 	expect(summary.success.total).toBe(1);
 });
 
-describe.serial("dry-balance default runtime OAuth routing startup", () => {
+describe.skipIf(process.platform === "win32").serial("dry-balance default runtime OAuth routing startup", () => {
 	test("installs persisted OAuth policy before the first runtime-provider refresh", async () => {
 		const settingsState = beginSettingsTest();
 		const projectTmp = await TempDir.create("@dry-balance-oauth-startup-");

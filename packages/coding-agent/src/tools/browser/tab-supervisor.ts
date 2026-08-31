@@ -116,6 +116,7 @@ export interface AcquireTabOptions {
 	cmuxSurface?: string;
 	ownerSessionId?: string;
 	ownerAgentLabel?: string;
+	deadlineStartMs?: number;
 }
 
 export interface AcquireTabResult {
@@ -142,11 +143,34 @@ const tabs = new Map<string, TabSession>();
 const acquireChains = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 const WORKER_INIT_TIMEOUT_MS = 15_000;
+const SETUP_BUDGET_CAP_MS = 10_000;
+const SETUP_BUDGET_FLOOR_MS = 2_000;
+const READY_BUDGET_FLOOR_MS = 500;
 // Names of tabs the supervisor force-killed (timeout past grace, failed recycle),
 // mapped to the kill reason. Lets the next `run` on that name explain WHY the tab
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
+const inventoryListeners = new Set<(inventory: readonly BrowserTabInventory[]) => void>();
+let inventoryNotificationScheduled = false;
+
+function emitBrowserTabInventory(): void {
+	if (inventoryNotificationScheduled) return;
+	inventoryNotificationScheduled = true;
+	queueMicrotask(() => {
+		inventoryNotificationScheduled = false;
+		const inventory = getTabsInventory();
+		for (const listener of inventoryListeners) listener(inventory);
+	});
+}
+
+export function subscribeBrowserTabInventory(
+	listener: (inventory: readonly BrowserTabInventory[]) => void,
+): () => void {
+	inventoryListeners.add(listener);
+	listener(getTabsInventory());
+	return () => inventoryListeners.delete(listener);
+}
 class RecoverableWorkerError extends ToolError {}
 
 async function waitForTabCleanup<T>(
@@ -187,6 +211,7 @@ function retainLease(tab: TabSession, opts: AcquireTabOptions): void {
 	if (!opts.ownerSessionId) return;
 	tab.retainedLeases.set(opts.ownerSessionId, opts.ownerAgentLabel ?? "anonymous");
 	tab.cleanupRequested = false;
+	emitBrowserTabInventory();
 }
 
 function settleUseToken(tab: TabSession, token: string | undefined): void {
@@ -220,6 +245,7 @@ function settleQueuedRun(tab: TabSession, node: QueuedRun, error: unknown): bool
 	const index = tab.queue.indexOf(node);
 	if (index < 0) return false;
 	tab.queue.splice(index, 1);
+	emitBrowserTabInventory();
 	clearTimeout(node.timer);
 	node.opts.signal?.removeEventListener("abort", node.abort as EventListener);
 	settleUseToken(tab, node.leaseToken);
@@ -231,6 +257,7 @@ function settleDequeuedRun(tab: TabSession, node: QueuedRun, error: unknown): vo
 	clearTimeout(node.timer);
 	node.opts.signal?.removeEventListener("abort", node.abort as EventListener);
 	settleUseToken(tab, node.leaseToken);
+	emitBrowserTabInventory();
 	node.pending.reject(error);
 }
 
@@ -348,17 +375,16 @@ async function acquireTabImpl(
 	}
 	let info: ReadyInfo;
 	try {
-		info = await initializeTabWorker(
-			worker,
-			initPayload,
-			Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS),
-		);
+		const workerInitTimeoutMs =
+			opts.deadlineStartMs === undefined
+				? Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS)
+				: opts.timeoutMs;
+		info = await initializeTabWorker(worker, initPayload, workerInitTimeoutMs, opts.deadlineStartMs);
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 		throw error;
 	}
-
 	// If the caller aborted while we were spawning/initializing the worker, tear
 	// the freshly-built worker down before publishing the tab so the browser
 	// refCount (which `holdBrowser` below would take) never grows for a tab
@@ -395,6 +421,7 @@ async function acquireTabImpl(
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	tabs.set(name, tab);
 	retainLease(tab, opts);
+	emitBrowserTabInventory();
 	return { tab, created: true };
 }
 
@@ -470,6 +497,7 @@ async function acquireCmuxTab(
 		};
 		tabs.set(name, tab);
 		retainLease(tab, opts);
+		emitBrowserTabInventory();
 		return { tab, created: true };
 	} catch (error) {
 		if (ownsSurface && surfaceId) {
@@ -548,6 +576,7 @@ async function runInTabWithSnapshot(
 		opts.timeoutMs,
 	);
 	tab.queue.push(node);
+	emitBrowserTabInventory();
 	void pumpTab(tab, name);
 	return promise;
 }
@@ -565,6 +594,7 @@ async function pumpTab(tab: TabSession, name: string): Promise<void> {
 	}
 	node.started = true;
 	tab.running = true;
+	emitBrowserTabInventory();
 	clearTimeout(node.timer);
 	node.abort && node.opts.signal?.removeEventListener("abort", node.abort);
 	try {
@@ -575,6 +605,7 @@ async function pumpTab(tab: TabSession, name: string): Promise<void> {
 	} finally {
 		settleUseToken(tab, node.leaseToken);
 		tab.running = false;
+		emitBrowserTabInventory();
 		void pumpTab(tab, name);
 		maybeReleaseUnownedTab(tab);
 	}
@@ -682,6 +713,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 	}
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
+	emitBrowserTabInventory();
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
 	for (const node of tab.queue.splice(0)) {
 		clearTimeout(node.timer as ReturnType<typeof setTimeout>);
@@ -741,6 +773,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 			closeError ??= error;
 		} finally {
 			if (tabs.get(name) === tab) tabs.delete(name);
+			emitBrowserTabInventory();
 		}
 		if (closeError) throw closeError;
 		return true;
@@ -778,6 +811,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		cleanupError ??= error;
 	} finally {
 		if (tabs.get(name) === tab) tabs.delete(name);
+		emitBrowserTabInventory();
 	}
 	if (cleanupError) throw cleanupError;
 	return true;
@@ -810,6 +844,7 @@ export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptio
 	for (const tab of candidates) {
 		tab.cleanupRequested = true;
 		tab.retainedLeases.delete(ownerId);
+		emitBrowserTabInventory();
 		const disposeError = new ToolAbortError("Browser session disposed");
 		for (const node of [...tab.queue]) {
 			if (node.pending.sessionKey === ownerId) settleQueuedRun(tab, node, disposeError);
@@ -878,6 +913,7 @@ function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 		const pending = tab.pending.get(msg.id);
 		if (!pending) return;
 		tab.pending.delete(msg.id);
+		emitBrowserTabInventory();
 		if (msg.ok) {
 			pending.resolve(msg.payload);
 			return;
@@ -887,6 +923,7 @@ function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 	}
 	if (msg.type === "ready") {
 		tab.info = msg.info;
+		emitBrowserTabInventory();
 		return;
 	}
 	if (msg.type === "tool-call") {
@@ -980,6 +1017,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		tab.worker = worker;
 		tab.info = info;
 		tab.state = "alive";
+		emitBrowserTabInventory();
 		worker.onMessage(msg => handleTabMessage(tab, msg));
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
@@ -992,18 +1030,21 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	if (!tab) return;
 	killedTabs.set(name, reason);
 	tab.state = "dead";
+	emitBrowserTabInventory();
 	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
 	if (tab.backend === "cmux") {
 		await releaseBrowser(tab.browser, { kill: false });
 		tabs.delete(name);
+		emitBrowserTabInventory();
 		return;
 	}
 	await tab.worker.terminate().catch(() => undefined);
 	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
+	emitBrowserTabInventory();
 }
 
 async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
@@ -1112,19 +1153,32 @@ async function initializeTabWorker(
 	worker: WorkerHandle,
 	payload: WorkerInitPayload,
 	timeoutMs: number,
+	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
-	const { promise, resolve, reject } = Promise.withResolvers<ReadyInfo>();
+	const remainingMs = timeoutMs - Math.round(performance.now() - deadlineStart);
+	const setupBudgetMs = Math.max(SETUP_BUDGET_FLOOR_MS, Math.min(SETUP_BUDGET_CAP_MS, Math.floor(remainingMs / 3)));
+	const setup = Promise.withResolvers<void>();
+	const ready = Promise.withResolvers<ReadyInfo>();
+	let setupDone = false;
+	const failStartup = (error: Error): void => {
+		(setupDone ? ready : setup).reject(error);
+	};
 	const unlisten = worker.onMessage(msg => {
-		if (msg.type === "ready") resolve(msg.info);
-		else if (msg.type === "init-failed") reject(errorFromPayload(msg.error));
+		if (msg.type === "setup") {
+			setupDone = true;
+			setup.resolve();
+		} else if (msg.type === "ready") ready.resolve(msg.info);
+		else if (msg.type === "init-failed") failStartup(errorFromPayload(msg.error));
 		else if (msg.type === "log") logWorkerMessage(msg);
 	});
 	const unlistenError = worker.onError(error => {
-		reject(new ToolError(`Tab worker failed during startup: ${error.message}`));
+		failStartup(new ToolError(`Tab worker failed during startup: ${error.message}`));
 	});
 	try {
 		worker.send({ type: "init", payload });
-		return await raceWithTimeout(promise, timeoutMs, "Timed out initializing browser tab worker");
+		await raceWithTimeout(setup.promise, setupBudgetMs, "Timed out waiting for tab worker setup");
+		const readyBudgetMs = Math.max(READY_BUDGET_FLOOR_MS, timeoutMs - Math.round(performance.now() - deadlineStart));
+		return await raceWithTimeout(ready.promise, readyBudgetMs, "Timed out initializing browser tab worker");
 	} finally {
 		unlisten();
 		unlistenError();
@@ -1135,8 +1189,9 @@ export function initializeTabWorkerForTest(
 	worker: WorkerHandle,
 	payload: WorkerInitPayload,
 	timeoutMs: number,
+	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
-	return initializeTabWorker(worker, payload, timeoutMs);
+	return initializeTabWorker(worker, payload, timeoutMs, deadlineStart);
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {

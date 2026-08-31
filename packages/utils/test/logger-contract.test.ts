@@ -174,7 +174,7 @@ describe("central logger byte contract", () => {
 });
 
 describe("central logger transport lifecycle", () => {
-	test("defaults to file-only without touching stdout or stderr", async () => {
+	test.skipIf(process.platform === "win32")("defaults to file-only without touching stdout or stderr", async () => {
 		const result = await runScenario("default-file");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");

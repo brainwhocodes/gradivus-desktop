@@ -156,7 +156,7 @@ vi.mock("../src/main/rpc-process", () => ({
 									autoRetryEnabled: true,
 									tokensPerSecond: 42.5,
 									queuedMessageCount: 0,
-									todoPhases: [],
+									todoState: { phases: [], revision: 0 },
 									contextUsage: { tokens: 1024, contextWindow: 200000 },
 								},
 							};
@@ -550,13 +550,14 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 		expect(toolItem?.status).toBe("complete");
 		expect(toolItem?.result).toBe("export class DesktopHost { ... }");
 
-		// Check the window received both the "running" tool event and the "complete" tool event
+		// The event queue coalesces per-frame stream updates for the same item, so
+		// the window receives at least one timeline event delivering the terminal
+		// status; the full running -> complete transition is observable in the store.
 		const toolEvents = mock.events.filter(
 			e => e.type === "timeline" && e.item?.kind === "tool" && e.item?.toolCallId === "tool-read-1",
 		);
-		expect(toolEvents.length).toBeGreaterThanOrEqual(2);
-		expect(toolEvents.some(e => e.item?.status === "running")).toBe(true);
-		expect(toolEvents.some(e => e.item?.status === "complete")).toBe(true);
+		expect(toolEvents.length).toBeGreaterThanOrEqual(1);
+		expect(toolEvents.at(-1)?.item?.status).toBe("complete");
 
 		// 5. Verify: Assistant response streaming deltas are received and assembled
 		const assistantItem = page.items.find(item => item.kind === "assistant");
@@ -564,8 +565,9 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 		expect(assistantItem?.text).toBe(simulationResult?.assembledDeltas);
 
 		const assistantEvents = mock.events.filter(e => e.type === "timeline" && e.item?.kind === "assistant");
-		expect(assistantEvents.length).toBeGreaterThanOrEqual(3);
-		// Check that the streamed text progressed incrementally to the final assembled text
+		expect(assistantEvents.length).toBeGreaterThanOrEqual(1);
+		// Stream updates coalesce per frame, so the window sees the assembled text
+		// via the terminal event; incremental assembly is asserted on the store above.
 		const lastAssistantEvent = assistantEvents.at(-1);
 		expect(lastAssistantEvent?.item?.text).toBe(simulationResult?.assembledDeltas);
 
@@ -623,11 +625,12 @@ describe("E2E Chat Progress & Lifecycle Integration", () => {
 		expect(toolItem?.status).toBe("error");
 		expect(toolItem?.isError).toBe(true);
 
+		// Per-frame coalescing delivers the terminal status for the tool item.
 		const toolEvents = mock.events.filter(
 			e => e.type === "timeline" && e.item?.kind === "tool" && e.item?.toolCallId === "tool-fail-1",
 		);
-		expect(toolEvents.some(e => e.item?.status === "running")).toBe(true);
-		expect(toolEvents.some(e => e.item?.status === "error")).toBe(true);
+		expect(toolEvents.length).toBeGreaterThanOrEqual(1);
+		expect(toolEvents.at(-1)?.item?.status).toBe("error");
 	});
 
 	it("manages multi-turn conversations and preserves cumulative timeline order", async () => {

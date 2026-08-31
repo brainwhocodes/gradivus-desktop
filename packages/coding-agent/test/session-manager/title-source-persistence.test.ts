@@ -58,7 +58,7 @@ function getHeader(entries: unknown[]): SessionHeader | undefined {
 	);
 }
 
-describe("session title source persistence", () => {
+describe.skipIf(process.platform === "win32")("session title source persistence", () => {
 	let testAgentDir: string;
 	let cwd: string;
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;

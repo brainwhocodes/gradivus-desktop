@@ -6,7 +6,6 @@ import {
 	encodeLocalJsonlFrame,
 	ensureSecureRuntimeRoot,
 	getGlobalDaemonRuntimeDir,
-	isEisdir,
 	isEnoent,
 	LocalJsonlDecoder,
 	logger,
@@ -16,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
+import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
@@ -74,16 +73,6 @@ export interface DaemonBrokerClient {
 
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
-
-async function canonicalProjectDir(projectDir: string): Promise<string> {
-	const resolved = path.resolve(projectDir);
-	try {
-		return await fs.realpath(resolved);
-	} catch (error) {
-		if (isEnoent(error) || isEisdir(error)) return resolved;
-		throw error;
-	}
-}
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	let stat: { isSymbolicLink(): boolean; isDirectory(): boolean };
@@ -521,8 +510,14 @@ export async function closeDaemonClients(): Promise<void> {
 
 /** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */
 export async function smokeTestDaemonBroker(): Promise<void> {
-	const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-project-"));
-	const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-run-"));
+	// Keep the broker's runtime dir under a private parent this process owns, so
+	// the broker's dead-scope sweep (pruneDeadDaemonRuntimeDirs, fired on startup)
+	// can only ever reclaim siblings inside it — never unrelated neighbours in
+	// os.tmpdir() such as tmux/ssh sockets or build trees (issue #8721).
+	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
+	const projectDir = path.join(smokeRoot, "project");
+	const runtimeDir = path.join(smokeRoot, "run");
+	await fs.mkdir(projectDir, { recursive: true });
 	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 	try {
 		const ping = await client.request({ op: "ping" });
@@ -530,7 +525,6 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 		await client.request({ op: "shutdown" });
 	} finally {
 		client.close();
-		await fs.rm(projectDir, { recursive: true, force: true });
-		await fs.rm(runtimeDir, { recursive: true, force: true });
+		await fs.rm(smokeRoot, { recursive: true, force: true });
 	}
 }

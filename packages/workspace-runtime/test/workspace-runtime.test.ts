@@ -67,7 +67,7 @@ describe("Workspace runtime contracts", () => {
 		expect(unknown.status).toBe("rejected");
 	});
 
-	it("creates a replacement terminal when closing the final tab", () => {
+	it("leaves an empty workspace when closing the final tab", () => {
 		const app = createWorkspaceApplication(createInitialWorkspaceDocumentV1());
 		const created = app.apply(command("workspace.create", 0, "create", createPayload));
 		expect(created.status).toBe("accepted");
@@ -77,8 +77,9 @@ describe("Workspace runtime contracts", () => {
 		expect(terminalId).toBeDefined();
 		const closed = app.apply(command("terminal.close", 2, "close", { id: terminalId }));
 		expect(closed.status).toBe("accepted");
-		expect(closed.document.tabs).toHaveLength(1);
-		expect(closed.document.tabs[0]?.paneIds).toHaveLength(1);
+		expect(closed.document.tabs).toHaveLength(0);
+		expect(closed.document.panes).toHaveLength(0);
+		expect(closed.document.terminals).toHaveLength(0);
 	});
 
 	it("enforces pane caps and capability revocation", () => {
@@ -335,6 +336,26 @@ describe("Workspace runtime contracts", () => {
 			command("tab.update", 4, "bad-active", { id: "tab-main", activePaneId: "unknown-pane" }),
 		);
 		expect(badActive.status).toBe("rejected");
+	});
+	it("persists tab reordering before a sibling or at the workspace end", () => {
+		const app = createWorkspaceApplication(createInitialWorkspaceDocumentV1());
+		expect(app.apply(command("workspace.create", 0, "create", createPayload)).status).toBe("accepted");
+		expect(
+			app.apply(command("terminal.open", 1, "tab-a", { locationId: "local", tabId: "tab-a", paneId: "pane-a" }))
+				.status,
+		).toBe("accepted");
+		expect(
+			app.apply(command("terminal.open", 2, "tab-b", { locationId: "local", tabId: "tab-b", paneId: "pane-b" }))
+				.status,
+		).toBe("accepted");
+
+		const movedBefore = app.apply(command("tab.reorder", 3, "move-before", { id: "tab-b", beforeId: "tab-a" }));
+		expect(movedBefore.status).toBe("accepted");
+		expect(movedBefore.document.tabs.map(tab => tab.id)).toEqual(["tab-b", "tab-a"]);
+
+		const movedToEnd = app.apply(command("tab.reorder", 4, "move-end", { id: "tab-b" }));
+		expect(movedToEnd.status).toBe("accepted");
+		expect(movedToEnd.document.tabs.map(tab => tab.id)).toEqual(["tab-a", "tab-b"]);
 	});
 
 	it("atomically closes tab and cleans up all child panes, terminals, and agents", () => {

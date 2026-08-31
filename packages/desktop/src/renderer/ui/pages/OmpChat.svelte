@@ -10,6 +10,10 @@
   import Stop from "@solar-icons/svelte/linear/stop";
   import type { AgentHubAgent, AgentHubMessagePage, AgentHubSnapshot, AgentSettingTab, AgentSettingValue, AgentSettingView, AuthAccountView, AuthEvent, BootstrapSnapshot, GradivusEvent, GradivusSettings, ExtensionView, FileDiffView, InterruptMode, ModelOption, OAuthAccountsView, OpenRouterModelRouting, PromptAttachmentUpload, PromptAttachmentView, QueueMode, SessionKind, SessionRecordV1, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../../../shared/contracts";
   import { MAX_INLINE_PROMPT_BYTES, MAX_PROMPT_ATTACHMENT_BATCH_BYTES, MAX_PROMPT_ATTACHMENT_BYTES, MAX_PROMPT_ATTACHMENT_COUNT } from "../../../shared/contracts";
+  import type { AgentPromptScope, AgentPromptView, SessionStatsView, TimelineToolActivity, TodoPhase, TodoState } from "../../../shared/contracts";
+  import type { PlanReviewResolutionResult, PlanReviewView } from "../../../shared/contracts";
+  import type { TodoEditBuffer } from "../../todo-editing";
+  import { promptAttachmentDisplayText } from "../../../shared/attachment-display";
   import { changedFiles, projectTimeline } from "../../../shared/projection";
   import {
     attachmentsReferencedByDraft,
@@ -22,6 +26,7 @@
   import { AUTH_DISCOVERY_PROVIDER } from "../../../shared/auth-events";
   import ApplicationSettingsPanel from "../organisms/ApplicationSettingsPanel.svelte";
   import SettingsShell from "../organisms/SettingsShell.svelte";
+  import SubagentPromptEditor from "../organisms/SubagentPromptEditor.svelte";
 import ModelCapabilityIcons from "../molecules/ModelCapabilityIcons.svelte";
 import OpenRouterModelAccordion from "../molecules/OpenRouterModelAccordion.svelte";
 import TimelineEntry from "../organisms/TimelineEntry.svelte";
@@ -30,12 +35,14 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   import FileDiffInspector from "../organisms/FileDiffInspector.svelte";
   import FileActivityPanel from "../organisms/FileActivityPanel.svelte";
   import AgentHubPanel from "../organisms/AgentHubPanel.svelte";
+  import TodoDock from "../organisms/TodoDock.svelte";
   import { commandInsertion, searchSlashCommands, slashCommandQuery } from "../../command-search";
   import CommandMenu from "../molecules/CommandMenu.svelte";
   import AttachmentChip from "../molecules/AttachmentChip.svelte";
   import IconButton from "../molecules/IconButton.svelte";
   import LabeledSelect from "../molecules/LabeledSelect.svelte";
   import ModalShell from "../molecules/ModalShell.svelte";
+  import SessionStatsModal from "../molecules/SessionStatsModal.svelte";
   import StateCard from "../molecules/StateCard.svelte";
   import Toast from "../molecules/Toast.svelte";
   import TurnFileSummary from "../molecules/TurnFileSummary.svelte";
@@ -45,11 +52,16 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   import SessionRail from "../organisms/SessionRail.svelte";
   import RunInspector from "../organisms/RunInspector.svelte";
   import Composer from "../organisms/Composer.svelte";
+  import PlanReviewModal from "../organisms/PlanReviewModal.svelte";
+  import type { WorkspaceTab } from "../../workspace-types";
   import type { ResolvedTheme } from "../../../shared/theme-palette";
   import type { SettingsSearchEntry } from "../../settings-search";
   import type { UpdateGradivusSettingsInput } from "../../../shared/contracts";
   export let appSettings: GradivusSettings | undefined = undefined;
+  export let terminalTabs: WorkspaceTab[] = [];
+  export let workspaceId = "";
   export let theme: ResolvedTheme = "dark";
+  export let onActiveSessionChange: (sessionId: string) => void = () => undefined;
   export let settingsRoute: SettingsRoute = { open: false, activeCategory: "runtime", query: "" };
   export let onOpenSettings: (category: SettingsCategoryId, trigger: HTMLElement) => void = () => undefined;
   export let onSettingsRouteChange: (updates: Partial<Pick<SettingsRoute, "activeCategory" | "query">>) => void = () => undefined;
@@ -57,7 +69,11 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   export let onUpdateAppSetting: (key: string, updates: UpdateGradivusSettingsInput, label: string) => Promise<void> = async () => undefined;
   export let onResetAppSettings: () => Promise<void> = async () => undefined;
   export let appSettingsBusy: ReadonlySet<string> = new Set<string>();
+  const QUICK_COMMAND_NAMES = ["mcp", "tree", "export", "share"] as const;
   export let appSettingsStatus: { key: string; tone: "saving" | "success" | "error"; message: string } | undefined = undefined;
+  export let active = true;
+  export let chatPresentationReady = true;
+  export let onPlanReviewCountChange: (count: number) => void = () => undefined;
 
   type SettingKey = "model" | "thinking" | "fast" | "steering" | "follow-up" | "interrupt" | "compaction" | "retry";
   const SETTINGS_THINKING_OPTIONS: readonly DropdownOption[] = [
@@ -121,6 +137,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let bootstrap: BootstrapSnapshot | undefined;
   let kind: SessionKind = "work";
   let activeId = "";
+  let planReviewsBySession = new Map<string, PlanReviewView>();
+  let planReviewVisible = false;
+  let planReviewSessionId = "";
+  let planReviewOpener: HTMLElement | null = null;
+  let lastAutomaticallyPresentedReviewId = "";
+  let activePlanReview: PlanReviewView | undefined;
   let sessionSelectionToken = 0;
   let current: SessionSnapshot | undefined;
   let draft = "";
@@ -142,6 +164,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let loading = false;
   let loadingOlder = false;
   let reasoningLoading = new Set<string>();
+  let timelineToolDetails = new Map<string, TimelineToolActivity>();
+  let timelineToolDetailLoading = new Set<string>();
+  let timelineToolDetailErrors = new Map<string, string>();
   let openReasoning = new Set<string>();
   let renameValue = "";
   let renaming = false;
@@ -207,7 +232,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     text: string;
     displayText: string;
     batch: AttachmentBatch;
-    status: "queued" | "steering" | "steered";
+    route: "steer" | "follow-up";
+    status: "submitting" | "queued" | "steering" | "steered";
+    error?: string;
     canonicalUserId?: string;
     canonicalItem?: TimelineItem;
   }
@@ -260,6 +287,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let settingsStatusMessage = "";
   let agentSettings: AgentSettingView[] = [];
   let agentSettingsBusy = new Set<string>();
+  let agentPrompts: AgentPromptView[] = [];
+  let agentPromptsLoading = false;
+  let agentPromptsError = "";
+  let agentPromptEditorDirty = false;
+  let pendingSettingsNavigation: { category?: SettingsCategoryId; close?: true } | undefined;
+  let settingsNavigationReturnFocus: HTMLElement | undefined;
+  let promptDirtyDefaultAction: HTMLButtonElement | undefined;
   let activeAgentSettingTab: AgentSettingTab | undefined;
   let settingsSearchEntries: readonly SettingsSearchEntry[] = [];
   let settingsRequestGeneration = 0;
@@ -287,6 +321,16 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   let transcriptPane: HTMLElement | undefined;
   let agentHubPaneResizeObserver: ResizeObserver | undefined;
   let inspectorTabBySession = new Map<string, InspectorTab>();
+  let todoEditBuffers = new Map<string, TodoEditBuffer>();
+  let todoUndoStates = new Map<string, TodoState>();
+  let todoWriteQueues = new Map<string, Promise<void>>();
+  type ParityDialog = "compact" | "handoff" | "restart";
+  let parityDialog: ParityDialog | undefined;
+  let parityInstructions = "";
+  let parityBusy: ParityDialog | "retry" | "stats" | "export" | "abort-retry" | undefined;
+  let parityStatus = "";
+  let sessionStats: SessionStatsView | undefined;
+  let parityDefaultButton: HTMLButtonElement | undefined;
   let agentHubSnapshot: AgentHubSnapshot = { agents: [] };
   let agentHubSelectedAgentId = "";
   let agentHubSelectedAgent: AgentHubAgent | undefined;
@@ -312,7 +356,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     return parts[parts.length - 1] || cwd;
   }
 
-  let sessionLiveStatus = new Map<string, { status: "idle" | "running" | "error"; lastCompletedAt?: number; hasUnseenComplete?: boolean }>();
+  let sessionLiveStatus = new Map<string, { status: "idle" | "running" | "error"; lastCompletedAt?: number; hasUnseenComplete?: boolean; planReview?: PlanReviewView["status"] }>();
 
   function updateSessionStatus(sessionId: string, status: "idle" | "running" | "error"): void {
     const prev = sessionLiveStatus.get(sessionId);
@@ -322,8 +366,159 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       status,
       lastCompletedAt: status === "idle" && prev?.status === "running" ? Date.now() : prev?.lastCompletedAt,
       hasUnseenComplete: hasUnseen,
+      planReview: prev?.planReview,
     });
     sessionLiveStatus = next;
+  }
+  function setSessionPlanReview(sessionId: string, review: PlanReviewView | undefined): void {
+    const reviews = new Map(planReviewsBySession);
+    if (review) reviews.set(sessionId, review);
+    else reviews.delete(sessionId);
+    planReviewsBySession = reviews;
+    const live = sessionLiveStatus.get(sessionId) ?? { status: "idle" as const };
+    sessionLiveStatus = new Map(sessionLiveStatus).set(sessionId, {
+      ...live,
+      planReview: review?.status,
+    });
+    if (current?.record.id === sessionId) {
+      current = { ...current, planReview: review };
+    }
+    onPlanReviewCountChange(reviews.size);
+    if (!review && planReviewSessionId === sessionId) {
+      planReviewVisible = false;
+      planReviewSessionId = "";
+    }
+  }
+
+  function syncSnapshotPlanReview(snapshot: SessionSnapshot): void {
+    setSessionPlanReview(snapshot.record.id, snapshot.planReview);
+  }
+
+  function planReviewBlockingDialogOpen(): boolean {
+    return Boolean(
+      settingsRoute.open ||
+      parityDialog ||
+      sessionStats ||
+      pendingSettingsNavigation ||
+      aboutOpen ||
+      authPrompt ||
+      pendingExtension ||
+      agentHubWindowOpen ||
+      selectedDiffPath,
+    );
+  }
+
+  async function maybePresentPlanReview(sessionId: string, review: PlanReviewView): Promise<void> {
+    if (
+      review.status !== "ready" ||
+      review.id === lastAutomaticallyPresentedReviewId ||
+      !active ||
+      !chatPresentationReady ||
+      activeId !== sessionId ||
+      current?.record.id !== sessionId ||
+      planReviewBlockingDialogOpen()
+    ) return;
+    await tick();
+    if (!active || !chatPresentationReady || activeId !== sessionId || planReviewBlockingDialogOpen()) return;
+    lastAutomaticallyPresentedReviewId = review.id;
+    planReviewSessionId = sessionId;
+    planReviewOpener = composerInput ?? null;
+    planReviewVisible = true;
+  }
+
+  async function openActivePlanReview(trigger?: HTMLElement): Promise<void> {
+    if (!current) return;
+    const sessionId = current.record.id;
+    let review = planReviewsBySession.get(sessionId);
+    if (!review) {
+      if (!current.planReviewSupported) {
+        showNotice("Plan review controls require a current OMP runtime.", "warning", "Plan review unavailable");
+        return;
+      }
+      try {
+        review = await window.gradivus.requestPlanReview(sessionId);
+        setSessionPlanReview(sessionId, review);
+      } catch (error) {
+        showError(error);
+        return;
+      }
+    }
+    planReviewSessionId = sessionId;
+    planReviewOpener = trigger ?? composerInput ?? null;
+    planReviewVisible = true;
+  }
+
+  function closePlanReview(): void {
+    planReviewVisible = false;
+    planReviewSessionId = "";
+  }
+
+  function planReviewDisabledReason(): string | undefined {
+    if (!current) return "The chat is unavailable.";
+    if (current.state === "stopped") return "OMP is stopped. Restart the chat to continue reviewing.";
+    if (current.state === "error") return current.warning ?? "OMP disconnected. Reconnect before changing the plan.";
+    return undefined;
+  }
+
+  async function updateVisiblePlanReview(input: {
+    reviewId: string;
+    content: string;
+    expectedRevision: string;
+    annotationState: PlanReviewView["annotationState"];
+  }): Promise<PlanReviewView> {
+    if (!current) throw new Error("No active chat");
+    const updated = await window.gradivus.updatePlanReview(
+      current.record.id,
+      input.reviewId,
+      input.content,
+      input.expectedRevision,
+      input.annotationState,
+    );
+    setSessionPlanReview(current.record.id, updated);
+    return updated;
+  }
+
+  async function reloadVisiblePlanReview(): Promise<PlanReviewView> {
+    if (!current) throw new Error("No active chat");
+    const updated = await window.gradivus.requestPlanReview(current.record.id);
+    setSessionPlanReview(current.record.id, updated);
+    return updated;
+  }
+
+  async function resolveVisiblePlanReview(decision: Parameters<typeof window.gradivus.resolvePlanReview>[3]): Promise<PlanReviewResolutionResult> {
+    if (!current || !activePlanReview) throw new Error("No active plan review");
+    return window.gradivus.resolvePlanReview(
+      current.record.id,
+      activePlanReview.id,
+      activePlanReview.revision,
+      decision,
+    );
+  }
+
+  function acceptPlanReview(result: PlanReviewResolutionResult): void {
+    if (!result.accepted) return;
+    closePlanReview();
+    if (result.createdSession) {
+      const snapshot = result.createdSession;
+      if (bootstrap) {
+        bootstrap = {
+          ...bootstrap,
+          registry: {
+            ...bootstrap.registry,
+            sessions: [...bootstrap.registry.sessions.filter(session => session.id !== snapshot.record.id), snapshot.record],
+            activeByKind: { ...bootstrap.registry.activeByKind, [snapshot.record.kind]: snapshot.record.id },
+          },
+        };
+      }
+      void selectSession(snapshot.record.id);
+      return;
+    }
+    if (result.awaitingRefinement) void tick().then(() => composerInput?.focus({ preventScroll: true }));
+  }
+
+  $: activePlanReview = planReviewsBySession.get(planReviewSessionId || activeId);
+  $: if (active && chatPresentationReady && !settingsRoute.open && activePlanReview && !planReviewVisible) {
+    void maybePresentPlanReview(activeId, activePlanReview);
   }
 
   $: workspaceGroups = (() => {
@@ -336,7 +531,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
     const groups: WorkspaceGroup[] = [];
     for (const [cwd, groupSessions] of map.entries()) {
-      groupSessions.sort((a, b) => (new Date(b.lastOpenedAt || b.createdAt).getTime()) - (new Date(a.lastOpenedAt || a.createdAt).getTime()));
       const hasRunning = groupSessions.some(s => sessionLiveStatus.get(s.id)?.status === "running");
       groups.push({
         cwd,
@@ -345,11 +539,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
         isRunning: hasRunning,
       });
     }
-    groups.sort((a, b) => {
-      if (current?.record.cwd === a.cwd) return -1;
-      if (current?.record.cwd === b.cwd) return 1;
-      return a.folderName.localeCompare(b.folderName);
-    });
     return groups;
   })();
   async function createNewChatInWorkspace(targetCwd?: string): Promise<void> {
@@ -614,8 +803,17 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
   $: sessions = bootstrap?.registry.sessions ?? [];
+  $: onActiveSessionChange(activeId);
   $: hasSessions = sessions.length > 0;
-  $: isTurnActive = Boolean((current && pendingTurns.has(current.record.id)) || current?.state === "running");
+  $: isTurnActive = Boolean(
+    (current && pendingTurns.has(current.record.id))
+    || current?.state === "running"
+    || current?.isStreaming
+    || current?.isCompacting
+    || current?.retryState
+    || parityBusy === "compact"
+    || parityBusy === "handoff"
+  );
   $: isRunning = isTurnActive;
   $: canCompose = ensureCanCompose(current?.record.id, sessionSelectionToken, current, activeId, loading);
   $: canEditMessages = Boolean(
@@ -648,6 +846,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   $: agentHubSelectedAgent = agentHubAgents.find(agent => agent.id === agentHubSelectedAgentId);
   $: agentHubUnreadCount = Array.from(agentHubUnreadBySession.get(activeId)?.keys() ?? []).length;
   $: fileActivityCount = outputFiles.length;
+  $: commandShortcuts = QUICK_COMMAND_NAMES.flatMap(name => {
+    const command = availableCommands.find(candidate => candidate.name === name || candidate.aliases?.includes(name));
+    return command ? [command] : [];
+  }).slice(0, 4);
+  $: todoEditBuffer = todoEditBuffers.get(activeId);
+  $: todoUndoState = todoUndoStates.get(activeId);
   $: commandQuery = slashCommandQuery(draft);
   $: commandMatches = commandQuery === null ? [] : searchSlashCommands(availableCommands, commandQuery);
   $: commandMenuVisible = commandQuery !== null && !commandMenuDismissed && canCompose;
@@ -678,7 +882,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   $: activeAgentSettingTab = AGENT_SETTING_CATEGORIES.find(
     item => item.category === settingsRoute.activeCategory,
   )?.tab;
-  $: settingsSearchEntries = buildSettingsSearchEntries(agentSettings, authAccounts, oauthAccounts);
+  $: settingsSearchEntries = buildSettingsSearchEntries(agentSettings, agentPrompts, authAccounts, oauthAccounts);
   $: if (timelineContent !== observedTimelineContent) {
     timelineResizeObserver?.disconnect();
     observedTimelineContent = timelineContent;
@@ -709,6 +913,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     settingsRequestGeneration += 1;
     settingsRefreshToken += 1;
     settingsRefreshing = false;
+  }
+  $: if (pendingSettingsNavigation && promptDirtyDefaultAction) {
+    promptDirtyDefaultAction.focus({ preventScroll: true });
   }
 
 
@@ -750,8 +957,10 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       discardVisibleAttachments(current.record.id);
       draftBySession.set(current.record.id, draft);
     }
-    if (current?.record.id && current.record.id !== id) terminalOpen = false;
-    if (!sameSession) agentHubWindowOpen = false;
+    if (!sameSession) {
+      agentHubWindowOpen = false;
+      closePlanReview();
+    }
     const requestToken = ++sessionSelectionToken;
     resetFileDiff();
     pendingExtension = undefined;
@@ -773,6 +982,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     try {
       const snapshot = await window.gradivus.openSession(id);
       current = snapshot;
+      syncSnapshotPlanReview(snapshot);
       if (snapshot.pendingExtension) pendingExtension = snapshot.pendingExtension;
       agentHubSnapshot = { agents: [] };
       if (snapshot.agentHub) applyAgentHubSnapshot(id, snapshot.agentHub);
@@ -946,6 +1156,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       if (!snapshot) return;
       discardVisibleAttachments();
       current = snapshot;
+      syncSnapshotPlanReview(snapshot);
       activeId = snapshot.record.id;
       timelineSessionSource = activeId;
       updateSessionStatus(activeId, snapshot.state === "running" ? "running" : "idle");
@@ -1516,9 +1727,35 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       return;
     }
     const text = rawText.trim();
+    const awaitingReview = planReviewsBySession.get(sessionId);
+    if (awaitingReview?.status === "awaiting_refinement") {
+      const batch = takeAttachmentBatch();
+      const composition = buildPromptComposition(text, batch.views);
+      draft = "";
+      commandMenuDismissed = true;
+      errorMessage = "";
+      try {
+        const result = await window.gradivus.resolvePlanReview(
+          sessionId,
+          awaitingReview.id,
+          awaitingReview.revision,
+          { kind: "refine", feedback: "", composition },
+        );
+        if (!result.accepted) {
+          await restoreRejectedAdmission(admission, rawText, batch);
+          return;
+        }
+        setSessionPlanReview(sessionId, { ...awaitingReview, status: "applying", phase: "accepted" });
+        await releaseAttachmentBatch(sessionId, batch);
+      } catch (error) {
+        await restoreRejectedAdmission(admission, rawText, batch);
+        showError(error);
+      }
+      return;
+    }
     const activeTurn = isTurnActive;
     if (activeTurn) {
-      await queueFollowUp();
+      await admitActiveMessage("steer", rawText, admission);
       return;
     }
     const batch = takeAttachmentBatch();
@@ -1587,43 +1824,80 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 
 
   async function queueFollowUp(): Promise<void> {
-    const sessionId = current?.record.id;
-    const selectionToken = sessionSelectionToken;
+    await admitActiveMessage("follow-up");
+  }
+
+  function admittedMessageText(text: string, batch: AttachmentBatch): string {
+    const normalized = promptAttachmentDisplayText(text);
+    return normalized || batch.views.map(view => view.reference).join("\n") || "Attached files";
+  }
+
+  async function restoreRejectedAdmission(
+    admission: ComposeAdmission,
+    originalDraft: string,
+    batch: AttachmentBatch,
+  ): Promise<void> {
+    if (current?.record.id === admission.sessionId && sessionSelectionToken === admission.selectionToken) {
+      restoreDraftAfterFailure(originalDraft);
+      restoreAttachmentBatch(batch);
+      commandMenuDismissed = false;
+      await tick();
+      composerInput?.focus({ preventScroll: true });
+      return;
+    }
+    await releaseAttachmentBatch(admission.sessionId, batch);
+  }
+
+  async function admitActiveMessage(
+    route: "steer" | "follow-up",
+    textInput?: string,
+    startedAdmission?: ComposeAdmission,
+  ): Promise<void> {
+    const sessionId = startedAdmission?.sessionId ?? current?.record.id;
+    const selectionToken = startedAdmission?.selectionToken ?? sessionSelectionToken;
     if (
       !ensureCanCompose(sessionId, selectionToken) ||
+      !isTurnActive ||
       isComposerBusy ||
-      (!draft.trim() && promptAttachments.length === 0)
+      (!(typeof textInput === "string" ? textInput : draft).trim() && promptAttachments.length === 0)
     ) return;
     const admission: ComposeAdmission = { sessionId, selectionToken };
-    const originalDraft = draft;
+    const originalDraft = typeof textInput === "string" ? textInput : draft;
     const text = originalDraft.trim();
     const batch = takeAttachmentBatch();
-    const optimisticId = appendOptimisticUserMessage(sessionId, text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"));
-    const queued: QueuedPrompt = {
+    const displayText = admittedMessageText(text, batch);
+    const optimisticId = appendOptimisticUserMessage(sessionId, displayText);
+    const admitted: QueuedPrompt = {
       sessionId,
       optimisticId,
       text,
-      displayText: text || attachmentDisplayName(batch.views[0]?.name ?? "Attached files"),
+      displayText,
       batch,
-      status: "queued",
+      route,
+      status: "submitting",
     };
-    queuedPrompts = new Map(queuedPrompts).set(optimisticId, queued);
+    queuedPrompts = new Map(queuedPrompts).set(optimisticId, admitted);
     draft = "";
+    commandMenuDismissed = true;
+    errorMessage = "";
     try {
-      await window.gradivus.queueFollowUp(sessionId, buildPromptComposition(text, batch.views));
+      const composition = buildPromptComposition(text, batch.views);
+      if (route === "steer") await window.gradivus.steer(sessionId, composition);
+      else await window.gradivus.queueFollowUp(sessionId, composition);
       retainAdmittedAttachmentBatch(sessionId, batch);
-      showNotice("Queued for the next turn", "info", "Queue");
+      const currentAdmission = queuedPrompts.get(optimisticId);
+      if (currentAdmission) {
+        queuedPrompts = new Map(queuedPrompts).set(optimisticId, {
+          ...currentAdmission,
+          status: currentAdmission.canonicalUserId || route === "steer" ? "steered" : "queued",
+          error: undefined,
+        });
+      }
       await refreshSessionMetrics(sessionId);
     } catch (error) {
       queuedPrompts = withoutQueuedPrompt(optimisticId);
       removeOptimisticUserMessage(sessionId, optimisticId);
-      if (current?.record.id === sessionId && sessionSelectionToken === admission.selectionToken) {
-        restoreDraftAfterFailure(originalDraft);
-        restoreAttachmentBatch(batch);
-      } else {
-        await releaseAttachmentBatch(sessionId, batch);
-      }
-      commandMenuDismissed = false;
+      await restoreRejectedAdmission(admission, originalDraft, batch);
       showError(error);
     }
   }
@@ -1636,27 +1910,28 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 
   function findQueuedPromptForEvent(sessionId: string, item: TimelineItem): QueuedPrompt | undefined {
     if (item.kind !== "user" || item.id.startsWith("opt-")) return undefined;
+    const itemText = promptAttachmentDisplayText(item.text);
     return [...queuedPrompts.values()].find(candidate =>
       candidate.sessionId === sessionId &&
       !candidate.canonicalUserId &&
-      (candidate.displayText === item.text || candidate.text === item.text),
+      (promptAttachmentDisplayText(candidate.displayText) === itemText ||
+        promptAttachmentDisplayText(candidate.text) === itemText),
     );
   }
-
   async function steerQueuedPrompt(id: string): Promise<void> {
     const queued = queuedPrompts.get(id);
     if (!queued || queued.status !== "queued") return;
-    queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steering" });
+    queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steering", error: undefined });
     try {
       await window.gradivus.steerQueued(queued.sessionId, buildPromptComposition(queued.text, queued.batch.views));
-      queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steered" });
+      queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "steered", error: undefined });
       showNotice("Steering message sent", "success", "Steering");
+      await refreshSessionMetrics(queued.sessionId);
     } catch (error) {
-      queuedPrompts = new Map(queuedPrompts).set(id, queued);
-      showError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      queuedPrompts = new Map(queuedPrompts).set(id, { ...queued, status: "queued", error: message });
     }
   }
-
   async function abortTurn(): Promise<void> {
     if (!current) return;
     const sessionId = current.record.id;
@@ -1779,7 +2054,20 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   }
 
   function preserveQueuedPrompts(sessionId: string, snapshot: SessionSnapshot): SessionSnapshot {
-    const local = [...queuedPrompts.values()].filter(candidate => candidate.sessionId === sessionId);
+    let local = [...queuedPrompts.values()].filter(candidate => candidate.sessionId === sessionId);
+    const serverQueuedCount = snapshot.queuedMessageCount ?? 0;
+    const localQueued = local.filter(candidate => candidate.route === "follow-up" && candidate.status === "queued");
+    const deliveredCount = Math.max(0, localQueued.length - serverQueuedCount);
+    if (deliveredCount > 0) {
+      const deliveredIds = new Set(localQueued.slice(0, deliveredCount).map(candidate => candidate.optimisticId));
+      const next = new Map(queuedPrompts);
+      for (const id of deliveredIds) {
+        const candidate = next.get(id);
+        if (candidate) next.set(id, { ...candidate, status: "steered", error: undefined });
+      }
+      queuedPrompts = next;
+      local = [...next.values()].filter(candidate => candidate.sessionId === sessionId);
+    }
     if (local.length === 0) return snapshot;
     let timeline = snapshot.timeline;
     let timelineTotal = snapshot.timelineTotal ?? snapshot.timeline.length;
@@ -1875,6 +2163,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       const snapshot = await window.gradivus.deleteSession(id);
       bootstrap = { ...(bootstrap ?? snapshot), registry: snapshot.registry };
       sessionLiveStatus = (() => { const next = new Map(sessionLiveStatus); next.delete(id); return next; })();
+      planReviewsBySession = (() => {
+        const next = new Map(planReviewsBySession);
+        next.delete(id);
+        onPlanReviewCountChange(next.size);
+        return next;
+      })();
       unseenIdsBySession.delete(id);
       followBySession.delete(id);
       draftBySession.delete(id);
@@ -2044,6 +2338,65 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     void changeAgentSetting(setting, option.value);
   }
 
+  async function saveAgentPrompt(
+    name: string,
+    scope: AgentPromptScope,
+    systemPrompt: string,
+    expectedRevision: string | null,
+  ): Promise<AgentPromptView> {
+    const sessionId = current?.record.id;
+    const updated = await window.gradivus.saveAgentPrompt(sessionId, name, scope, systemPrompt, expectedRevision);
+    agentPrompts = agentPrompts.map(agent => agent.name === updated.name ? updated : agent);
+    return updated;
+  }
+
+  async function resetAgentPrompt(
+    name: string,
+    scope: AgentPromptScope,
+    expectedRevision: string,
+  ): Promise<AgentPromptView> {
+    const sessionId = current?.record.id;
+    const updated = await window.gradivus.resetAgentPrompt(sessionId, name, scope, expectedRevision);
+    agentPrompts = agentPrompts.map(agent => agent.name === updated.name ? updated : agent);
+    return updated;
+  }
+
+  function captureSettingsReturnFocus(): void {
+    settingsNavigationReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  }
+
+  function requestSettingsCategoryChange(activeCategory: SettingsCategoryId): boolean {
+    if (activeCategory === settingsRoute.activeCategory) return false;
+    if (agentPromptEditorDirty && settingsRoute.activeCategory === "omp-agents") {
+      captureSettingsReturnFocus();
+      pendingSettingsNavigation = { category: activeCategory };
+      return false;
+    }
+    onSettingsRouteChange({ activeCategory });
+    return true;
+  }
+  function requestCloseSettings(): void {
+    if (agentPromptEditorDirty && settingsRoute.activeCategory === "omp-agents") {
+      captureSettingsReturnFocus();
+      pendingSettingsNavigation = { close: true };
+      return;
+    }
+    onCloseSettings();
+  }
+
+  function keepPromptDraft(): void {
+    pendingSettingsNavigation = undefined;
+    void tick().then(() => settingsNavigationReturnFocus?.focus({ preventScroll: true }));
+  }
+
+  function discardPromptDraftAndNavigate(): void {
+    const pending = pendingSettingsNavigation;
+    pendingSettingsNavigation = undefined;
+    agentPromptEditorDirty = false;
+    if (pending?.category) onSettingsRouteChange({ activeCategory: pending.category });
+    else if (pending?.close) onCloseSettings();
+  }
+
   async function loadCommands(sessionId: string): Promise<void> {
     const requestToken = ++commandRequestToken;
     commandsLoading = true;
@@ -2176,6 +2529,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       current && current.state !== "stopped" && current.state !== "error" ? current.record.id : undefined;
     return settingsRoute.open && generation === settingsRequestGeneration && currentSessionId === sessionId;
   }
+  function isAgentPromptResponseCurrent(generation: number, sessionId: string | undefined): boolean {
+    return settingsRoute.open && generation === settingsRequestGeneration && current?.record.id === sessionId;
+  }
   function isApplicationSettingsCategory(category: SettingsCategoryId): category is ApplicationSettingsCategoryId {
     return category === "app-appearance" || category === "app-behavior" || category === "terminal" || category === "browser" || category === "workspace";
   }
@@ -2184,6 +2540,9 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     settingsRefreshing = true;
     const refreshToken = ++settingsRefreshToken;
     const generation = settingsRequestGeneration;
+    const promptSessionId = current?.record.id;
+    agentPromptsLoading = true;
+    agentPromptsError = "";
     const activeSessionId =
       current && current.state !== "stopped" && current.state !== "error" ? current.record.id : undefined;
     const tasks: Promise<unknown>[] = [
@@ -2196,6 +2555,14 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       window.gradivus.getAgentSettings(activeSessionId).then(settings => {
         if (isSettingsResponseCurrent(generation, activeSessionId)) agentSettings = settings;
       }),
+      window.gradivus.getAgentPrompts(promptSessionId).then(prompts => {
+        if (isAgentPromptResponseCurrent(generation, promptSessionId)) agentPrompts = prompts;
+      }).catch(error => {
+        if (isAgentPromptResponseCurrent(generation, promptSessionId)) {
+          agentPromptsError = error instanceof Error ? error.message : String(error);
+        }
+        throw error;
+      }),
     ];
     if (activeSessionId) tasks.push(loadModels(activeSessionId, { generation, sessionId: activeSessionId }));
     const results = await Promise.allSettled(tasks);
@@ -2204,6 +2571,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       const failure = results.find(result => result.status === "rejected");
       if (failure?.status === "rejected") settingsStatusMessage = failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
     }
+      if (isAgentPromptResponseCurrent(generation, promptSessionId)) agentPromptsLoading = false;
     settingsRefreshing = false;
   }
   async function refreshOAuthAccounts(settingsGuard?: SettingsLoadGuard): Promise<void> {
@@ -2347,6 +2715,12 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     commandMenuDismissed = true;
     void tick().then(() => composerInput?.focus());
   }
+  function openCommandPalette(): void {
+    draft = "/";
+    commandMenuDismissed = false;
+    selectedCommandIndex = 0;
+    void tick().then(() => composerInput?.focus());
+  }
   function modelIdentifier(model: ModelOption): string {
     return `${model.provider}/${model.id}`;
   }
@@ -2376,6 +2750,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
   }
   function buildSettingsSearchEntries(
     settings: readonly AgentSettingView[],
+    prompts: readonly AgentPromptView[],
     providers: readonly AuthAccountView[],
     oauth: OAuthAccountsView,
   ): readonly SettingsSearchEntry[] {
@@ -2398,6 +2773,24 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           apply: setting.apply,
         });
       }
+    }
+    entries.push({
+      id: "agents.editor",
+      category: "omp-agents",
+      group: "Subagent definitions",
+      label: "Subagent prompt editor",
+      description: "Edit project and user prompt overrides used on the next subagent spawn.",
+      keywords: ["agents system prompt project user reset"],
+    });
+    for (const agent of prompts) {
+      entries.push({
+        id: `agents:${agent.name}`,
+        category: "omp-agents",
+        group: "Subagent definitions",
+        label: agent.name,
+        description: agent.description,
+        keywords: [agent.effectiveSource, "system prompt override"],
+      });
     }
     entries.push({
       id: "accounts.search",
@@ -2737,6 +3130,181 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     }
   }
 
+  function updateTodoEditBuffer(sessionId: string, nextBuffer: TodoEditBuffer | undefined): void {
+    const next = new Map(todoEditBuffers);
+    if (nextBuffer) next.set(sessionId, nextBuffer);
+    else next.delete(sessionId);
+    todoEditBuffers = next;
+  }
+
+  function saveTodoEdits(
+    sessionId: string,
+    phases: TodoPhase[],
+    expectedRevision: number,
+    action: string,
+  ): Promise<TodoState> {
+    const result = Promise.withResolvers<TodoState>();
+    const previousAcknowledged = current?.record.id === sessionId ? structuredClone(current.todoState) : undefined;
+    const queued = (todoWriteQueues.get(sessionId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const updated = await window.gradivus.setTodos(sessionId, phases, expectedRevision, action);
+          if (previousAcknowledged) {
+            const nextUndo = new Map(todoUndoStates);
+            nextUndo.set(sessionId, previousAcknowledged);
+            todoUndoStates = nextUndo;
+          }
+          if (current?.record.id === sessionId) current = { ...current, todoState: updated };
+          result.resolve(updated);
+        } catch (error) {
+          result.reject(error);
+        }
+      });
+    todoWriteQueues.set(sessionId, queued);
+    void queued.finally(() => {
+      if (todoWriteQueues.get(sessionId) === queued) todoWriteQueues.delete(sessionId);
+    });
+    return result.promise;
+  }
+
+  async function undoTodoEdits(sessionId: string): Promise<TodoState> {
+    const previous = todoUndoStates.get(sessionId);
+    if (!previous || current?.record.id !== sessionId) throw new Error("No todo edit is available to undo.");
+    const updated = await saveTodoEdits(
+      sessionId,
+      previous.phases,
+      current.todoState.revision,
+      "Undid the previous desktop todo edit",
+    );
+    const nextUndo = new Map(todoUndoStates);
+    nextUndo.delete(sessionId);
+    todoUndoStates = nextUndo;
+    return updated;
+  }
+
+  async function reloadTodoState(sessionId: string): Promise<TodoState> {
+    const snapshot = await window.gradivus.openSession(sessionId);
+    if (current?.record.id === sessionId) current = { ...current, todoState: snapshot.todoState };
+    return snapshot.todoState;
+  }
+  function openParityDialog(kind: ParityDialog): void {
+    parityDialog = kind;
+    parityInstructions = "";
+    parityStatus = "";
+    void tick().then(() => parityDefaultButton?.focus({ preventScroll: true }));
+  }
+
+  function closeParityDialog(): void {
+    if (parityBusy === "compact" || parityBusy === "handoff" || parityBusy === "restart") return;
+    parityDialog = undefined;
+    parityInstructions = "";
+  }
+
+  async function refreshAfterParity(sessionId: string): Promise<SessionSnapshot> {
+    const snapshot = await window.gradivus.openSession(sessionId);
+    if (current?.record.id === sessionId) {
+      current = snapshot;
+      syncSnapshotPlanReview(snapshot);
+      timelineSessionSource = sessionId;
+    }
+    return snapshot;
+  }
+
+  async function runContextMutation(kind: "compact" | "handoff"): Promise<void> {
+    if (!current || parityBusy) return;
+    const sessionId = current.record.id;
+    parityBusy = kind;
+    parityStatus = "";
+    try {
+      const result = kind === "compact"
+        ? await window.gradivus.compact(sessionId, parityInstructions)
+        : await window.gradivus.handoff(sessionId, parityInstructions);
+      await refreshAfterParity(sessionId);
+      parityDialog = undefined;
+      parityInstructions = "";
+      parityStatus = kind === "handoff" && !result.changed
+        ? "Nothing to hand off."
+        : `${kind === "compact" ? "Context compacted" : "Hand off complete"}: ${result.beforeTokens.toLocaleString()} → ${result.afterTokens.toLocaleString()} tokens.`;
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+  async function retryLastTurn(): Promise<void> {
+    if (!current || parityBusy) return;
+    parityBusy = "retry";
+    parityStatus = "";
+    try {
+      const result = await window.gradivus.retry(current.record.id);
+      parityStatus = result.started ? "Retry started." : "Nothing to retry.";
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+  async function cancelRetry(): Promise<void> {
+    if (!current || parityBusy) return;
+    parityBusy = "abort-retry";
+    try {
+      await window.gradivus.abortRetry(current.record.id);
+      parityStatus = "Cancel retry requested.";
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+  async function loadSessionStats(): Promise<void> {
+    if (!current || parityBusy) return;
+    parityBusy = "stats";
+    parityStatus = "";
+    try {
+      sessionStats = await window.gradivus.getSessionStats(current.record.id);
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+  async function exportSessionHtml(): Promise<void> {
+    if (!current || parityBusy) return;
+    parityBusy = "export";
+    parityStatus = "";
+    try {
+      const result = await window.gradivus.exportHtml(current.record.id);
+      if (!result.cancelled && result.path) parityStatus = `Exported HTML to ${result.path}`;
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+  async function restartOmp(): Promise<void> {
+    if (!current || parityBusy) return;
+    const sessionId = current.record.id;
+    parityBusy = "restart";
+    parityStatus = "";
+    try {
+      current = await window.gradivus.restart(sessionId);
+      timelineSessionSource = sessionId;
+      parityDialog = undefined;
+      parityStatus = "OMP restarted with the same session.";
+    } catch (error) {
+      parityStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      parityBusy = undefined;
+    }
+  }
+
+
   function openInspector(tab: InspectorTab): void {
     inspectorTab = tab;
     inspectorOpen = true;
@@ -2914,9 +3482,64 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
       reasoningLoading = next;
     }
   }
+  function timelineToolDetailKey(sessionId: string, itemId: string): string {
+    return `${sessionId}:${itemId}`;
+  }
+
+  async function loadTimelineToolDetail(sessionId: string, itemId: string): Promise<void> {
+    const key = timelineToolDetailKey(sessionId, itemId);
+    if (timelineToolDetails.has(key) || timelineToolDetailLoading.has(key)) return;
+    timelineToolDetailLoading = new Set(timelineToolDetailLoading).add(key);
+    const errors = new Map(timelineToolDetailErrors);
+    errors.delete(key);
+    timelineToolDetailErrors = errors;
+    try {
+      const activity = await window.gradivus.loadTimelineToolDetail(sessionId, itemId);
+      timelineToolDetails = new Map(timelineToolDetails).set(key, activity);
+    } catch (error) {
+      timelineToolDetailErrors = new Map(timelineToolDetailErrors).set(
+        key,
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      const loading = new Set(timelineToolDetailLoading);
+      loading.delete(key);
+      timelineToolDetailLoading = loading;
+    }
+  }
 
 
   async function handleEvent(event: GradivusEvent): Promise<void> {
+    if (event.type === "plan_review") {
+      setSessionPlanReview(event.sessionId, event.planReview);
+      if (event.planReview) void maybePresentPlanReview(event.sessionId, event.planReview);
+      return;
+    }
+    if (event.type === "session_reset" && event.snapshot) {
+      const snapshot = event.snapshot;
+      syncSnapshotPlanReview(snapshot);
+      if (current?.record.id === event.sessionId) {
+        current = snapshot;
+        timelineSessionSource = event.sessionId;
+        availableCommands = snapshot.commands ?? [];
+        updateSessionStatus(
+          event.sessionId,
+          snapshot.state === "running" ? "running" : snapshot.state === "error" ? "error" : "idle",
+        );
+      }
+      if (bootstrap) {
+        bootstrap = {
+          ...bootstrap,
+          registry: {
+            ...bootstrap.registry,
+            sessions: bootstrap.registry.sessions.map(session =>
+              session.id === snapshot.record.id ? snapshot.record : session,
+            ),
+          },
+        };
+      }
+      return;
+    }
     if (event.type === "warning") {
       showNotice(event.message ?? "Recovery warning", "warning", "Recovery warning");
       return;
@@ -2970,6 +3593,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 
     const isActiveSession = Boolean(current && event.sessionId === current.record.id);
     if (!isActiveSession || !current) return;
+    if (event.type === "todo_update" && event.todoState) {
+      current = { ...current, todoState: event.todoState };
+      return;
+    }
+    if (event.type === "browser_inventory" && event.browserInventory) {
+      current = { ...current, browserInventory: event.browserInventory };
+    }
     if (event.type === "agent_hub_update") {
       if (event.agentHub) applyAgentHubSnapshot(event.sessionId, event.agentHub);
       else void refreshAgentHub(event.sessionId);
@@ -2983,11 +3613,21 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     const timelineElement = event.type === "timeline" ? timelineScroller : undefined;
     const previousTimelineScrollTop = timelineElement?.scrollTop;
 
-    if (event.state || event.runtime || event.message) {
+    if (
+      event.state ||
+      event.runtime ||
+      event.message ||
+      event.isStreaming !== undefined ||
+      event.isCompacting !== undefined ||
+      "retryState" in event
+    ) {
       current = {
         ...current,
         ...(event.state ? { state: event.state } : {}),
         ...(event.runtime ? { runtime: event.runtime } : {}),
+        ...(event.isStreaming !== undefined ? { isStreaming: event.isStreaming } : {}),
+        ...(event.isCompacting !== undefined ? { isCompacting: event.isCompacting } : {}),
+        ...("retryState" in event ? { retryState: event.retryState } : {}),
         ...(event.runtime?.error ? { warning: event.runtime.error } : {}),
         ...(event.message ? { warning: event.message } : {}),
       };
@@ -3035,9 +3675,11 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             : isCanonicalPromptUser
               ? baseTimeline.findIndex(candidate => candidate.id === pendingTurn?.optimisticUserId)
               : -1;
-        const visibleItem: TimelineItem = isCanonicalPromptUser && pendingTurn
-          ? { ...event.item, text: pendingTurn.draft }
-          : event.item;
+        const visibleItem: TimelineItem = queuedPrompt
+          ? { ...event.item, text: queuedPrompt.displayText }
+          : isCanonicalPromptUser && pendingTurn
+            ? { ...event.item, text: pendingTurn.draft }
+            : event.item;
         const existed = optimisticIndex >= 0 || baseTimeline.some(candidate => candidate.id === visibleItem.id);
         const timeline = optimisticIndex >= 0
           ? baseTimeline.map((candidate, index) => index === optimisticIndex ? visibleItem : candidate)
@@ -3172,7 +3814,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
 />
 
 <div class="app-shell">
-  <div class="settings-workspace-source" inert={settingsRoute.open} aria-hidden={settingsRoute.open}>
+  <div class="settings-workspace-source" inert={settingsRoute.open || planReviewVisible} aria-hidden={settingsRoute.open || planReviewVisible}>
   <div class="workspace-grid" class:inspector-open={inspectorOpen}>
     <SessionRail
       groups={workspaceGroups}
@@ -3203,9 +3845,15 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                 {:else}
                   <h2>{sessionDisplayName(current.record)}</h2>
                   {#if current.planMode?.enabled}
-                    <span class="transcript-plan-mode-badge" role="status" title="Plan mode is active">
+                    <button
+                      type="button"
+                      class="transcript-plan-mode-badge"
+                      title={activePlanReview ? "Review the pending plan" : "Request plan review"}
+                      aria-label="Review plan"
+                      onclick={(event) => void openActivePlanReview(event.currentTarget)}
+                    >
                       <span class="badge-dot"></span> PLAN MODE
-                    </span>
+                    </button>
                   {/if}
                   <button class="rename-button" title="Rename session" aria-label="Rename session" onclick={() => { renameValue = current?.record.title || sessionDisplayName(current?.record); renaming = true; }}><Pen2 size={13} aria-hidden="true" /></button>
                 {/if}
@@ -3216,30 +3864,6 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
         </div>
         <div class="transcript-actions">
           {#if current}
-            <button
-              type="button"
-              class="inspector-action"
-              class:is-active={inspectorOpen && inspectorTab === "agents"}
-              aria-label={`${inspectorOpen && inspectorTab === "agents" ? "Close" : "Open"} Agent Hub${agentHubUnreadCount > 0 ? `, ${agentHubUnreadCount} unread` : ""}`}
-              aria-controls="run-inspector"
-              aria-expanded={inspectorOpen && inspectorTab === "agents"}
-              onclick={() => toggleInspector("agents")}
-            >
-              <span>Agent Hub</span>
-              {#if agentHubUnreadCount > 0}<span class="inspector-count" aria-label={`${agentHubUnreadCount} unread agents`}>{agentHubUnreadCount}</span>{/if}
-            </button>
-            <button
-              type="button"
-              class="inspector-action"
-              class:is-active={inspectorOpen && inspectorTab === "files"}
-              aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} changed` : ""}`}
-              aria-controls="run-inspector"
-              aria-expanded={inspectorOpen && inspectorTab === "files"}
-              onclick={() => toggleInspector("files")}
-            >
-              <span>Files</span>
-              {#if fileActivityCount > 0}<span class="inspector-count" aria-label={`${fileActivityCount} changed files`}>{fileActivityCount}</span>{/if}
-            </button>
             <button
               type="button"
               class="icon-button terminal-toggle-btn"
@@ -3266,6 +3890,8 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
           {#if hiddenTimelineCount > 0}<button class="secondary-button older-entries" onclick={() => void revealOlder()} disabled={loadingOlder}>Load 100 older entries <span>({hiddenTimelineCount} remaining)</span></button>{/if}
           {#each visibleTimeline as item (item.id)}
             {@const queuedPrompt = queuedPrompts.get(item.id)}
+            {@const itemSessionId = current.record.id}
+            {@const toolDetailKey = timelineToolDetailKey(itemSessionId, item.id)}
             {#if messageEdit?.sessionId === current?.record.id && messageEdit.timelineItemId === item.id}
               <article class="timeline-item item-user timeline-editing-item" data-timeline-id={item.id}>
                 <div class="timeline-gutter"><span>YOU</span></div>
@@ -3299,12 +3925,22 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                 onReasoning={loadReasoning}
                 onCopyText={copyMarkdownText}
                 showToolDetails={appSettings?.ui.showToolDetails ?? true}
-                queued={Boolean(queuedPrompt && queuedPrompt.status !== "steered")}
+                queued={Boolean(queuedPrompt?.route === "follow-up" && (queuedPrompt.status === "queued" || queuedPrompt.status === "steering"))}
                 queuedSteering={queuedPrompt?.status === "steering"}
+                queuedError={queuedPrompt?.error}
+                loadedToolActivity={timelineToolDetails.get(toolDetailKey)}
+                toolDetailLoading={timelineToolDetailLoading.has(toolDetailKey)}
+                toolDetailError={timelineToolDetailErrors.get(toolDetailKey) ?? ""}
+                onLoadToolDetail={() => void loadTimelineToolDetail(itemSessionId, item.id)}
                 onSteer={() => void steerQueuedPrompt(item.id)}
                 canEdit={canEditMessages && !messageEdit}
                 onEdit={startMessageEdit}
               />
+              {#if item.isError && visibleTimeline.at(-1)?.id === item.id}
+                <button type="button" class="inline-retry-button" disabled={Boolean(parityBusy) || isTurnActive} onclick={() => void retryLastTurn()}>
+                  Retry last turn
+                </button>
+              {/if}
             {/if}
             {@const fileSummary = turnFileSummaries.get(item.id)}
             {#if fileSummary}
@@ -3346,7 +3982,13 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                   <span class="turn-status-dot"></span>
                 </span>
                 <span class="turn-status-text">
-                  {#if activity.type === "tool"}
+                  {#if parityBusy === "handoff"}
+                    <span>Handing off…</span>
+                  {:else if current.isCompacting || parityBusy === "compact"}
+                    <span>Compacting…</span>
+                  {:else if current.retryState}
+                    <span>Retrying (attempt {current.retryState.attempt} of {current.retryState.maxAttempts})</span>
+                  {:else if activity.type === "tool"}
                     <span class="tool-name">{activity.label}</span>
                     {#if activity.detail}
                       <span class="tool-args" title={activity.detail}>{activity.detail}</span>
@@ -3373,16 +4015,17 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                 <button
                   type="button"
                   class="turn-stop-btn"
-                  title="Stop generation"
-                  aria-label="Stop generation"
-                  onclick={() => void abortTurn()}
+                  title={current.retryState ? "Cancel retry" : "Stop generation"}
+                  aria-label={current.retryState ? "Cancel retry" : "Stop generation"}
+                  onclick={() => current?.retryState ? void cancelRetry() : void abortTurn()}
                 >
                   <span class="stop-icon" aria-hidden="true"><Stop size={12} /></span>
-                  <span class="stop-label">Stop</span>
+                  <span class="stop-label">{current.retryState ? "Cancel retry" : "Stop"}</span>
                 </button>
               </div>
             </div>
           {/if}
+          {#if parityStatus}<p class="parity-status" role="status">{parityStatus}</p>{/if}
           {#if promptFailure}
             <StateCard variant="error" alertRole class="prompt-recovery-card">
               <strong>Prompt could not start</strong>
@@ -3394,6 +4037,17 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             </StateCard>
           {/if}
           {#if extensionWidget}<pre class="extension-widget" role="status">{extensionWidget}</pre>{/if}
+          <TodoDock
+            sessionId={current.record.id}
+            todoState={current.todoState}
+            buffer={todoEditBuffer}
+            undoState={todoUndoState}
+            onBufferChange={(nextBuffer) => updateTodoEditBuffer(current!.record.id, nextBuffer)}
+            onSave={(phases, expectedRevision, action) =>
+              saveTodoEdits(current!.record.id, phases, expectedRevision, action)}
+            onReload={() => reloadTodoState(current!.record.id)}
+            onUndo={() => undoTodoEdits(current!.record.id)}
+          />
           {#if commandMenuVisible}
             <CommandMenu
               commands={commandMatches}
@@ -3430,6 +4084,7 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             commandOptionCount={commandMatches.length}
             commandSelectedIndex={selectedCommandIndex}
             planMode={current.planMode}
+            planRefinementAwaiting={activePlanReview?.status === "awaiting_refinement"}
             onTogglePlanMode={() => void handleTogglePlanMode()}
             thinkingLevel={current.thinkingLevel}
             thinkingBusy={settingsBusy.has("thinking")}
@@ -3439,23 +4094,43 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
             onPaste={handleComposerPaste}
             turnActive={isTurnActive}
             sendDisabled={!canCompose || !hasComposerContent || isComposerBusy}
+            queuedMessageCount={current.queuedMessageCount ?? 0}
             contextUsedTokens={usedTokens}
             contextLimit={contextLimit ?? undefined}
             contextTokensPerSecond={current.tokensPerSecond ?? undefined}
             contextModelName={selectedModelOption?.name || current.model || "Provider default"}
+            inspectorOpen={inspectorOpen}
+            inspectorTab={inspectorTab}
+            agentUnreadCount={agentHubUnreadCount}
+            fileActivityCount={fileActivityCount}
+            onToggleInspector={toggleInspector}
+            compactDisabled={Boolean(current.isStreaming || current.isCompacting || (current.queuedMessageCount ?? 0) > 0 || parityBusy)}
+            handoffDisabled={Boolean(current.isStreaming || parityBusy)}
+            retryDisabled={Boolean(isTurnActive || parityBusy)}
+            commandShortcuts={commandShortcuts}
+            commandsAvailable={availableCommands.length > 0}
+            onCommand={applyCommand}
+            onAllCommands={openCommandPalette}
+            restartDisabled={Boolean(parityBusy)}
+            onCompact={() => openParityDialog("compact")}
+            onHandoff={() => openParityDialog("handoff")}
+            onRetry={() => void retryLastTurn()}
+            onStats={() => void loadSessionStats()}
+            onExport={() => void exportSessionHtml()}
+            onRestart={() => openParityDialog("restart")}
             onSend={() => void sendPrimary()}
             onQueueFollowUp={() => void queueFollowUp()}
           />
         </section>
         <div class="chat-terminal-panel" class:is-open={terminalOpen}>
-          {#key current.record.id}
-            <ChatTerminalDrawer
-              sessionId={current.record.id}
-              open={terminalOpen}
-              theme={theme}
-              terminalSettings={appSettings?.terminal}
-            />
-          {/key}
+          <ChatTerminalDrawer
+            {workspaceId}
+            tabs={terminalTabs}
+            open={terminalOpen}
+            confirmClose={appSettings?.confirmCloseTab ?? true}
+            theme={theme}
+            terminalSettings={appSettings?.terminal}
+          />
         </div>
       {/if}
     </main>
@@ -3557,15 +4232,28 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
     </ModalShell>
   {/if}
   </div>
+  {#if planReviewVisible && activePlanReview && current?.record.id === planReviewSessionId}
+    <PlanReviewModal
+      review={activePlanReview}
+      disabledReason={planReviewDisabledReason()}
+      returnFocus={planReviewOpener}
+      onclose={closePlanReview}
+      onupdate={updateVisiblePlanReview}
+      onresolve={resolveVisiblePlanReview}
+      onreload={reloadVisiblePlanReview}
+      oncopy={(content) => window.gradivus.writeClipboardText(content)}
+      onaccepted={acceptPlanReview}
+    />
+  {/if}
   {#if settingsRoute.open}
     <SettingsShell
       route={settingsRoute}
       entries={settingsSearchEntries}
       refreshing={settingsRefreshing}
       onQueryChange={(query) => onSettingsRouteChange({ query })}
-      onCategoryChange={(activeCategory) => onSettingsRouteChange({ activeCategory })}
+      onCategoryChange={requestSettingsCategoryChange}
       onRefresh={() => void refreshSettingsData()}
-      onClose={onCloseSettings}
+      onClose={requestCloseSettings}
     >
       {#snippet content(visibleSettingIds)}
         {#if settingsStatusMessage && !isApplicationSettingsCategory(settingsRoute.activeCategory)}
@@ -3709,10 +4397,10 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               {#if current && current.state !== "stopped" && current.state !== "error"}
                 <div class="settings-form-grid">
                   {#if isSettingVisible(visibleSettingIds, "runtime.steering")}
-                    <LabeledSelect tone="field" label="Steering delivery" description="How messages steer an active turn." options={QUEUE_MODE_OPTIONS} selectedKey={current.steeringMode ?? "all"} ariaLabel="Steering delivery" disabled={settingsBusy.has("steering")} onSelect={(option) => handleQueueDropdownSelect("steering", option)} onOpenChange={() => undefined} />
+                    <LabeledSelect tone="field" label="Steering delivery" description="How messages steer an active turn." options={QUEUE_MODE_OPTIONS} selectedKey={current.steeringMode ?? "one-at-a-time"} ariaLabel="Steering delivery" disabled={settingsBusy.has("steering")} onSelect={(option) => handleQueueDropdownSelect("steering", option)} onOpenChange={() => undefined} />
                   {/if}
                   {#if isSettingVisible(visibleSettingIds, "runtime.follow-up")}
-                    <LabeledSelect tone="field" label="Follow-up delivery" description="How queued messages enter subsequent turns." options={QUEUE_MODE_OPTIONS} selectedKey={current.followUpMode ?? "all"} ariaLabel="Follow-up delivery" disabled={settingsBusy.has("follow-up")} onSelect={(option) => handleQueueDropdownSelect("follow-up", option)} onOpenChange={() => undefined} />
+                    <LabeledSelect tone="field" label="Follow-up delivery" description="How queued messages enter subsequent turns." options={QUEUE_MODE_OPTIONS} selectedKey={current.followUpMode ?? "one-at-a-time"} ariaLabel="Follow-up delivery" disabled={settingsBusy.has("follow-up")} onSelect={(option) => handleQueueDropdownSelect("follow-up", option)} onOpenChange={() => undefined} />
                   {/if}
                   {#if isSettingVisible(visibleSettingIds, "runtime.interrupt")}
                     <LabeledSelect tone="field" label="Interrupt behavior" description="Whether new input interrupts immediately or waits." options={INTERRUPT_MODE_OPTIONS} selectedKey={current.interruptMode ?? "immediate"} ariaLabel="Interrupt behavior" disabled={settingsBusy.has("interrupt")} onSelect={handleInterruptDropdownSelect} onOpenChange={() => undefined} />
@@ -3729,6 +4417,17 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
               {/if}
             </section>
           {/if}
+        {:else if settingsRoute.activeCategory === "omp-agents"}
+          <section class="settings-section agent-prompt-settings-section" aria-label="Subagent prompt settings">
+            <SubagentPromptEditor
+              agents={agentPrompts}
+              loading={agentPromptsLoading}
+              loadError={agentPromptsError}
+              onSave={saveAgentPrompt}
+              onReset={resetAgentPrompt}
+              onDirtyChange={(dirty) => (agentPromptEditorDirty = dirty)}
+            />
+          </section>
         {:else if activeAgentSettingTab}
           {@const agentSettingGroups = visibleAgentSettingGroups(visibleSettingIds, activeAgentSettingTab)}
           {@const reportedAgentSettings = agentSettings.filter(setting => setting.tab === activeAgentSettingTab)}
@@ -3760,6 +4459,32 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
                             disabled={agentSettingsBusy.has(setting.path)}
                             onchange={(checked) => void changeAgentSetting(setting, checked)}
                           />
+                        {:else if setting.control === "multiselect"}
+                          <label class="settings-multiselect">
+                            <span>{setting.label}</span>
+                            <span class="settings-description">{setting.description}</span>
+                            <select
+                              multiple
+                              aria-label={setting.label}
+                              disabled={agentSettingsBusy.has(setting.path)}
+                              onchange={(event) => {
+                                const selected = Array.from(
+                                  (event.currentTarget as HTMLSelectElement).selectedOptions,
+                                  option => option.value,
+                                );
+                                void changeAgentSetting(setting, selected);
+                              }}
+                            >
+                              {#each setting.options ?? [] as option (String(option.value))}
+                                <option
+                                  value={String(option.value)}
+                                  selected={Array.isArray(setting.value) && setting.value.includes(String(option.value))}
+                                >
+                                  {option.label}
+                                </option>
+                              {/each}
+                            </select>
+                          </label>
                         {:else}
                           <LabeledSelect
                             tone="field"
@@ -3876,6 +4601,65 @@ import TimelineEntry from "../organisms/TimelineEntry.svelte";
         {/if}
       {/snippet}
     </SettingsShell>
+  {/if}
+  {#if parityDialog}
+    <ModalShell
+      backdrop
+      dialogClass="parity-dialog"
+      labelledbyId="parity-dialog-title"
+      onclose={closeParityDialog}
+      cancelable={true}
+    >
+      <span class="eyebrow">OMP session</span>
+      <h2 id="parity-dialog-title">
+        {parityDialog === "compact" ? "Compact context" : parityDialog === "handoff" ? "Hand off context" : "Restart OMP"}
+      </h2>
+      {#if parityDialog === "restart"}
+        <p>
+          Restart keeps this session and transcript, but
+          {#if current?.isStreaming} interrupts the active turn{/if}
+          {#if current?.isStreaming && (current?.queuedMessageCount ?? 0) > 0} and{/if}
+          {#if (current?.queuedMessageCount ?? 0) > 0} discards {current?.queuedMessageCount} queued message{current?.queuedMessageCount === 1 ? "" : "s"}{/if}.
+          The runtime resumes from the same session file.
+        </p>
+      {:else}
+        <p>
+          {parityDialog === "compact"
+            ? "Reduce context usage while preserving the important work."
+            : "Save a handoff summary and start a fresh continuation."}
+        </p>
+        <label>
+          <span>Optional focus instructions</span>
+          <textarea rows="4" bind:value={parityInstructions} placeholder="What should the summary prioritize?"></textarea>
+        </label>
+      {/if}
+      {#if parityStatus}<p class="parity-dialog-status" role="alert">{parityStatus}</p>{/if}
+      <div class="dialog-actions">
+        <button bind:this={parityDefaultButton} type="button" class="secondary-button" disabled={Boolean(parityBusy)} onclick={closeParityDialog}>Cancel</button>
+        {#if parityDialog === "restart"}
+          <button type="button" class="danger-button" disabled={Boolean(parityBusy)} onclick={() => void restartOmp()}>
+            {parityBusy === "restart" ? "Restarting…" : "Restart OMP"}
+          </button>
+        {:else}
+          <button type="button" class="primary-button" disabled={Boolean(parityBusy)} onclick={() => void runContextMutation(parityDialog === "compact" ? "compact" : "handoff")}>
+            {parityBusy === parityDialog ? (parityDialog === "compact" ? "Compacting…" : "Handing off…") : parityDialog === "compact" ? "Compact" : "Hand off"}
+          </button>
+        {/if}
+      </div>
+    </ModalShell>
+  {/if}
+  {#if sessionStats}
+    <SessionStatsModal stats={sessionStats} onclose={() => sessionStats = undefined} />
+  {/if}
+  {#if pendingSettingsNavigation}
+    <ModalShell backdrop dialogClass="agent-prompt-confirm" labelledbyId="settings-prompt-dirty-title" onclose={keepPromptDraft}>
+      <h2 id="settings-prompt-dirty-title">Discard unsaved subagent prompt?</h2>
+      <p>Your prompt draft is not saved. Keep editing to preserve its exact contents.</p>
+      <div class="dialog-actions">
+        <button bind:this={promptDirtyDefaultAction} type="button" class="primary-button" onclick={keepPromptDraft}>Keep editing</button>
+        <button type="button" class="secondary-button" onclick={discardPromptDraftAndNavigate}>Discard changes</button>
+      </div>
+    </ModalShell>
   {/if}
 
   {#if aboutOpen}<ModalShell backdrop dialogClass="extension-dialog about-dialog" labelledbyId="about-title" onclose={closeAbout}><span class="eyebrow">Gradivus Labs</span><h2 id="about-title">Gradivus</h2><p>Local Work and Code sessions powered by the Oh My Pi RPC runtime.</p><dl class="about-list"><dt>Version</dt><dd>0.1.0</dd><dt>Backend</dt><dd>Oh My Pi · MIT License</dd><dt>Icons</dt><dd>Solar Icons by 480 Design · CC BY 4.0</dd><dt>Fonts</dt><dd>Sora and Nunito Sans · SIL Open Font License 1.1</dd></dl><p class="muted-copy">Full third-party notices are included in THIRD_PARTY_LICENSES.txt beside the packaged application.</p><div class="dialog-actions"><button class="primary-button" onclick={closeAbout}>Close</button></div></ModalShell>{/if}

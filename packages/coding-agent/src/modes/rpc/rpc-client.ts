@@ -54,9 +54,32 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 /** RpcCommand without the id field (for internal send) */
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
+/** Process transport consumed by {@link RpcClient}. */
+export interface RpcAgentProcess {
+	stdin: {
+		write(data: string | Uint8Array): unknown;
+	};
+	stdout: ReadableStream<Uint8Array>;
+	peekStderr(): string;
+	kill(signal?: Parameters<ptree.ChildProcess["kill"]>[0], graceMs?: number): void;
+	exited: Promise<number>;
+}
+
 export interface RpcClientOptions {
-	/** Path to the CLI entry point (default: searches for dist/cli.js) */
+	/** Path to the CLI entry point (default: `dist/cli.js`). */
 	cliPath?: string;
+	/**
+	 * Agent launcher override. An argv prefix receives the normal RPC/model args
+	 * appended; a builder receives those args and returns the complete argv.
+	 * Builders support transports such as SSH that must quote the final argv.
+	 * Ignored when {@link spawn} is provided.
+	 */
+	command?: string[] | ((agentArgs: string[]) => string[]);
+	/**
+	 * Spawn the RPC agent over a custom transport instead of a local child process.
+	 * Takes precedence over {@link command}.
+	 */
+	spawn?: (agentArgs: string[]) => RpcAgentProcess | Promise<RpcAgentProcess>;
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -69,8 +92,9 @@ export interface RpcClientOptions {
 	sessionDir?: string;
 	/** Additional CLI arguments */
 	args?: string[];
-	/** Custom tools owned by the embedding host and exposed over the RPC transport */
 	customTools?: RpcClientCustomTool[];
+	/** Grace period before force-killing a child during transport cleanup. */
+	terminationGraceMs?: number;
 }
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
@@ -304,9 +328,15 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
+		const command =
+			typeof this.options.command === "function"
+				? this.options.command(args)
+				: this.options.command
+					? [...this.options.command, ...args]
+					: ["bun", cliPath, ...args];
 		let child: ptree.ChildProcess;
 		try {
-			child = ptree.spawn(["bun", cliPath, ...args], {
+			child = ptree.spawn(command, {
 				cwd: this.options.cwd,
 				env: {
 					...Bun.env,
@@ -506,7 +536,7 @@ export class RpcClient {
 
 			if (connection) {
 				const grace = Promise.withResolvers<boolean>();
-				const graceTimer = setTimeout(() => grace.resolve(false), 5_000);
+				const graceTimer = setTimeout(() => grace.resolve(false), this.options.terminationGraceMs ?? 5_000);
 				const exitedGracefully = await Promise.race([
 					child.exited.then(
 						() => true,

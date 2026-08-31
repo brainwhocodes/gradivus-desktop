@@ -31,7 +31,7 @@ function details(result: { details?: { madeExecutable?: boolean } }): { madeExec
 	return result.details ?? {};
 }
 
-describe("write tool shebang chmod", () => {
+describe.skipIf(process.platform === "win32")("write tool shebang chmod", () => {
 	let tmpDir: string;
 
 	beforeAll(async () => {

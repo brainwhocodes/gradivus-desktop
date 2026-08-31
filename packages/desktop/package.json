@@ -26,6 +26,7 @@
     "make:contained": "bun scripts/build-contained.ts"
   },
   "dependencies": {
+    "@oh-my-pi/pi-browser-runtime": "catalog:",
     "@oh-my-pi/pi-grpc": "catalog:",
     "@oh-my-pi/pi-workspace-runtime": "catalog:"
   },

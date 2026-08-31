@@ -140,13 +140,17 @@ describe("WorkspaceRuntime bootstrap & daemon lifecycle", () => {
 		await server.stop();
 	});
 	it("reports a daemon that exits before readiness instead of waiting for timeout", async () => {
+		const isWindows = process.platform === "win32";
+		const executablePath = isWindows
+			? path.join(process.env.SystemRoot ?? "C:\\Windows", "system32", "cmd.exe")
+			: "/bin/sh";
 		await expect(
 			ensureWorkspaceRuntime({
 				runtimeDir: testRoot,
-				executablePath: "/bin/sh",
+				executablePath,
 				startupTimeoutMs: 2_000,
 			}),
-		).rejects.toThrow(/exited before becoming ready.*code=127/i);
+		).rejects.toThrow(/exited before becoming ready.*code=\d+/i);
 	});
 
 	it("surfaces a spawn error with the attempted executable path", async () => {
@@ -157,6 +161,9 @@ describe("WorkspaceRuntime bootstrap & daemon lifecycle", () => {
 				executablePath,
 				startupTimeoutMs: 2_000,
 			}),
-		).rejects.toThrow(new RegExp(`failed to spawn workspace runtime server at ${executablePath}`, "i"));
+		).rejects.toThrow(
+			// Backslashes in the Windows path are regex metacharacters.
+			new RegExp(`failed to spawn workspace runtime server at ${executablePath.replace(/\\/g, "\\\\")}`, "i"),
+		);
 	});
 });

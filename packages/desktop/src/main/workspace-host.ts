@@ -1,9 +1,13 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { WebContentsView } from "electron";
 import * as electron from "electron";
 
 const { Menu } = electron;
 
+import { buildAriaSnapshotScript, buildResolveAriaRefScript } from "@oh-my-pi/pi-browser-runtime/aria/aria-snapshot";
+import { pathIsWithin } from "@oh-my-pi/pi-utils/dirs";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime";
 import {
 	type ElementScreenshot,
@@ -17,16 +21,20 @@ import type { TerminalOutputFrame, TerminalStatusFrame } from "@oh-my-pi/pi-work
 import { getAgentSwatch } from "../shared/agent-swatch";
 import type {
 	BrowserBounds,
+	BrowserFindState,
 	BrowserNavigationAction,
+	BrowserShortcut,
+	BrowserTabCloseResult,
 	BrowserViewState,
-	ChatTerminalViewState,
 	CreateBrowserInput,
 	CreateTerminalInput,
 	ElementEditState,
 	ElementTaskAction,
-	OpenChatTerminalInput,
+	PaneAutomationState,
 	PaneContextMenuAction,
 	QueuedElementTask,
+	SessionRecordV1,
+	TerminalAttachmentState,
 	TerminalViewState,
 	UpdateTabInput,
 	WorkspaceDocumentV1,
@@ -39,12 +47,68 @@ import {
 	resolveTheme as resolveSharedTheme,
 } from "../shared/theme-palette";
 import type { AppSettingsStore } from "./app-settings";
-import { defaultWorkspacePath } from "./backend-path";
 import type { DesktopHost } from "./desktop-host";
 import { DEPARTURE_MONO_BASE64 } from "./inspector-font";
+import { PaneBroker, type PaneBrokerContext, type PaneBrokerExecution } from "./pane-broker";
 import elementSelectionPromptTemplate from "./prompts/element-selection.md" with { type: "text" };
 
 const MAX_WORKSPACE_PANES = 4;
+const PANE_BROWSER_KEYS = new Set([
+	"Enter",
+	"Tab",
+	"Escape",
+	"Backspace",
+	"Delete",
+	"ArrowUp",
+	"ArrowDown",
+	"ArrowLeft",
+	"ArrowRight",
+	"Home",
+	"End",
+]);
+const PANE_CLICK_FUNCTION = `function() {
+  const element = this;
+  if (!(element instanceof HTMLElement)) return { ok: false, error: "Element not found" };
+  element.scrollIntoView({ block: "center", inline: "center" });
+  element.click();
+  return { ok: true, tag: element.localName, text: String(element.textContent || "").trim().slice(0, 200) };
+}`;
+const PANE_HOVER_FUNCTION = `function() {
+  const element = this;
+  if (!(element instanceof HTMLElement)) return { ok: false, error: "Element not found" };
+  element.scrollIntoView({ block: "center", inline: "center" });
+  element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+  element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+  return { ok: true, tag: element.localName };
+}`;
+const PANE_FILL_FUNCTION = `function(text) {
+  const element = this;
+  if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement) && !(element instanceof HTMLElement && element.isContentEditable)) {
+    return { ok: false, error: "Editable element not found" };
+  }
+  if (element instanceof HTMLInputElement && (element.type === "password" || element.type === "file")) {
+    return { ok: false, error: "sensitive_field: password and file inputs cannot be filled" };
+  }
+  element.scrollIntoView({ block: "center", inline: "center" });
+  element.focus();
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (setter) setter.call(element, text);
+    else element.value = text;
+  } else {
+    element.textContent = text;
+  }
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  return { ok: true, tag: element.localName };
+}`;
+const PANE_FOCUS_FUNCTION = `function() {
+  const element = this;
+  if (!(element instanceof HTMLElement)) return { ok: false, error: "Element not found" };
+  element.focus();
+  return { ok: true, tag: element.localName };
+}`;
 class StaleSelectionOperation extends Error {
 	constructor() {
 		super("Selection operation is no longer current");
@@ -701,6 +765,13 @@ interface BrowserEntry {
 	documentEpoch: number;
 	authoritativeUrl: string;
 	pendingNavigation?: PendingNavigation;
+	findQuery?: string;
+	navigationSerial: number;
+	navigationPending: boolean;
+	navigationFailure?: string;
+	paneExecutionWorld?: { documentEpoch: number; executionContextId: number };
+	findRequestId?: number;
+	cleanup: Array<() => void>;
 	debuggerAttachedBySelection?: boolean;
 	selectionCssKey?: string;
 }
@@ -754,12 +825,6 @@ function browserBounds(value: unknown): BrowserBounds {
 	};
 }
 
-type ChatTerminalRecord = {
-	presentationId: string;
-	terminalId: string;
-	workspace: string;
-	cwd: string;
-};
 type SelectionQueueState = {
 	generation: number;
 	nextTaskIndex: number;
@@ -770,12 +835,12 @@ type SelectionQueueState = {
 export class WorkspaceHost {
 	#window: Electron.BaseWindow & { webContents?: Electron.WebContents };
 	#visibleBrowsers = new Set<string>();
+	#activeBrowserPaneId: string | undefined;
 	#browsers = new Map<string, BrowserEntry>();
 	#terminalSubscriptions = new Map<string, () => void>();
 	#terminalIds = new Map<string, string>();
 	#terminalStates = new Map<string, string>();
 	#terminalOffsets = new Map<string, number>();
-	#chatTerminals = new Map<string, ChatTerminalRecord>();
 	#selectionCoordinator: ElementSelectionCoordinator;
 	#activeSelectionPaneId?: string;
 	#selectionStates = new Map<string, ElementEditState>();
@@ -788,30 +853,43 @@ export class WorkspaceHost {
 	#client?: WorkspaceClient;
 	#settingsStore?: AppSettingsStore;
 	#desktopHost?: DesktopHost;
+	#paneBroker: PaneBroker;
 	constructor(
 		window: Electron.BaseWindow & { webContents?: Electron.WebContents },
-		settingsStoreOrCdpUrl?: AppSettingsStore | string,
-		cdpUrlOrDesktopHost: string | DesktopHost = "http://127.0.0.1:9222",
+		settingsStore?: AppSettingsStore,
 		desktopHost?: DesktopHost,
 	) {
 		this.#window = window;
-		if (typeof settingsStoreOrCdpUrl !== "string") {
-			this.#settingsStore = settingsStoreOrCdpUrl;
-		}
-		if (typeof cdpUrlOrDesktopHost !== "string") {
-			this.#desktopHost = cdpUrlOrDesktopHost;
-		} else if (desktopHost) {
-			this.#desktopHost = desktopHost;
-		}
-		// Retained for constructor compatibility with older callers.
-		void cdpUrlOrDesktopHost;
+		this.#settingsStore = settingsStore;
+		this.#desktopHost = desktopHost;
 		this.#selectionCoordinator = new ElementSelectionCoordinator();
+		this.#paneBroker = new PaneBroker({
+			list: sessionId => this.#listPaneBrokerContexts(sessionId),
+			resolve: (sessionId, paneId) => this.#resolvePaneBrokerContext(sessionId, paneId),
+			session: sessionId => {
+				const session = this.#desktopHost?.paneAutomationSession(sessionId);
+				return session
+					? {
+							record: session.record,
+							incarnation: session.incarnation,
+							...(session.automationUnavailableReason
+								? { automationUnavailableReason: session.automationUnavailableReason }
+								: {}),
+						}
+					: undefined;
+			},
+			confirm: (context, record, access) => this.#confirmPaneAuthorization(context, record, access),
+			execute: (paneId, action, args, signal) => this.#executePaneBrowserAction(paneId, { action, ...args }, signal),
+		});
+		this.#desktopHost?.setPaneBroker(this.#paneBroker);
 		if ("nativeTheme" in electron && electron.nativeTheme && typeof electron.nativeTheme.on === "function") {
 			electron.nativeTheme.on("updated", () => this.updateTheme());
 		}
 	}
 	setDesktopHost(desktopHost: DesktopHost): void {
+		if (this.#desktopHost === desktopHost) return;
 		this.#desktopHost = desktopHost;
+		desktopHost.setPaneBroker(this.#paneBroker);
 	}
 
 	resolveTheme(): ResolvedTheme {
@@ -825,10 +903,152 @@ export class WorkspaceHost {
 		return resolveSharedTheme(setting, systemDark);
 	}
 
+	#listPaneBrokerContexts(sessionId: string): PaneBrokerContext[] {
+		const document = this.#client?.document;
+		if (!document) return [];
+		return document.panes.flatMap(pane => {
+			if (pane.kind !== "browser") return [];
+			try {
+				return [this.#resolvePaneBrokerContext(sessionId, pane.id)];
+			} catch {
+				return [];
+			}
+		});
+	}
+
+	#resolvePaneBrokerContext(sessionId: string, targetPaneId: string): PaneBrokerContext {
+		const session = this.#desktopHost?.paneAutomationSession(sessionId);
+		if (!session) throw new Error("OMP runtime is not ready for pane automation");
+		const document = this.#client?.document;
+		if (!document) throw new Error("Workspace authority is unavailable");
+		const pane = document.panes.find(candidate => candidate.id === targetPaneId && candidate.kind === "browser");
+		if (!pane) throw new Error("Browser pane is unavailable");
+		const tab = document.tabs.find(candidate => candidate.id === pane.tabId);
+		if (!tab) throw new Error("Browser tab is unavailable");
+		const workspace = document.workspaces.find(candidate => candidate.id === tab.workspaceId);
+		const location = workspace
+			? document.locations.find(candidate => candidate.id === workspace.locationId)
+			: undefined;
+		if (!workspace || !location || location.address.kind !== "local") {
+			throw new Error("Pane automation requires a local workspace");
+		}
+		if (!pathIsWithin(location.address.path, session.record.cwd)) {
+			throw new Error("The OMP session is outside this pane's workspace");
+		}
+		const browser = document.browsers.find(
+			candidate => candidate.id === pane.entityId && candidate.status !== "closed" && candidate.status !== "failed",
+		);
+		if (!browser) throw new Error("Browser entity is closed");
+		const entry = this.#requireBrowser(targetPaneId);
+		const windowState = this.#window as Electron.BaseWindow & {
+			isVisible?: () => boolean;
+			isMinimized?: () => boolean;
+			getContentBounds?: () => Electron.Rectangle;
+		};
+		const windowVisible = (windowState.isVisible?.() ?? true) && !(windowState.isMinimized?.() ?? false);
+		const contentBounds = windowState.getContentBounds?.();
+		const inWindow =
+			!contentBounds ||
+			(entry.bounds.x < contentBounds.width &&
+				entry.bounds.y < contentBounds.height &&
+				entry.bounds.x + entry.bounds.width > 0 &&
+				entry.bounds.y + entry.bounds.height > 0);
+		return {
+			paneId: targetPaneId,
+			tabId: tab.id,
+			browserId: browser.id,
+			workspaceId: workspace.id,
+			locationId: location.id,
+			locationGeneration: location.lifecycle.generation,
+			documentEpoch: entry.documentEpoch,
+			url: entry.state.url,
+			title: entry.state.title,
+			visible: entry.attached && entry.bounds.width > 0 && entry.bounds.height > 0 && windowVisible && inWindow,
+			navigationPending: entry.navigationPending,
+			webContents: entry.view.webContents,
+		};
+	}
+
+	async #confirmPaneAuthorization(
+		context: PaneBrokerContext,
+		record: SessionRecordV1,
+		access: "observe" | "control",
+	): Promise<boolean> {
+		const label = access === "control" ? "Control" : "Read";
+		const result = await electron.dialog.showMessageBox(this.#window, {
+			type: "question",
+			title: `Allow ${label} access to browser pane?`,
+			message: `${record.title?.trim() || "OMP session"} requests ${label} access`,
+			detail: `${context.title}\n${context.url}\n\nSession workspace: ${record.cwd}`,
+			buttons: [`Allow ${label}`, "Cancel"],
+			defaultId: 1,
+			cancelId: 1,
+			noLink: true,
+		});
+		return result.response === 0;
+	}
+
+	getPaneAutomation(sessionIdInput: unknown, paneIdInput: unknown): PaneAutomationState {
+		const sessionId = typeof sessionIdInput === "string" ? sessionIdInput.trim() : "";
+		if (!sessionId) throw new TypeError("Invalid session id");
+		const state = this.#paneBroker.state(sessionId, paneId(paneIdInput));
+		return { ...state, tabs: this.#desktopHost?.browserInventoryForSession(sessionId) ?? [] };
+	}
+
+	async requestPaneAuthorization(
+		sessionIdInput: unknown,
+		paneIdInput: unknown,
+		accessInput: unknown,
+	): Promise<PaneAutomationState> {
+		const sessionId = typeof sessionIdInput === "string" ? sessionIdInput.trim() : "";
+		if (!sessionId) throw new TypeError("Invalid session id");
+		if (accessInput !== "observe" && accessInput !== "control") throw new TypeError("Invalid pane access");
+		const state = await this.#paneBroker.authorize(sessionId, paneId(paneIdInput), accessInput);
+		await this.#desktopHost?.refreshPaneBroker();
+		return { ...state, tabs: this.#desktopHost?.browserInventoryForSession(sessionId) ?? [] };
+	}
+
+	async revokePane(sessionIdInput: unknown, paneIdInput: unknown): Promise<PaneAutomationState> {
+		const sessionId = typeof sessionIdInput === "string" ? sessionIdInput.trim() : "";
+		if (!sessionId) throw new TypeError("Invalid session id");
+		const state = await this.#paneBroker.revoke(sessionId, paneId(paneIdInput));
+		await this.#desktopHost?.refreshPaneBroker();
+		return { ...state, tabs: this.#desktopHost?.browserInventoryForSession(sessionId) ?? [] };
+	}
+
+	async closeBrowserTabForSession(sessionIdInput: unknown, nameInput: unknown): Promise<BrowserTabCloseResult> {
+		const sessionId = typeof sessionIdInput === "string" ? sessionIdInput.trim() : "";
+		const name = typeof nameInput === "string" ? nameInput.trim() : "";
+		if (!sessionId) throw new TypeError("Invalid session id");
+		if (!name) throw new TypeError("Invalid browser tab name");
+		if (!this.#desktopHost) throw new Error("OMP Chat is unavailable");
+		let result = await this.#desktopHost.closeBrowserTabForSession(sessionId, name);
+		if (result.requiresConfirmation) {
+			const tab = result.tab;
+			const activity = tab
+				? `${tab.owners.length} owner${tab.owners.length === 1 ? "" : "s"}, ${tab.activeRunCount} active and ${tab.queuedRunCount} queued run${tab.queuedRunCount === 1 ? "" : "s"}`
+				: "active browser work";
+			const confirmation = await electron.dialog.showMessageBox(this.#window, {
+				type: "warning",
+				title: `Close OMP browser tab “${name}”?`,
+				message: `Close “${name}” inside this OMP session?`,
+				detail: `This tab has ${activity}. Closing it cancels its active and queued work. The visible Gradivus pane is unaffected.`,
+				buttons: ["Close OMP tab", "Cancel"],
+				defaultId: 1,
+				cancelId: 1,
+				noLink: true,
+			});
+			if (confirmation.response !== 0) {
+				return { closed: false, cancelled: true, inventory: result.inventory };
+			}
+			result = await this.#desktopHost.closeBrowserTabForSession(sessionId, name, true);
+		}
+		return { closed: result.closed, inventory: result.inventory };
+	}
+
 	getBrowserBackgroundColor(): string {
 		return DESKTOP_THEME_PALETTES[this.resolveTheme()].browserBackground;
 	}
-
 	updateTheme(): void {
 		const theme = this.resolveTheme();
 		const palette = DESKTOP_THEME_PALETTES[theme];
@@ -874,23 +1094,32 @@ export class WorkspaceHost {
 		this.#terminalSubscriptions.clear();
 		this.#client = newClient;
 
-		if (newClient.document) {
-			this.syncWithDocument(newClient.document);
-		}
-
-		const doc = newClient.document;
+		let doc = newClient.document;
 		if (doc) {
+			for (const terminal of [...doc.terminals]) {
+				if (terminal.paneId || !terminal.id.startsWith("term-chat-")) continue;
+				const workspaceId =
+					doc.workspaces.find(workspace => workspace.locationId === terminal.locationId)?.id ??
+					doc.activeWorkspaceId;
+				if (!workspaceId) continue;
+				const result = await newClient.executeCommandWithRetry(currentDocument => ({
+					version: 1 as const,
+					commandId: uniqueCommandId("cmd-legacy-chat-terminal-close"),
+					workspaceId,
+					expectedRevision: currentDocument.revision,
+					issuedAt: Date.now(),
+					type: "terminal.close" as const,
+					payload: { id: terminal.id },
+				}));
+				if (result.status !== "rejected") doc = result.document;
+			}
+			this.syncWithDocument(doc);
 			for (const terminal of doc.terminals) {
 				if (!terminal.paneId) continue;
 				if (terminal.status === "running" || terminal.status === "starting") {
 					const paneId = terminal.paneId;
 					this.#terminalIds.set(paneId, terminal.id);
 					void this.#subscribeTerminal(paneId, terminal.id).catch(() => {});
-				}
-			}
-			for (const record of this.#chatTerminals.values()) {
-				if (doc.terminals.some(item => item.id === record.terminalId)) {
-					void this.#subscribeTerminal(record.presentationId, record.terminalId).catch(() => {});
 				}
 			}
 		}
@@ -918,25 +1147,8 @@ export class WorkspaceHost {
 				this.#terminalStates.set(terminal.paneId, terminal.status);
 			}
 		}
-		for (const record of this.#chatTerminals.values()) {
-			const terminal = document.terminals.find(item => item.id === record.terminalId);
-			if (!terminal) continue;
-			const previousStatus = this.#terminalStates.get(record.presentationId);
-			if (previousStatus !== terminal.status) {
-				if (terminal.status === "failed") {
-					this.#send({
-						type: "terminal-error",
-						paneId: record.presentationId,
-						message: terminal.error ?? "Terminal failed",
-					});
-				} else if (terminal.status === "exited" || terminal.status === "closed") {
-					this.#send({ type: "terminal-exit", paneId: record.presentationId, exitCode: -1 });
-				}
-				this.#terminalStates.set(record.presentationId, terminal.status);
-			}
-		}
 		for (const paneId of this.#terminalIds.keys()) {
-			if (activeTerminalIds.has(paneId) || this.#chatTerminals.has(paneId)) continue;
+			if (activeTerminalIds.has(paneId)) continue;
 			this.#unsubscribeTerminal(paneId);
 			this.#terminalIds.delete(paneId);
 			this.#terminalStates.delete(paneId);
@@ -1064,10 +1276,6 @@ export class WorkspaceHost {
 	#ensureBrowserView(id: string, url: string, title: string): BrowserViewState {
 		const existing = this.#browsers.get(id);
 		if (existing) {
-			if (existing.state.title !== title) {
-				existing.state = { ...existing.state, title };
-				this.#emitBrowserState(id);
-			}
 			if (existing.pendingNavigation) {
 				if (url === existing.pendingNavigation.url) {
 					existing.authoritativeUrl = url;
@@ -1110,6 +1318,9 @@ export class WorkspaceHost {
 			view,
 			attached: false,
 			bounds: { x: 0, y: 0, width: 0, height: 0 },
+			cleanup: [],
+			navigationSerial: 0,
+			navigationPending: false,
 			state: { id, url, title, canGoBack: false, canGoForward: false, loading: true },
 			documentEpoch: 1,
 			authoritativeUrl: url,
@@ -1181,18 +1392,358 @@ export class WorkspaceHost {
 		return { ...entry.state };
 	}
 
+	#assertPaneOperationActive(signal: AbortSignal): void {
+		if (signal.aborted) {
+			throw signal.reason instanceof Error ? signal.reason : new Error("cancelled: Gradivus pane call aborted");
+		}
+	}
+
+	#paneRemoteResult(response: unknown): Record<string, unknown> {
+		if (!isRecord(response)) throw new Error("Pane execution returned an invalid CDP response");
+		if (isRecord(response.exceptionDetails)) {
+			const exception = isRecord(response.exceptionDetails.exception)
+				? response.exceptionDetails.exception
+				: undefined;
+			const message =
+				(typeof exception?.description === "string" && exception.description) ||
+				(typeof response.exceptionDetails.text === "string" && response.exceptionDetails.text) ||
+				"Pane execution failed";
+			throw new Error(message.slice(0, 512));
+		}
+		if (!isRecord(response.result)) throw new Error("Pane execution returned no result");
+		return response.result;
+	}
+
+	async #paneExecutionContext(entry: BrowserEntry, signal: AbortSignal): Promise<number> {
+		this.#assertPaneOperationActive(signal);
+		const epoch = entry.documentEpoch;
+		if (entry.paneExecutionWorld?.documentEpoch === epoch) return entry.paneExecutionWorld.executionContextId;
+		const frameTreeResponse: unknown = await entry.view.webContents.debugger.sendCommand("Page.getFrameTree");
+		this.#assertPaneOperationActive(signal);
+		const frameTree =
+			isRecord(frameTreeResponse) && isRecord(frameTreeResponse.frameTree) ? frameTreeResponse.frameTree : undefined;
+		const frame = frameTree && isRecord(frameTree.frame) ? frameTree.frame : undefined;
+		if (!frame || typeof frame.id !== "string") throw new Error("pane_closed: Main browser frame is unavailable");
+		const worldResponse: unknown = await entry.view.webContents.debugger.sendCommand("Page.createIsolatedWorld", {
+			frameId: frame.id,
+			worldName: `gradivus-pane-${entry.view.webContents.id}-${epoch}`,
+			grantUniveralAccess: false,
+		});
+		this.#assertPaneOperationActive(signal);
+		if (entry.documentEpoch !== epoch || entry.navigationPending) {
+			throw new Error("stale_epoch: Page changed while creating the isolated world");
+		}
+		const executionContextId =
+			isRecord(worldResponse) && typeof worldResponse.executionContextId === "number"
+				? worldResponse.executionContextId
+				: undefined;
+		if (executionContextId === undefined) throw new Error("Pane isolated world is unavailable");
+		entry.paneExecutionWorld = { documentEpoch: epoch, executionContextId };
+		return executionContextId;
+	}
+
+	async #evaluatePaneExpression(
+		entry: BrowserEntry,
+		expression: string,
+		signal: AbortSignal,
+		returnByValue: boolean,
+	): Promise<Record<string, unknown>> {
+		const contextId = await this.#paneExecutionContext(entry, signal);
+		const response: unknown = await entry.view.webContents.debugger.sendCommand("Runtime.evaluate", {
+			expression,
+			contextId,
+			returnByValue,
+			awaitPromise: true,
+		});
+		this.#assertPaneOperationActive(signal);
+		return this.#paneRemoteResult(response);
+	}
+
+	async #resolvePaneElement(
+		entry: BrowserEntry,
+		args: { selector?: string; ref?: string },
+		signal: AbortSignal,
+	): Promise<string> {
+		const expression = args.ref
+			? buildResolveAriaRefScript(args.ref)
+			: `document.querySelector(${JSON.stringify(args.selector ?? "")})`;
+		const remote = await this.#evaluatePaneExpression(entry, expression, signal, false);
+		if (remote.subtype === "null" || typeof remote.objectId !== "string") {
+			throw new Error(args.ref ? `stale_ref: unknown ref ${args.ref}` : "Element not found");
+		}
+		return remote.objectId;
+	}
+
+	async #callPaneElement(
+		entry: BrowserEntry,
+		objectId: string,
+		functionDeclaration: string,
+		argument: string | undefined,
+		signal: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		try {
+			const response: unknown = await entry.view.webContents.debugger.sendCommand("Runtime.callFunctionOn", {
+				objectId,
+				functionDeclaration,
+				arguments: argument === undefined ? [] : [{ value: argument }],
+				returnByValue: true,
+				awaitPromise: true,
+			});
+			this.#assertPaneOperationActive(signal);
+			const remote = this.#paneRemoteResult(response);
+			if (!isRecord(remote.value)) throw new Error("Page action returned an invalid result");
+			return remote.value;
+		} finally {
+			await entry.view.webContents.debugger
+				.sendCommand("Runtime.releaseObject", { objectId })
+				.catch(() => undefined);
+		}
+	}
+
+	async #executePaneBrowserAction(
+		paneBrowserId: string,
+		args: {
+			action: "snapshot" | "navigate" | "click" | "fill" | "press" | "hover" | "scroll" | "screenshot";
+			url?: string;
+			selector?: string;
+			ref?: string;
+			text?: string;
+			key?: string;
+		},
+		signal: AbortSignal,
+	): Promise<PaneBrokerExecution> {
+		this.#assertPaneOperationActive(signal);
+		const entry = this.#requireBrowser(paneBrowserId);
+		const { webContents } = entry.view;
+		const stateDetails = (): Record<string, unknown> => ({
+			action: args.action,
+			paneId: paneBrowserId,
+			url: entry.state.url.slice(0, 4_096),
+			title: entry.state.title.slice(0, 240),
+			loading: entry.state.loading,
+			canGoBack: entry.state.canGoBack,
+			canGoForward: entry.state.canGoForward,
+		});
+
+		if (args.action === "navigate") {
+			const beforeEpoch = entry.documentEpoch;
+			try {
+				await this.navigateBrowser(paneBrowserId, args.url);
+			} catch (error) {
+				throw new Error(`navigate_failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			while (entry.documentEpoch === beforeEpoch || entry.navigationPending) {
+				this.#assertPaneOperationActive(signal);
+				if (entry.navigationFailure) throw new Error(`navigate_failed: ${entry.navigationFailure}`);
+				await sleep(25);
+			}
+			return { details: stateDetails() };
+		}
+		if (args.action === "snapshot") {
+			const remote = await this.#evaluatePaneExpression(
+				entry,
+				buildAriaSnapshotScript(undefined, { depth: SELECTION_LIMITS.maxDepth }),
+				signal,
+				true,
+			);
+			if (typeof remote.value !== "string") throw new Error("The active page returned an invalid ARIA snapshot");
+			const allLines = remote.value.split(/\r?\n/);
+			let aria = allLines.slice(0, SELECTION_LIMITS.maxDomRecords).join("\n");
+			const encoded = Buffer.from(aria, "utf8");
+			if (encoded.byteLength > SELECTION_LIMITS.maxDomBytes) {
+				aria = encoded
+					.subarray(0, SELECTION_LIMITS.maxDomBytes)
+					.toString("utf8")
+					.replace(/\uFFFD$/u, "");
+			}
+			return {
+				details: {
+					...stateDetails(),
+					aria,
+					truncated:
+						allLines.length > SELECTION_LIMITS.maxDomRecords || encoded.byteLength > SELECTION_LIMITS.maxDomBytes,
+				},
+			};
+		}
+		if (args.action === "click" || args.action === "fill" || args.action === "hover") {
+			const beforeEpoch = entry.documentEpoch;
+			const beforeSerial = entry.navigationSerial;
+			const objectId = await this.#resolvePaneElement(entry, args, signal);
+			const functionDeclaration =
+				args.action === "click"
+					? PANE_CLICK_FUNCTION
+					: args.action === "hover"
+						? PANE_HOVER_FUNCTION
+						: PANE_FILL_FUNCTION;
+			const raw = await this.#callPaneElement(
+				entry,
+				objectId,
+				functionDeclaration,
+				args.action === "fill" ? (args.text ?? "") : undefined,
+				signal,
+			);
+			if (raw.ok !== true) {
+				throw new Error(typeof raw.error === "string" ? raw.error.slice(0, 512) : "Page action failed");
+			}
+			await sleep(0);
+			if (args.action === "click" && (entry.navigationSerial !== beforeSerial || entry.navigationPending)) {
+				while (entry.navigationPending) {
+					this.#assertPaneOperationActive(signal);
+					if (entry.navigationFailure) throw new Error(`navigate_failed: ${entry.navigationFailure}`);
+					await sleep(25);
+				}
+				if (entry.navigationFailure) throw new Error(`navigate_failed: ${entry.navigationFailure}`);
+			} else if (
+				entry.documentEpoch !== beforeEpoch ||
+				entry.navigationSerial !== beforeSerial ||
+				entry.navigationPending
+			) {
+				throw new Error("stale_epoch: Page changed during the action");
+			}
+			return {
+				details: {
+					...stateDetails(),
+					...(args.ref ? { ref: args.ref } : { selector: args.selector }),
+					tag: typeof raw.tag === "string" ? raw.tag.slice(0, 32) : "",
+					...(typeof raw.text === "string" ? { text: raw.text.slice(0, 200) } : {}),
+				},
+			};
+		}
+		if (args.action === "scroll") {
+			const beforeEpoch = entry.documentEpoch;
+			const beforeSerial = entry.navigationSerial;
+			const deltaY = Number(args.text);
+			if (!Number.isFinite(deltaY) || Math.abs(deltaY) > 100_000) {
+				throw new Error("invalid_params: invalid scroll value");
+			}
+			webContents.sendInputEvent({
+				type: "mouseWheel",
+				x: Math.max(0, Math.round(entry.bounds.width / 2)),
+				y: Math.max(0, Math.round(entry.bounds.height / 2)),
+				deltaY,
+				deltaX: 0,
+			});
+			if (
+				entry.documentEpoch !== beforeEpoch ||
+				entry.navigationSerial !== beforeSerial ||
+				entry.navigationPending
+			) {
+				throw new Error("stale_epoch: Page changed during the action");
+			}
+			return { details: { ...stateDetails(), deltaY } };
+		}
+		if (args.action === "press") {
+			const beforeEpoch = entry.documentEpoch;
+			const beforeSerial = entry.navigationSerial;
+			const key = args.key ?? "";
+			if (key.length !== 1 && !PANE_BROWSER_KEYS.has(key)) {
+				throw new Error(`invalid_params: unsupported browser key ${key}`);
+			}
+			if (args.selector || args.ref) {
+				const objectId = await this.#resolvePaneElement(entry, args, signal);
+				const focused = await this.#callPaneElement(entry, objectId, PANE_FOCUS_FUNCTION, undefined, signal);
+				if (focused.ok !== true) {
+					throw new Error(typeof focused.error === "string" ? focused.error.slice(0, 512) : "Element not found");
+				}
+			}
+			webContents.sendInputEvent({ type: "keyDown", keyCode: key });
+			if (key.length === 1) webContents.sendInputEvent({ type: "char", keyCode: key });
+			webContents.sendInputEvent({ type: "keyUp", keyCode: key });
+			await sleep(0);
+			if (
+				entry.documentEpoch !== beforeEpoch ||
+				entry.navigationSerial !== beforeSerial ||
+				entry.navigationPending
+			) {
+				throw new Error("stale_epoch: Page changed during the action");
+			}
+			return {
+				details: {
+					...stateDetails(),
+					key,
+					...(args.ref ? { ref: args.ref } : args.selector ? { selector: args.selector } : {}),
+				},
+			};
+		}
+
+		if (typeof webContents.capturePage !== "function") throw new Error("Screenshot capture is unavailable");
+		let image = await webContents.capturePage();
+		let size = image.getSize();
+		const scale = Math.min(
+			1,
+			SELECTION_LIMITS.maxScreenshotDimension / size.width,
+			SELECTION_LIMITS.maxScreenshotDimension / size.height,
+		);
+		if (scale < 1) {
+			image = image.resize({
+				width: Math.max(1, Math.floor(size.width * scale)),
+				height: Math.max(1, Math.floor(size.height * scale)),
+			});
+			size = image.getSize();
+		}
+		for (const quality of [80, 60, 40]) {
+			const data = image.toJPEG(quality);
+			if (data.byteLength <= SELECTION_LIMITS.maxImageBytes) {
+				return {
+					details: { ...stateDetails(), width: size.width, height: size.height, bytes: data.byteLength },
+					image: { data: data.toString("base64"), mimeType: "image/jpeg" },
+				};
+			}
+		}
+		throw new Error(`Pane screenshot exceeded ${SELECTION_LIMITS.maxImageBytes} bytes`);
+	}
+
 	controlBrowser(rawId: unknown, rawAction: unknown): void {
 		const id = paneId(rawId);
 		const entry = this.#browsers.get(id);
 		if (!entry) return;
-		if (rawAction !== "back" && rawAction !== "forward" && rawAction !== "reload" && rawAction !== "stop")
+		if (
+			rawAction !== "back" &&
+			rawAction !== "forward" &&
+			rawAction !== "reload" &&
+			rawAction !== "hard-reload" &&
+			rawAction !== "zoom-in" &&
+			rawAction !== "zoom-out" &&
+			rawAction !== "zoom-reset" &&
+			rawAction !== "stop"
+		)
 			throw new TypeError("Invalid browser action");
 		const action: BrowserNavigationAction = rawAction;
-		const history = entry.view.webContents.navigationHistory;
+		const { webContents } = entry.view;
+		const history = webContents.navigationHistory;
 		if (action === "back" && history.canGoBack()) history.goBack();
 		else if (action === "forward" && history.canGoForward()) history.goForward();
-		else if (action === "reload") entry.view.webContents.reload();
-		else if (action === "stop") entry.view.webContents.stop();
+		else if (action === "reload") webContents.reload();
+		else if (action === "hard-reload") webContents.reloadIgnoringCache();
+		else if (action === "zoom-in") webContents.setZoomFactor(Math.min(3, webContents.getZoomFactor() + 0.1));
+		else if (action === "zoom-out") webContents.setZoomFactor(Math.max(0.5, webContents.getZoomFactor() - 0.1));
+		else if (action === "zoom-reset") webContents.setZoomFactor(1);
+		else if (action === "stop") webContents.stop();
+	}
+
+	findBrowser(rawId: unknown, rawQuery: unknown, rawForward: unknown): void {
+		const id = paneId(rawId);
+		const entry = this.#requireBrowser(id);
+		if (typeof rawQuery !== "string" || rawQuery.length > 1_024) throw new TypeError("Invalid browser find query");
+		if (typeof rawForward !== "boolean") throw new TypeError("Invalid browser find direction");
+		const query = rawQuery.trim();
+		if (!query) {
+			this.stopBrowserFind(id);
+			return;
+		}
+		const findNext = entry.findQuery === query;
+		entry.findQuery = query;
+		entry.findRequestId = entry.view.webContents.findInPage(query, { forward: rawForward, findNext });
+	}
+
+	stopBrowserFind(rawId: unknown): void {
+		const id = paneId(rawId);
+		const entry = this.#requireBrowser(id);
+		entry.findQuery = undefined;
+		entry.findRequestId = undefined;
+		entry.view.webContents.stopFindInPage("clearSelection");
+		const state: BrowserFindState = { query: "", activeMatchOrdinal: 0, matches: 0, finalUpdate: true };
+		this.#send({ type: "browser-find", paneId: id, state });
 	}
 
 	setBrowserBounds(rawId: unknown, rawBounds: unknown): void {
@@ -1226,14 +1777,22 @@ export class WorkspaceHost {
 		}
 	}
 
-	setVisibleBrowsers(value: unknown): void {
+	setVisibleBrowsers(value: unknown, rawActivePaneId?: unknown): void {
 		if (!Array.isArray(value) || value.length > 32) throw new TypeError("Invalid visible browser list");
 		const ids = value.map(paneId);
 		this.#visibleBrowsers = new Set(ids);
+		const nextActivePaneId =
+			rawActivePaneId !== undefined ? paneId(rawActivePaneId) : ids.length > 0 ? ids[0] : this.#activeBrowserPaneId;
+		if (nextActivePaneId && ids.length > 0 && !this.#visibleBrowsers.has(nextActivePaneId)) {
+			throw new TypeError("Active browser pane must be visible");
+		}
+		const activeChanged = this.#activeBrowserPaneId !== nextActivePaneId;
+		this.#activeBrowserPaneId = nextActivePaneId;
 		for (const [id, entry] of this.#browsers) {
 			if (this.#visibleBrowsers.has(id)) this.#attach(entry);
 			else this.#detach(entry);
 		}
+		if (activeChanged) void this.#desktopHost?.refreshPaneBroker();
 	}
 
 	async closeBrowser(rawId: unknown): Promise<void> {
@@ -1283,6 +1842,7 @@ export class WorkspaceHost {
 		if (this.#browsers.has(id)) {
 			this.destroyBrowserView(id);
 		}
+		await this.#desktopHost?.refreshPaneBroker();
 	}
 
 	destroyBrowserView(id: string): void {
@@ -1292,7 +1852,12 @@ export class WorkspaceHost {
 		this.#invalidateQueueForPane(id);
 		this.#browsers.delete(id);
 		this.#visibleBrowsers.delete(id);
+		if (this.#activeBrowserPaneId === id) {
+			this.#activeBrowserPaneId = undefined;
+			void this.#desktopHost?.refreshPaneBroker();
+		}
 		void this.#endSelection(id, "Browser view destroyed");
+		for (const cleanup of entry.cleanup.splice(0)) cleanup();
 		this.#detach(entry);
 		if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close?.();
 	}
@@ -1329,6 +1894,35 @@ export class WorkspaceHost {
 		}
 	}
 
+	async reorderTab(rawTabId: unknown, rawBeforeTabId: unknown): Promise<void> {
+		const tabId = typeof rawTabId === "string" ? rawTabId.trim() : "";
+		const beforeTabId = typeof rawBeforeTabId === "string" ? rawBeforeTabId.trim() : undefined;
+		if (!tabId || (rawBeforeTabId !== undefined && !beforeTabId)) throw new TypeError("Invalid tab reorder");
+		if (!this.#client?.isConnected || !this.#client.document) {
+			throw new Error("WorkspaceClient is not connected to authoritative runtime");
+		}
+		const res = await this.#client.executeCommandWithRetry(currentDoc => {
+			const tab = currentDoc.tabs.find(item => item.id === tabId);
+			if (!tab) throw new Error(`Tab '${tabId}' not found`);
+			if (beforeTabId && !currentDoc.tabs.some(item => item.id === beforeTabId)) {
+				throw new Error(`Tab '${beforeTabId}' not found`);
+			}
+			return {
+				version: 1 as const,
+				commandId: uniqueCommandId("cmd-tab-reorder"),
+				workspaceId: tab.workspaceId,
+				expectedRevision: currentDoc.revision,
+				issuedAt: Date.now(),
+				type: "tab.reorder" as const,
+				payload: { id: tabId, ...(beforeTabId ? { beforeId: beforeTabId } : {}) },
+			};
+		});
+		if (res.status === "rejected") {
+			throw new Error(`Failed to reorder tab in runtime: ${res.error?.message ?? "rejected"}`);
+		}
+		this.syncWithDocument(res.document);
+	}
+
 	async closeTab(rawTabId: unknown): Promise<void> {
 		const tabId = typeof rawTabId === "string" ? rawTabId.trim() : "";
 		if (!tabId) throw new TypeError("Invalid tab id");
@@ -1358,157 +1952,9 @@ export class WorkspaceHost {
 		}
 
 		this.syncWithDocument(res.document);
+		await this.#desktopHost?.refreshPaneBroker();
 	}
 
-	async openChatTerminal(
-		input: OpenChatTerminalInput,
-		resolvedInput?: { workspace: string; cwd: string },
-	): Promise<ChatTerminalViewState> {
-		if (!input || typeof input !== "object") throw new TypeError("OpenChatTerminalInput must be an object");
-		const resolved = resolvedInput ?? this.#desktopHost?.resolveSessionWorkspace(input.sessionId);
-		if (!resolved) throw new Error("Session workspace is unavailable");
-		if (!/^[a-z0-9-]{8,100}$/i.test(input.id)) throw new TypeError("Invalid chat terminal presentation id");
-		const presentationId = input.id;
-		const cols = dimension(input.cols, "Terminal columns");
-		const rows = dimension(input.rows, "Terminal rows");
-		if (!Number.isSafeInteger(input.fromOffset) || input.fromOffset < 0)
-			throw new RangeError("invalid replay offset");
-		let createdTerminalId: string | undefined;
-		try {
-			const client = this.#client;
-			if (!client?.isConnected || !client.document) throw new Error("Workspace runtime is not connected");
-			let document = client.document;
-			const workspace =
-				document.workspaces.find(item => {
-					const location = document.locations.find(candidate => candidate.id === item.locationId);
-					return location?.address.kind === "local" && location.address.path === resolved.cwd;
-				}) ??
-				document.workspaces.find(item => item.id === document.activeWorkspaceId) ??
-				document.workspaces[0];
-			if (!workspace) throw new Error("No active workspace found in authority document");
-			for (const [id, terminal] of this.#chatTerminals) {
-				if (terminal.workspace !== resolved.cwd) await this.#closeChatTerminal(id);
-			}
-
-			const existing = [...this.#chatTerminals.values()].find(item => item.workspace === resolved.cwd);
-			if (existing && document.terminals.some(item => item.id === existing.terminalId)) {
-				this.#unsubscribeTerminal(existing.presentationId);
-				this.#chatTerminals.delete(existing.presentationId);
-				this.#terminalIds.delete(existing.presentationId);
-				this.#terminalStates.delete(existing.presentationId);
-				const nextOffset = Math.max(this.#terminalOffsets.get(existing.presentationId) ?? 0, input.fromOffset);
-				this.#terminalOffsets.delete(existing.presentationId);
-				existing.presentationId = presentationId;
-				this.#chatTerminals.set(presentationId, existing);
-				this.#terminalIds.set(presentationId, existing.terminalId);
-				this.#terminalOffsets.set(presentationId, nextOffset);
-				await client.resizeTerminal(existing.terminalId, cols, rows);
-				const snapshot = await this.#subscribeTerminal(presentationId, existing.terminalId);
-				const currentTerminal = client.document?.terminals.find(item => item.id === existing.terminalId);
-				const status = snapshot.status === "closed" ? "exited" : snapshot.status;
-				this.#terminalStates.set(presentationId, status);
-				return {
-					id: presentationId,
-					workspace: resolved.workspace,
-					cwd: resolved.cwd,
-					status,
-					offset: this.#terminalOffsets.get(presentationId) ?? nextOffset,
-					...(currentTerminal?.error ? { error: currentTerminal.error } : {}),
-				};
-			}
-
-			const location = document.locations.find(item => item.id === workspace.locationId);
-			if (!location) throw new Error(`Location '${workspace.locationId}' does not exist`);
-			const terminalId = `term-chat-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
-			createdTerminalId = terminalId;
-			const result = await client.executeCommandWithRetry(currentDocument => ({
-				version: 1 as const,
-				commandId: uniqueCommandId("cmd-chat-terminal-open"),
-				workspaceId: workspace.id,
-				expectedRevision: currentDocument.revision,
-				issuedAt: Date.now(),
-				type: "terminal.open" as const,
-				payload: {
-					id: terminalId,
-					detached: true,
-					locationId: location.id,
-					label: "Chat shell",
-					cwd: resolved.cwd,
-					columns: cols,
-					rows,
-					...(this.#settingsStore?.settings.terminal.shell
-						? { shell: this.#settingsStore.settings.terminal.shell }
-						: {}),
-				},
-			}));
-			if (result.status !== "accepted" && result.status !== "duplicate") {
-				throw new Error(`Failed to open chat terminal: ${result.error?.message ?? result.status}`);
-			}
-			document = result.document;
-			this.syncWithDocument(document);
-			const terminal = document.terminals.find(item => item.id === terminalId);
-			if (!terminal) throw new Error("Chat terminal was not created");
-			this.#chatTerminals.set(presentationId, {
-				presentationId,
-				terminalId,
-				workspace: resolved.cwd,
-				cwd: resolved.cwd,
-			});
-			this.#terminalIds.set(presentationId, terminalId);
-			this.#terminalOffsets.set(presentationId, input.fromOffset);
-			const snapshot = await this.#subscribeTerminal(presentationId, terminalId);
-			const currentTerminal = client.document?.terminals.find(item => item.id === terminalId);
-			const status = snapshot.status === "closed" ? "exited" : snapshot.status;
-			this.#terminalStates.set(presentationId, status);
-			return {
-				id: presentationId,
-				workspace: resolved.workspace,
-				cwd: resolved.cwd,
-				status,
-				offset: this.#terminalOffsets.get(presentationId) ?? input.fromOffset,
-				...(currentTerminal?.error ? { error: currentTerminal.error } : {}),
-			};
-		} catch (error) {
-			if (createdTerminalId && this.#chatTerminals.has(presentationId)) {
-				await this.#closeChatTerminal(presentationId).catch(() => {});
-			}
-			return {
-				id: presentationId,
-				workspace: resolved.workspace,
-				cwd: resolved.cwd,
-				status: "failed",
-				offset: Math.max(this.#terminalOffsets.get(presentationId) ?? 0, input.fromOffset),
-				error: error instanceof Error ? error.message : String(error),
-			};
-		}
-	}
-
-	async #closeChatTerminal(presentationId: string): Promise<void> {
-		const record = this.#chatTerminals.get(presentationId);
-		if (!record) return;
-		const client = this.#client;
-		try {
-			if (client?.isConnected && client.document?.terminals.some(item => item.id === record.terminalId)) {
-				const workspaceId = client.document.activeWorkspaceId ?? "workspace-default";
-				const result = await client.executeCommandWithRetry(currentDocument => ({
-					version: 1 as const,
-					commandId: uniqueCommandId("cmd-chat-terminal-close"),
-					workspaceId,
-					expectedRevision: currentDocument.revision,
-					issuedAt: Date.now(),
-					type: "terminal.close" as const,
-					payload: { id: record.terminalId },
-				}));
-				if (result.status !== "rejected") this.syncWithDocument(result.document);
-			}
-		} finally {
-			this.#unsubscribeTerminal(presentationId);
-			this.#chatTerminals.delete(presentationId);
-			this.#terminalIds.delete(presentationId);
-			this.#terminalStates.delete(presentationId);
-			this.#terminalOffsets.delete(presentationId);
-		}
-	}
 	async closePane(rawPaneId: unknown): Promise<void> {
 		const id = paneId(rawPaneId);
 
@@ -1522,9 +1968,7 @@ export class WorkspaceHost {
 	}
 
 	async createTerminal(options: CreateTerminalInput): Promise<TerminalViewState> {
-		if (typeof options !== "object" || options === null) {
-			throw new TypeError("CreateTerminalInput must be an object");
-		}
+		if (typeof options !== "object" || options === null) throw new TypeError("CreateTerminalInput must be an object");
 		if (
 			options.layout !== undefined &&
 			options.layout !== "columns" &&
@@ -1534,6 +1978,8 @@ export class WorkspaceHost {
 			throw new TypeError("layout must be columns, rows, or grid");
 		}
 		const id = paneId(options.id);
+		const name = typeof options.name === "string" ? options.name.trim() : "";
+		if (!name || name.length > 160) throw new TypeError("Invalid terminal name");
 		const columns = dimension(options.cols, "Terminal columns");
 		const rows = dimension(options.rows, "Terminal rows");
 		const client = this.#client;
@@ -1543,11 +1989,12 @@ export class WorkspaceHost {
 		const document = client.document;
 		const workspace =
 			document.workspaces.find(item => item.id === options.workspaceId) ??
-			document.workspaces.find(item => item.id === document.activeWorkspaceId) ??
-			document.workspaces[0];
+			document.workspaces.find(item => item.id === document.activeWorkspaceId);
 		if (!workspace) throw new Error("No active workspace found in authority document");
 		const location = document.locations.find(item => item.id === workspace.locationId);
 		if (!location) throw new Error(`Location '${workspace.locationId}' does not exist`);
+		if (location.address.kind !== "local") throw new Error("Terminal tabs require a local workspace");
+		const cwd = location.address.path;
 		let terminal = document.terminals.find(item => item.paneId === id);
 		if (!terminal || terminal.status === "closed") {
 			const result = await client.executeCommandWithRetry(currentDocument => ({
@@ -1561,11 +2008,12 @@ export class WorkspaceHost {
 					id: terminal?.id ?? `term-${id}`,
 					paneId: id,
 					tabId: options.tabId,
+					tabName: name,
 					locationId: location.id,
-					label: "Terminal",
+					label: name,
 					columns,
 					rows,
-					cwd: this.#settingsStore?.settings.workspace.defaultPath ?? defaultWorkspacePath(),
+					cwd,
 					...(options.layout ? { layout: options.layout } : {}),
 					...(this.#settingsStore?.settings.terminal.shell
 						? { shell: this.#settingsStore.settings.terminal.shell }
@@ -1583,19 +2031,86 @@ export class WorkspaceHost {
 		if (!terminal) throw new Error(`Terminal pane '${id}' was not created`);
 		this.#terminalIds.set(id, terminal.id);
 		await this.#subscribeTerminal(id, terminal.id);
-		return { id, cwd: terminal.cwd ?? defaultWorkspacePath() };
+		return { id, cwd: terminal.cwd ?? cwd };
+	}
+
+	async attachTerminal(rawId: unknown, rawFromOffset: unknown): Promise<TerminalAttachmentState> {
+		const id = paneId(rawId);
+		if (typeof rawFromOffset !== "number" || !Number.isSafeInteger(rawFromOffset) || rawFromOffset < 0) {
+			throw new RangeError("invalid replay offset");
+		}
+		const fromOffset = rawFromOffset;
+		const client = this.#client;
+		if (!client?.isConnected || !client.document) throw new Error("WorkspaceClient is not connected");
+		const terminal = client.document.terminals.find(item => item.paneId === id);
+		if (!terminal) throw new Error(`Terminal pane '${id}' is unavailable`);
+		const chunks: TerminalAttachmentState["chunks"] = [];
+		const removeCollector = client.onTerminalOutput(terminal.id, frame => {
+			chunks.push({ offset: frame.offset, data: frame.data });
+		});
+		let snapshot: TerminalStatusFrame;
+		try {
+			snapshot = await client.subscribeTerminal(terminal.id, fromOffset);
+		} finally {
+			removeCollector();
+		}
+		this.#terminalIds.set(id, terminal.id);
+		const ordered = chunks.sort((left, right) => left.offset - right.offset);
+		const deduplicated: TerminalAttachmentState["chunks"] = [];
+		let nextOffset = Math.max(fromOffset, snapshot.firstAvailableOffset);
+		for (const chunk of ordered) {
+			const bytes = Buffer.from(chunk.data, "utf8");
+			const end = chunk.offset + bytes.byteLength;
+			if (end <= nextOffset) continue;
+			const delta = Math.max(0, nextOffset - chunk.offset);
+			const data = bytes.subarray(delta).toString("utf8");
+			deduplicated.push({ offset: chunk.offset + delta, data });
+			nextOffset = end;
+		}
+		const status = snapshot.status === "closed" ? "exited" : snapshot.status;
+		return {
+			id,
+			status,
+			cwd: snapshot.cwd ?? terminal.cwd ?? "",
+			chunks: deduplicated,
+			firstAvailableOffset: snapshot.firstAvailableOffset,
+			totalBytesProduced: snapshot.totalBytesProduced,
+			...(terminal.error ? { error: terminal.error } : {}),
+		};
+	}
+
+	async restartTerminal(rawId: unknown): Promise<TerminalAttachmentState> {
+		const id = paneId(rawId);
+		const client = this.#client;
+		if (!client?.isConnected || !client.document) throw new Error("WorkspaceClient is not connected");
+		const terminal = client.document.terminals.find(item => item.paneId === id);
+		if (!terminal) throw new Error(`Terminal pane '${id}' is unavailable`);
+		const pane = client.document.panes.find(item => item.id === id);
+		const tab = pane ? client.document.tabs.find(item => item.id === pane.tabId) : undefined;
+		if (!tab) throw new Error(`Terminal pane '${id}' has no tab`);
+		const result = await client.executeCommandWithRetry(currentDocument => ({
+			version: 1 as const,
+			commandId: uniqueCommandId("cmd-terminal-restart"),
+			workspaceId: tab.workspaceId,
+			expectedRevision: currentDocument.revision,
+			issuedAt: Date.now(),
+			type: "terminal.restart" as const,
+			payload: { id: terminal.id },
+		}));
+		if (result.status !== "accepted" && result.status !== "duplicate") {
+			throw new Error(`Failed to restart terminal: ${result.error?.message ?? result.status}`);
+		}
+		this.syncWithDocument(result.document);
+		this.#unsubscribeTerminal(id);
+		this.#terminalOffsets.delete(id);
+		await this.#subscribeTerminal(id, terminal.id);
+		return this.attachTerminal(id, 0);
 	}
 
 	async writeTerminal(rawId: unknown, rawData: unknown): Promise<void> {
 		const id = paneId(rawId);
 		if (typeof rawData !== "string" || Buffer.byteLength(rawData, "utf8") > 512 * 1024)
 			throw new TypeError("Invalid terminal input");
-		const chat = this.#chatTerminals.get(id);
-		if (chat) {
-			if (!this.#client) throw new Error("WorkspaceClient is not configured");
-			await this.#client.sendTerminalInput(chat.terminalId, rawData);
-			return;
-		}
 		const terminalId = this.#terminalEntityId(id);
 		if (!this.#client) throw new Error("WorkspaceClient is not configured");
 		await this.#client.sendTerminalInput(terminalId, rawData);
@@ -1603,16 +2118,6 @@ export class WorkspaceHost {
 
 	async resizeTerminal(rawId: unknown, rawCols: unknown, rawRows: unknown): Promise<void> {
 		const id = paneId(rawId);
-		const chat = this.#chatTerminals.get(id);
-		if (chat) {
-			if (!this.#client) throw new Error("WorkspaceClient is not configured");
-			await this.#client.resizeTerminal(
-				chat.terminalId,
-				dimension(rawCols, "Terminal columns"),
-				dimension(rawRows, "Terminal rows"),
-			);
-			return;
-		}
 		const terminalId = this.#terminalEntityId(id);
 		if (!this.#client) throw new Error("WorkspaceClient is not configured");
 		await this.#client.resizeTerminal(
@@ -1624,10 +2129,6 @@ export class WorkspaceHost {
 
 	async closeTerminal(rawId: unknown): Promise<void> {
 		const id = paneId(rawId);
-		if (this.#chatTerminals.has(id)) {
-			await this.#closeChatTerminal(id);
-			return;
-		}
 		const client = this.#client;
 		if (!client?.isConnected || !client.document) {
 			this.#unsubscribeTerminal(id);
@@ -1734,7 +2235,7 @@ export class WorkspaceHost {
 			const script = `window.__gradivus_inspector_finish__?.(${payload})`;
 			const applied = await entry.view.webContents.executeJavaScript(script).catch(() => false);
 			if (applied === true) return;
-			if (attempt < 4) await Bun.sleep(100);
+			if (attempt < 4) await sleep(100);
 		}
 	}
 
@@ -1746,7 +2247,7 @@ export class WorkspaceHost {
 				const cleanup = entry.view.webContents.executeJavaScript(
 					`window.__gradivus_inspector_cleanup__?.(${payload})`,
 				);
-				await Promise.race([cleanup, Bun.sleep(250)]);
+				await Promise.race([cleanup, sleep(250)]);
 			} catch {}
 			try {
 				const present = await entry.view.webContents.executeJavaScript(
@@ -1754,7 +2255,7 @@ export class WorkspaceHost {
 				);
 				if (present !== true) return;
 			} catch {}
-			if (attempt < 2) await Bun.sleep(16);
+			if (attempt < 2) await sleep(16);
 		}
 	}
 
@@ -2625,7 +3126,6 @@ export class WorkspaceHost {
 	}
 
 	async stop(): Promise<void> {
-		for (const id of [...this.#chatTerminals.keys()]) await this.#closeChatTerminal(id);
 		for (const paneId of this.#terminalSubscriptions.keys()) this.#unsubscribeTerminal(paneId);
 		this.#terminalIds.clear();
 		this.#terminalStates.clear();
@@ -2672,10 +3172,63 @@ export class WorkspaceHost {
 			this.syncWithDocument(result.document);
 		}
 	}
+	async #updateBrowserFavicon(id: string, entry: BrowserEntry, urls: string[]): Promise<void> {
+		const candidate =
+			urls.find(url => url.length <= 4_096 && url.startsWith("data:image/")) ??
+			urls.find(url => {
+				if (url.length > 4_096) return false;
+				try {
+					const protocol = new URL(url).protocol;
+					return protocol === "https:" || protocol === "http:";
+				} catch {
+					return false;
+				}
+			});
+		if (!candidate) return;
+		const documentEpoch = entry.documentEpoch;
+		let faviconUrl = candidate;
+		if (!candidate.startsWith("data:image/")) {
+			try {
+				const response = await electron.net.fetch(candidate);
+				if (!response.ok || !response.body) return;
+				const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+				if (!contentType || (!contentType.startsWith("image/") && contentType !== "application/octet-stream"))
+					return;
+				const declaredLength = Number(response.headers.get("content-length"));
+				if (Number.isFinite(declaredLength) && declaredLength > 256 * 1024) return;
+				const reader = response.body.getReader();
+				const chunks: Uint8Array[] = [];
+				let total = 0;
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					total += value.byteLength;
+					if (total > 256 * 1024) {
+						await reader.cancel();
+						return;
+					}
+					chunks.push(value);
+				}
+				const bytes = new Uint8Array(total);
+				let offset = 0;
+				for (const chunk of chunks) {
+					bytes.set(chunk, offset);
+					offset += chunk.byteLength;
+				}
+				faviconUrl = `data:${contentType};base64,${Buffer.from(bytes).toString("base64")}`;
+			} catch {
+				return;
+			}
+		}
+		if (this.#browsers.get(id) !== entry || entry.documentEpoch !== documentEpoch) return;
+		entry.state = { ...entry.state, faviconUrl };
+		this.#emitBrowserState(id);
+	}
+
 	#bindBrowser(id: string, entry: BrowserEntry): void {
 		const { webContents } = entry.view;
 		webContents.on("did-start-loading", () => {
-			entry.state = { ...entry.state, loading: true, error: undefined };
+			entry.state = { ...entry.state, loading: true, error: undefined, faviconUrl: undefined };
 			this.#emitBrowserState(id);
 		});
 		webContents.on("did-stop-loading", () => {
@@ -2689,8 +3242,21 @@ export class WorkspaceHost {
 				this.#emitBrowserState(id);
 			}
 		});
+		webContents.on(
+			"did-start-navigation",
+			(_event: unknown, _url: string, _isInPlace: boolean, isMainFrame: boolean) => {
+				if (isMainFrame === false) return;
+				entry.navigationSerial++;
+				entry.navigationPending = true;
+				entry.navigationFailure = undefined;
+				entry.paneExecutionWorld = undefined;
+			},
+		);
 		webContents.on("did-navigate", (_event: unknown, url: string) => {
+			entry.navigationPending = false;
 			entry.documentEpoch++;
+			entry.navigationFailure = undefined;
+			entry.paneExecutionWorld = undefined;
 			void this.#endSelection(id, "Page navigated");
 			entry.state = { ...entry.state, url };
 			this.#refreshBrowserState(id);
@@ -2699,6 +3265,9 @@ export class WorkspaceHost {
 		webContents.on("did-navigate-in-page", (_event: unknown, url: string, isMainFrame: boolean) => {
 			if (isMainFrame !== false) {
 				entry.documentEpoch++;
+				entry.navigationPending = false;
+				entry.navigationFailure = undefined;
+				entry.paneExecutionWorld = undefined;
 				void this.#endSelection(id, "In-page navigation");
 			}
 			entry.state = { ...entry.state, url };
@@ -2710,10 +3279,46 @@ export class WorkspaceHost {
 			entry.state = { ...entry.state, title: pageTitle };
 			this.#emitBrowserState(id);
 		});
+		webContents.on("page-favicon-updated", (_event: unknown, urls: string[]) => {
+			void this.#updateBrowserFavicon(id, entry, urls);
+		});
+		webContents.on("found-in-page", (_event: unknown, result: Electron.FoundInPageResult) => {
+			if (entry.findRequestId !== undefined && result.requestId !== entry.findRequestId) return;
+			const state: BrowserFindState = {
+				query: entry.findQuery ?? "",
+				activeMatchOrdinal: result.activeMatchOrdinal,
+				matches: result.matches,
+				finalUpdate: result.finalUpdate,
+			};
+			this.#send({ type: "browser-find", paneId: id, state });
+		});
+		const downloadHandler = (
+			event: Electron.Event,
+			item: Electron.DownloadItem,
+			source: Electron.WebContents,
+		): void => {
+			if (source !== webContents) return;
+			event.preventDefault();
+			item.cancel();
+			this.#send({
+				type: "browser-warning",
+				paneId: id,
+				message: "Downloads are not available in Gradivus.",
+			});
+		};
+		const browserSession = (webContents as Electron.WebContents & { session?: Electron.Session }).session;
+		if (browserSession) {
+			browserSession.on("will-download", downloadHandler);
+			entry.cleanup.push(() => browserSession.removeListener("will-download", downloadHandler));
+		}
 		webContents.on(
 			"did-fail-load",
 			(_event: unknown, errorCode: number, errorDescription: string, validatedURL: string, isMainFrame: boolean) => {
-				if (!isMainFrame || errorCode === -3) return;
+				if (!isMainFrame) return;
+				entry.navigationPending = false;
+				entry.navigationFailure =
+					errorCode === -3 ? "Navigation was cancelled" : errorDescription || `Navigation failed (${errorCode})`;
+				entry.paneExecutionWorld = undefined;
 				entry.state = {
 					...entry.state,
 					url: validatedURL || entry.state.url,
@@ -2726,6 +3331,27 @@ export class WorkspaceHost {
 		webContents.on("focus", () => this.#send({ type: "browser-focus", paneId: id }));
 		webContents.on("context-menu", () => {
 			this.showPaneContextMenu(id, this.#visibleBrowsers.size < MAX_WORKSPACE_PANES);
+		});
+		webContents.on("before-input-event", (event, input) => {
+			if (input.type !== "keyDown") return;
+			const command = input.control || input.meta;
+			const key = input.key.toLowerCase();
+			let shortcut: BrowserShortcut | undefined;
+			if (command && key === "tab") shortcut = input.shift ? "previous-tab" : "next-tab";
+			else if (command && input.shift && key === "t") shortcut = "reopen-tab";
+			else if (command && input.shift && key === "r") shortcut = "hard-reload";
+			else if (command && !input.shift && key === "t") shortcut = "new-tab";
+			else if (command && !input.shift && key === "w") shortcut = "close-tab";
+			else if (command && !input.shift && key === "l") shortcut = "focus-address";
+			else if (command && !input.shift && key === "f") shortcut = "find";
+			else if (command && !input.shift && key === "-") shortcut = "zoom-out";
+			else if (command && !input.shift && (key === "+" || key === "=")) shortcut = "zoom-in";
+			else if (command && !input.shift && key === "0") shortcut = "zoom-reset";
+			else if (!command && input.alt && key === "arrowleft") shortcut = "back";
+			else if (!command && input.alt && key === "arrowright") shortcut = "forward";
+			if (!shortcut) return;
+			event.preventDefault();
+			this.#send({ type: "browser-shortcut", paneId: id, shortcut });
 		});
 		webContents.on("render-process-gone", (_event: unknown, details: { reason?: string }) => {
 			entry.state = {

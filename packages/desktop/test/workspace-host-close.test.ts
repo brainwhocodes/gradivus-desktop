@@ -44,7 +44,7 @@ describe("WorkspaceHost transaction-safe close operations", () => {
 				removeChildView,
 			},
 		};
-		const host = new WorkspaceHost(window as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(window as never);
 		return { host, send, addChildView, removeChildView };
 	}
 

@@ -7,7 +7,7 @@ import type { WorkspaceCommandV1, WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire"
 import { ensureWorkspaceRuntime, type WorkspaceRuntimeDescriptor } from "@oh-my-pi/pi-workspace-runtime/bootstrap";
 import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, net, protocol, session } from "electron";
-import { MAX_INLINE_PROMPT_BYTES, type OpenChatTerminalInput } from "../shared/contracts";
+import { MAX_INLINE_PROMPT_BYTES } from "../shared/contracts";
 import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../shared/selection-agent";
 import { DESKTOP_THEME_PALETTES, type ResolvedTheme, resolveTheme } from "../shared/theme-palette";
 import { AppSettingsStore } from "./app-settings";
@@ -561,6 +561,27 @@ function registerIpc(): void {
 		const { host: h } = await ensureServices();
 		return h.setAgentSetting(id, pathValue, value);
 	});
+	ipcMain.handle("gradivus:agent-prompts", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.getAgentPrompts(id);
+	});
+	ipcMain.handle(
+		"gradivus:save-agent-prompt",
+		async (event, id: unknown, name: unknown, scope: unknown, systemPrompt: unknown, expectedRevision: unknown) => {
+			assertTrustedSender(event);
+			const { host: h } = await ensureServices();
+			return h.saveAgentPrompt(id, name, scope, systemPrompt, expectedRevision);
+		},
+	);
+	ipcMain.handle(
+		"gradivus:reset-agent-prompt",
+		async (event, id: unknown, name: unknown, scope: unknown, expectedRevision: unknown) => {
+			assertTrustedSender(event);
+			const { host: h } = await ensureServices();
+			return h.resetAgentPrompt(id, name, scope, expectedRevision);
+		},
+	);
 	ipcMain.handle("gradivus:choose-and-create", async (event, kind: unknown, cwd: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
@@ -585,6 +606,11 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.loadTimelineItem(id, itemId);
+	});
+	ipcMain.handle("gradivus:timeline-tool-detail", async (event, id: unknown, itemId: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.loadTimelineToolDetail(id, itemId);
 	});
 	ipcMain.handle("gradivus:available-commands", async (event, id: unknown) => {
 		assertTrustedSender(event);
@@ -663,6 +689,77 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.queueFollowUp(id, composition);
+	});
+	ipcMain.handle("gradivus:request-plan-review", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.requestPlanReview(id);
+	});
+	ipcMain.handle(
+		"gradivus:update-plan-review",
+		async (
+			event,
+			id: unknown,
+			reviewId: unknown,
+			content: unknown,
+			expectedRevision: unknown,
+			annotationState: unknown,
+		) => {
+			assertTrustedSender(event);
+			const { host: h } = await ensureServices();
+			return h.updatePlanReview(id, reviewId, content, expectedRevision, annotationState);
+		},
+	);
+	ipcMain.handle(
+		"gradivus:resolve-plan-review",
+		async (event, id: unknown, reviewId: unknown, expectedRevision: unknown, decision: unknown) => {
+			assertTrustedSender(event);
+			const { host: h } = await ensureServices();
+			return h.resolvePlanReview(id, reviewId, expectedRevision, decision);
+		},
+	);
+	ipcMain.handle(
+		"gradivus:set-todos",
+		async (event, id: unknown, phases: unknown, expectedRevision: unknown, action: unknown) => {
+			assertTrustedSender(event);
+			const { host: h } = await ensureServices();
+			return h.setTodos(id, phases, expectedRevision, action);
+		},
+	);
+	ipcMain.handle("gradivus:compact", async (event, id: unknown, instructions: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.compact(id, instructions);
+	});
+	ipcMain.handle("gradivus:handoff", async (event, id: unknown, instructions: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.handoff(id, instructions);
+	});
+	ipcMain.handle("gradivus:retry", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.retry(id);
+	});
+	ipcMain.handle("gradivus:abort-retry", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.abortRetry(id);
+	});
+	ipcMain.handle("gradivus:restart", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.restart(id);
+	});
+	ipcMain.handle("gradivus:session-stats", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.getSessionStats(id);
+	});
+	ipcMain.handle("gradivus:export-html", async (event, id: unknown, outputPath: unknown) => {
+		assertTrustedSender(event);
+		const { host: h } = await ensureServices();
+		return h.exportHtml(id, outputPath);
 	});
 	ipcMain.handle("gradivus:abort", async (event, id: unknown) => {
 		assertTrustedSender(event);
@@ -797,49 +894,68 @@ function registerIpc(): void {
 		const { workspace: ws } = await ensureServices();
 		return ws.controlBrowser(id, action);
 	});
+	ipcMain.handle("gradivus:browser-find", async (event, id: unknown, query: unknown, forward: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.findBrowser(id, query, forward);
+	});
+	ipcMain.handle("gradivus:browser-find-stop", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.stopBrowserFind(id);
+	});
+	ipcMain.handle("gradivus:pane-automation-get", async (event, sessionId: unknown, paneId: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.getPaneAutomation(sessionId, paneId);
+	});
+	ipcMain.handle(
+		"gradivus:pane-automation-authorize",
+		async (event, sessionId: unknown, paneId: unknown, access: unknown) => {
+			assertTrustedSender(event);
+			const { workspace: ws } = await ensureServices();
+			return ws.requestPaneAuthorization(sessionId, paneId, access);
+		},
+	);
+	ipcMain.handle("gradivus:pane-automation-revoke", async (event, sessionId: unknown, paneId: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.revokePane(sessionId, paneId);
+	});
+	ipcMain.handle("gradivus:browser-session-tab-close", async (event, sessionId: unknown, name: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.closeBrowserTabForSession(sessionId, name);
+	});
 	ipcMain.handle("gradivus:browser-bounds", async (event, id: unknown, bounds: unknown) => {
 		assertTrustedSender(event);
 		const { workspace: ws } = await ensureServices();
 		return ws.setBrowserBounds(id, bounds);
 	});
-	ipcMain.handle("gradivus:browser-visible", async (event, ids: unknown) => {
+	ipcMain.handle("gradivus:browser-visible", async (event, ids: unknown, activePaneId: unknown) => {
 		assertTrustedSender(event);
 		const { workspace: ws } = await ensureServices();
-		return ws.setVisibleBrowsers(ids);
+		return ws.setVisibleBrowsers(ids, activePaneId);
 	});
 	ipcMain.handle("gradivus:browser-close", async (event, id: unknown) => {
 		assertTrustedSender(event);
 		const { workspace: ws } = await ensureServices();
 		return ws.closeBrowser(id);
 	});
-	ipcMain.handle("gradivus:chat-terminal-open", async (event, input: unknown) => {
-		assertTrustedSender(event);
-		const { host: h, workspace: ws } = await ensureServices();
-		if (typeof input !== "object" || input === null) throw new TypeError("invalid chat terminal input");
-		const value = input as Partial<OpenChatTerminalInput>;
-		if (
-			typeof value.id !== "string" ||
-			!/^[a-z0-9-]{8,100}$/i.test(value.id) ||
-			typeof value.sessionId !== "string" ||
-			value.sessionId.length < 8 ||
-			value.sessionId.length > 100 ||
-			!Number.isSafeInteger(value.cols) ||
-			(value.cols as number) < 2 ||
-			(value.cols as number) > 500 ||
-			!Number.isSafeInteger(value.rows) ||
-			(value.rows as number) < 2 ||
-			(value.rows as number) > 500 ||
-			!Number.isSafeInteger(value.fromOffset) ||
-			(value.fromOffset as number) < 0
-		)
-			throw new TypeError("invalid chat terminal input");
-		const resolved = h.resolveSessionWorkspace(value.sessionId);
-		return ws.openChatTerminal(value as OpenChatTerminalInput, resolved);
-	});
 	ipcMain.handle("gradivus:terminal-create", async (event, options: unknown) => {
 		assertTrustedSender(event);
 		const { workspace: ws } = await ensureServices();
 		return ws.createTerminal(options as CreateTerminalOptions);
+	});
+	ipcMain.handle("gradivus:terminal-attach", async (event, id: unknown, fromOffset: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.attachTerminal(id, fromOffset);
+	});
+	ipcMain.handle("gradivus:terminal-restart", async (event, id: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.restartTerminal(id);
 	});
 	ipcMain.handle("gradivus:terminal-write", async (event, id: unknown, data: unknown) => {
 		assertTrustedSender(event);
@@ -860,6 +976,11 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { workspace: ws } = await ensureServices();
 		return ws.updateTab(tabId, updates);
+	});
+	ipcMain.handle("gradivus:tab-reorder", async (event, tabId: unknown, beforeTabId: unknown) => {
+		assertTrustedSender(event);
+		const { workspace: ws } = await ensureServices();
+		return ws.reorderTab(tabId, beforeTabId);
 	});
 	ipcMain.handle("gradivus:tab-close", async (event, tabId: unknown) => {
 		assertTrustedSender(event);

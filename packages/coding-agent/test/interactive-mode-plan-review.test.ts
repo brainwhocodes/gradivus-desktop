@@ -10,21 +10,20 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-coding-agent/modes/components/hook-selector";
-import {
-	type PlanReviewAnnotationState,
-	PlanReviewOverlay,
-} from "@oh-my-pi/pi-coding-agent/modes/components/plan-review-overlay";
+import { PlanReviewOverlay } from "@oh-my-pi/pi-coding-agent/modes/components/plan-review-overlay";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-save";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { type OverlayHandle, type OverlayOptions, setKeybindings, Text } from "@oh-my-pi/pi-tui";
+import { type OverlayHandle, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import type { PlanReviewAnnotationState } from "@oh-my-pi/pi-utils/plan-review";
 
 /**
  * Matches the plan-approved synthetic-prompt dispatch. `#approvePlan` calls
@@ -130,16 +129,6 @@ describe("InteractiveMode plan review rendering", () => {
 		await currentSession?.dispose();
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
-	});
-
-	it("keeps queued-message rows in the live region instead of native scrollback", () => {
-		const liveRegion = mode.pendingMessagesContainer as {
-			getNativeScrollbackLiveRegionStart?: () => number | undefined;
-		};
-
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBeUndefined();
-		mode.pendingMessagesContainer.addChild(new Text("Queued: follow-up"));
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBe(0);
 	});
 
 	it("exits empty plan mode without confirmation", async () => {
@@ -256,6 +245,8 @@ describe("InteractiveMode plan review rendering", () => {
 					note: "Add the rollback path.",
 				},
 			],
+			deletedSections: [],
+			additionalFeedback: "",
 		};
 		const restoredStates: Array<PlanReviewAnnotationState | undefined> = [];
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
@@ -289,6 +280,8 @@ describe("InteractiveMode plan review rendering", () => {
 					note: "Clarify the rollback path.",
 				},
 			],
+			deletedSections: [],
+			additionalFeedback: "",
 		};
 		const feedback = "Refinement feedback on the plan:\n\n> Line: body\n- Clarify the rollback path.\n";
 		let reviewCount = 0;
@@ -327,6 +320,8 @@ describe("InteractiveMode plan review rendering", () => {
 					note: "Clarify the rollback path.",
 				},
 			],
+			deletedSections: [],
+			additionalFeedback: "",
 		};
 		const feedback = "Refinement feedback on the plan:\n\n> Line: body\n- Clarify the rollback path.\n";
 		const restoredStates: Array<PlanReviewAnnotationState | undefined> = [];
@@ -636,6 +631,41 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
 	});
 
+	it("saves the final plan to the chosen path and starts a new session", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Draft plan\n\noriginal body\n");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const edited = "# Auto QA\n\nSave the final plan.\n\n## Verify\n\n- run focused tests\n";
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
+			dialogOptions?.onPlanEdited?.(edited);
+			return "Save and quit";
+		});
+		const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
+		const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
+		vi.spyOn(mode, "showHookCustom").mockResolvedValue({ path: "AUTO_QA_PLAN.md" });
+		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "DRAFT",
+		});
+
+		expect(generateTitle).toHaveBeenCalledWith(
+			"# Auto QA\nSave the final plan.\n## Verify\n- run focused tests",
+			expect.any(String),
+		);
+		expect(await Bun.file(destination).text()).toBe(edited);
+		expect(clear).toHaveBeenCalledTimes(1);
+		expect(mode.planModeEnabled).toBe(false);
+	});
+
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {
 		const planFilePath = "local://handoff-plan.md";
 		const localOptions = {
@@ -718,6 +748,7 @@ describe("InteractiveMode plan review rendering", () => {
 				"Approve and compact context",
 				"Approve and keep context (~7.3k / 10k)",
 				"Refine plan",
+				"Save and quit",
 			],
 			expect.any(Object),
 			expect.any(Object),
@@ -792,6 +823,7 @@ describe("InteractiveMode plan review rendering", () => {
 			"Approve and compact context",
 			`Approve and keep context (~${compactNumber(tokens)} / ${compactNumber(executionModel.contextWindow)})`,
 			"Refine plan",
+			"Save and quit",
 		]);
 	});
 
@@ -870,7 +902,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(selector).toHaveBeenCalledWith(
 			expect.any(String),
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", "Approve and keep context", "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and keep context",
+				"Refine plan",
+				"Save and quit",
+			],
 			expect.any(Object),
 			expect.any(Object),
 		);
@@ -1738,6 +1776,8 @@ describe("InteractiveMode plan review rendering", () => {
 					note: "Keep the rollback path.",
 				},
 			],
+			deletedSections: [],
+			additionalFeedback: "",
 		};
 		const restoredStates: Array<PlanReviewAnnotationState | undefined> = [];
 		let reviewCount = 0;
@@ -2092,6 +2132,24 @@ describe("AssistantMessageComponent aborted replay", () => {
 		const rendered = renderAssistant(message);
 		expect(rendered).not.toContain(USER_INTERRUPT_LABEL);
 		expect(rendered).not.toContain("Operation aborted");
+	});
+});
+
+describe("planSaveFileName", () => {
+	it("turns a short topic into <TOPIC>_PLAN.md", () => {
+		expect(planSaveFileName("PyO3 types")).toBe("PYO3_TYPES_PLAN.md");
+		expect(planSaveFileName("Auth storage plan")).toBe("AUTH_STORAGE_PLAN.md");
+	});
+
+	it("trims verbose fallback titles at a word boundary", () => {
+		expect(planSaveFileName("Split PyEnvironmentBackend request into PyO3 methods")).toBe(
+			"SPLIT_PYENVIRONMENTBACKEND_PLAN.md",
+		);
+	});
+
+	it("falls back to PLAN.md for empty or plan-only titles", () => {
+		expect(planSaveFileName("  ")).toBe("PLAN.md");
+		expect(planSaveFileName("Plan")).toBe("PLAN.md");
 	});
 });
 

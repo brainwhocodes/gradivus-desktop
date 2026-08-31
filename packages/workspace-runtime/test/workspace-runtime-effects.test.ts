@@ -114,7 +114,8 @@ describe("WorkspaceServer effect ownership and ordering", () => {
 			"terminal.input",
 			{
 				id: "term-ordered",
-				data: "printf 'ordered-effect-marker\\n'\\n",
+				data:
+					process.platform === "win32" ? "echo ordered-effect-marker\r\n" : "printf 'ordered-effect-marker\\n'\\n",
 			},
 		);
 		const otherClient = new WorkspaceClient({ runtimeRoot: root });
@@ -131,13 +132,16 @@ describe("WorkspaceServer effect ownership and ordering", () => {
 		await otherClient.close();
 		expect(opened.status).toBe("accepted");
 		expect(written.status).toBe("accepted");
+		let terminalOutput = "";
 		const marker = Promise.withResolvers<string>();
 		const removeOutput = client.onTerminalOutput("term-ordered", frame => {
-			if (frame.data.includes("ordered-effect-marker")) marker.resolve(frame.data);
+			terminalOutput += frame.data;
+			// ConPTY soft-wraps output at the terminal width; unwrap before matching.
+			if (terminalOutput.replace(/\r?\n/g, "").includes("ordered-effect-marker")) marker.resolve(terminalOutput);
 		});
 		await client.subscribeTerminal("term-ordered", 0);
 		const output = await Promise.race([marker.promise, Bun.sleep(5000).then(() => "")]);
 		removeOutput();
-		expect(output).toContain("ordered-effect-marker");
+		expect(output.replace(/\r?\n/g, "")).toContain("ordered-effect-marker");
 	});
 });

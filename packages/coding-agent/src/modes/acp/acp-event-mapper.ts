@@ -8,8 +8,8 @@ import type {
 } from "@oh-my-pi/pi-utils/acp";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
+import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
+import { isTodoPhase, normalizeTodoPhases, type TodoStatus, todoLeafTasks } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
 interface MessageProgress {
@@ -244,7 +244,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocations(event.args, options.cwd);
+			const locations = extractToolLocations(event.args, options.cwd, event.toolName);
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
@@ -442,39 +442,16 @@ function extractTodoPhases(result: unknown): unknown {
 }
 
 function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus }> {
-	const entries: Array<{ content: string; status: TodoStatus }> = [];
-	for (const phase of phases) {
-		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {
-			continue;
-		}
-		const tasks = (phase as { tasks?: unknown }).tasks;
-		if (!Array.isArray(tasks)) {
-			continue;
-		}
-		for (const task of tasks) {
-			if (typeof task !== "object" || task === null || !("content" in task)) {
-				continue;
-			}
-			const content = (task as { content?: unknown }).content;
-			if (typeof content !== "string" || content.length === 0) {
-				continue;
-			}
-			const status = (task as { status?: TodoStatus }).status;
-			entries.push({ content, status: isTodoStatus(status) ? status : "pending" });
-		}
+	if (!phases.every(isTodoPhase)) return [];
+	try {
+		return normalizeTodoPhases(phases).flatMap(phase =>
+			todoLeafTasks(phase).map(task => ({ content: task.content, status: task.status })),
+		);
+	} catch {
+		return [];
 	}
-	return entries;
 }
 
-function isTodoStatus(status: unknown): status is TodoStatus {
-	return (
-		status === "pending" ||
-		status === "in_progress" ||
-		status === "completed" ||
-		status === "abandoned" ||
-		status === "blocked"
-	);
-}
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
 	toolName: string;
@@ -495,7 +472,7 @@ export function buildToolCallStartUpdate(input: {
 	if (content.length > 0) {
 		update.content = content;
 	}
-	const locations = extractToolLocations(input.args, input.cwd);
+	const locations = extractToolLocations(input.args, input.cwd, input.toolName);
 	if (locations.length > 0) {
 		update.locations = locations;
 	}
@@ -642,7 +619,26 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
+/**
+ * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
+ * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
+ * location names the file actually accessed rather than the selector-bearing
+ * expression — Zed Follow otherwise treats the selector as part of the
+ * filename and opens an empty buffer. Literal POSIX filenames that legitimately
+ * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
+ * literal-path precedence the read tool uses. Non-read tools and internal URLs
+ * pass through unchanged — colons in write/edit targets are valid filenames.
+ */
+function readLocationBasePath(
+	raw: string | undefined,
+	cwd: string | undefined,
+	toolName: string | undefined,
+): string | undefined {
+	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
+	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+}
+
+function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
@@ -653,7 +649,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 		locations.push({ path });
 	};
 
-	pushPath(extractStringProperty<PathContainer>(args, "path"));
+	pushPath(readLocationBasePath(extractStringProperty<PathContainer>(args, "path"), cwd, toolName));
 	pushPath(extractStringProperty<OldPathContainer>(args, "oldPath"));
 	pushPath(extractStringProperty<NewPathContainer>(args, "newPath"));
 
@@ -979,9 +975,12 @@ function extractReadableText(value: unknown): string | undefined {
 		if (text.length > 0) {
 			return normalizeText(text);
 		}
-		if (hasBinaryContentBlock(contentBlocks)) {
-			return undefined;
-		}
+		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
+		// plain text has nothing readable to surface, and its data already rides the
+		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
+		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// stop here instead of falling through to the JSON fallback.
+		return undefined;
 	}
 	if (extractDetailsImages(value)) {
 		return undefined;
@@ -1032,13 +1031,6 @@ function getContentType(value: unknown): string | undefined {
 	}
 	const type = (value as TypedValue).type;
 	return typeof type === "string" ? type : undefined;
-}
-
-function hasBinaryContentBlock(blocks: unknown[]): boolean {
-	return blocks.some(block => {
-		const type = getContentType(block);
-		return type === "image" || type === "audio";
-	});
 }
 
 function extractStringProperty<T extends object>(value: unknown, key: keyof T): string | undefined {

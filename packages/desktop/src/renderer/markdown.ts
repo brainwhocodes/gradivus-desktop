@@ -1,4 +1,4 @@
-import { Marked } from "@oh-my-pi/pi-utils/marked";
+import { Marked, type RendererObject } from "@oh-my-pi/pi-utils/marked";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -97,6 +97,7 @@ export interface MarkdownRenderResult {
 export interface MarkdownRenderOptions {
 	readonly syntaxHighlight?: boolean;
 	readonly codeCopyActions?: boolean;
+	readonly sourceAnchors?: { readonly lineOffset: number };
 }
 
 export type MarkdownCopyStatus = "copied" | "failed";
@@ -206,11 +207,14 @@ function cacheResult(key: string, result: MarkdownRenderResult): MarkdownRenderR
 export function renderMarkdownDocument(value: string, options: MarkdownRenderOptions = {}): MarkdownRenderResult {
 	const syntaxHighlight = options.syntaxHighlight ?? true;
 	const codeCopyActions = options.codeCopyActions ?? false;
-	const cacheKey = `${syntaxHighlight ? "h" : "p"}${codeCopyActions ? "c" : "n"}:${value}`;
+	const sourceAnchors = options.sourceAnchors;
+	const cacheKey = `${syntaxHighlight ? "h" : "p"}${codeCopyActions ? "c" : "n"}${
+		sourceAnchors ? `a${sourceAnchors.lineOffset}` : ""
+	}:${value}`;
 	const cached = markdownCache.get(cacheKey);
 	if (cached) return cached;
 
-	if (value.length > MAX_MARKDOWN_LENGTH) {
+	if (!sourceAnchors && value.length > MAX_MARKDOWN_LENGTH) {
 		let html: string;
 		try {
 			html = `<pre class="large-markdown">${escapeHtml(value)}</pre>`;
@@ -221,55 +225,79 @@ export function renderMarkdownDocument(value: string, options: MarkdownRenderOpt
 	}
 
 	const codeBlocks: MarkdownCodeBlock[] = [];
+	const renderer: RendererObject = {
+		html({ text }) {
+			return escapeHtml(text);
+		},
+		code(token) {
+			const { text, lang } = token;
+			const fenced = token.codeBlockStyle !== "indented";
+			const index = codeBlocks.length;
+			const language = explicitLanguage(lang);
+			const isDiff = lang?.trim().toLowerCase() === "diff";
+			let highlighted = false;
+			let renderedCode: string;
+
+			if (isDiff) {
+				renderedCode = renderDiff(text);
+			} else if (syntaxHighlight && language !== null && utf8ByteLength(text) <= MAX_HIGHLIGHT_BYTES) {
+				try {
+					const markup = hljs.highlight(text, { language, ignoreIllegals: false }).value;
+					renderedCode = `<pre><code class="hljs language-${language}">${markup}</code></pre>`;
+					highlighted = true;
+				} catch {
+					renderedCode = `<pre><code>${escapeHtml(text)}</code></pre>`;
+				}
+			} else {
+				renderedCode = `<pre><code>${escapeHtml(text)}</code></pre>`;
+			}
+
+			if (!fenced) return renderedCode;
+			codeBlocks.push({ rawCode: text, language: isDiff ? "diff" : language, highlighted });
+			return codeCopyActions ? renderCodeFrame(renderedCode, index, isDiff ? "diff" : language) : renderedCode;
+		},
+		text(token) {
+			const raw = typeof token === "string" ? token : token.text;
+			return highlightMagicKeywords(escapeHtml(raw));
+		},
+		link({ href, title, tokens }) {
+			const inner = this.parser.parseInline(tokens);
+			const safe = safeHref(href);
+			if (!safe) return inner;
+			const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+			const target = safe.startsWith("#") ? "" : ' target="_blank" rel="noopener"';
+			return `<a href="${escapeHtml(safe)}"${titleAttr}${target}>${inner}</a>`;
+		},
+	};
+	const parseOptions = { async: false as const, renderer };
 	let html: string;
 	try {
-		html = markdown.parse(value, {
-			async: false,
-			renderer: {
-				html({ text }) {
-					return escapeHtml(text);
-				},
-				code(token) {
-					const { text, lang } = token;
-					const fenced = token.codeBlockStyle !== "indented";
-					const index = codeBlocks.length;
-					const language = explicitLanguage(lang);
-					const isDiff = lang?.trim().toLowerCase() === "diff";
-					let highlighted = false;
-					let renderedCode: string;
-
-					if (isDiff) {
-						renderedCode = renderDiff(text);
-					} else if (syntaxHighlight && language !== null && utf8ByteLength(text) <= MAX_HIGHLIGHT_BYTES) {
-						try {
-							const markup = hljs.highlight(text, { language, ignoreIllegals: false }).value;
-							renderedCode = `<pre><code class="hljs language-${language}">${markup}</code></pre>`;
-							highlighted = true;
-						} catch {
-							renderedCode = `<pre><code>${escapeHtml(text)}</code></pre>`;
-						}
-					} else {
-						renderedCode = `<pre><code>${escapeHtml(text)}</code></pre>`;
-					}
-
-					if (!fenced) return renderedCode;
-					codeBlocks.push({ rawCode: text, language: isDiff ? "diff" : language, highlighted });
-					return codeCopyActions ? renderCodeFrame(renderedCode, index, isDiff ? "diff" : language) : renderedCode;
-				},
-				text(token) {
-					const raw = typeof token === "string" ? token : token.text;
-					return highlightMagicKeywords(escapeHtml(raw));
-				},
-				link({ href, title, tokens }) {
-					const inner = this.parser.parseInline(tokens);
-					const safe = safeHref(href);
-					if (!safe) return inner;
-					const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-					const target = safe.startsWith("#") ? "" : ' target="_blank" rel="noopener"';
-					return `<a href="${escapeHtml(safe)}"${titleAttr}${target}>${inner}</a>`;
-				},
-			},
-		});
+		if (!sourceAnchors) {
+			html = markdown.parse(value, parseOptions);
+		} else {
+			const tokens = markdown.lexer(value);
+			let sourceLine = sourceAnchors.lineOffset + 1;
+			const blocks: string[] = [];
+			for (const token of tokens) {
+				const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+				const renderedBlock = markdown.parser([token], parseOptions);
+				if (renderedBlock) {
+					const context =
+						raw
+							.split(/\r?\n/)
+							.map(line => line.trim())
+							.find(Boolean)
+							?.slice(0, 240) ?? "";
+					blocks.push(
+						`<div class="markdown-source-block" data-source-row="${sourceLine}" data-source-context="${escapeHtml(
+							context,
+						)}"><button type="button" class="markdown-line-annotate" data-markdown-annotate-line="${sourceLine}" aria-label="Annotate line ${sourceLine}"><span aria-hidden="true">+</span></button><div class="markdown-source-content">${renderedBlock}</div></div>`,
+					);
+				}
+				sourceLine += raw.match(/\n/g)?.length ?? 0;
+			}
+			html = blocks.join("");
+		}
 	} catch {
 		html = escapeHtml(value);
 		codeBlocks.length = 0;

@@ -140,7 +140,7 @@ describe("InteractiveMode LSP startup welcome banner", () => {
 
 		expect(showWarning).toHaveBeenCalledTimes(1);
 		const warning = showWarning.mock.calls[0]?.[0] ?? "";
-		expect(warning).toContain("Session persistence failed: ENOSPC:");
+		expect(warning).toMatch(/Session persistence failed: (?:ENOSPC:|Session append failed)/);
 		expect(warning).toContain("Unsaved entries remain in memory");
 		expect(warning).not.toContain("\t");
 		expect(warning).not.toContain("\n");

@@ -13,6 +13,7 @@
 - Added runtime-owned terminal PTY sessions with bounded input, resize, output-history replay, transient subscriptions, and scoped child capabilities.
 - Added `shell` and `args` validation to the `terminal.open` reducer allowlist and forwarded them to terminal process startup effects.
 - Added an explicit runtime protocol revision to authenticated daemon handshakes so desktop clients can distinguish compatible resident runtimes from older ones.
+- Added durable terminal restart and workspace tab reordering while preserving authoritative pane, tab, and terminal identities.
 
 ### Changed
 

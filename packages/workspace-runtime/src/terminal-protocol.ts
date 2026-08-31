@@ -42,6 +42,7 @@ export interface TerminalStatusFrame {
 	columns?: number;
 	rows?: number;
 	totalBytesProduced: number;
+	firstAvailableOffset: number;
 }
 
 export interface TerminalOutputFrame {

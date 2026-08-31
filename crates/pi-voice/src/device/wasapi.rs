@@ -262,7 +262,9 @@ impl Drop for ComApartment {
 
 struct BaseStream {
 	client:      ComPtr<AudioClientVtable>,
+	#[expect(dead_code, reason = "device/enumerator lifetime keeps COM objects alive")]
 	device:      ComPtr<MmDeviceVtable>,
+	#[expect(dead_code, reason = "device/enumerator lifetime keeps COM objects alive")]
 	enumerator:  ComPtr<MmDeviceEnumeratorVtable>,
 	event:       Arc<OwnedEvent>,
 	buffer_size: u32,

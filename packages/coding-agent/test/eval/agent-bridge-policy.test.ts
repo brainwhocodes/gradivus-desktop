@@ -368,7 +368,7 @@ describe("runEvalAgent", () => {
 		]);
 	});
 
-	it("inherits non-plan LSP and IRC policy for bridge subagents", async () => {
+	it("keeps bridge kernels independent while inheriting non-plan LSP and IRC policy", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
@@ -381,6 +381,7 @@ describe("runEvalAgent", () => {
 		expect(options.enableLsp).toBe(true);
 		expect(options.enableIrc).toBe(true);
 		expect(options.keepAlive).toBe(false);
+		expect(options.parentEvalSessionId).toBeUndefined();
 	});
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
@@ -401,9 +402,18 @@ describe("runEvalAgent", () => {
 	it("unregisters eval subagents through the bridge cleanup path", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
+		const order: string[] = [];
 		let disposed = false;
 		const cleanupSession = {
+			prepareForHeadlessAdvisorDrain: () => {
+				order.push("prepare");
+			},
+			waitForAdvisorCatchup: async () => {
+				order.push("catchup");
+				return true;
+			},
 			dispose: async () => {
+				order.push("dispose");
 				disposed = true;
 			},
 		} as unknown as AgentSession;
@@ -430,6 +440,9 @@ describe("runEvalAgent", () => {
 		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
 		expect(disposed).toBe(true);
+		// The advisor's final-turn review is drained before the runtime is torn
+		// down (#9505): a graceful subagent finish must not abandon the yield.
+		expect(order).toEqual(["prepare", "catchup", "dispose"]);
 		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
 		expect(
 			AgentRegistry.global()
@@ -685,105 +698,109 @@ describe("agent() through eval runtimes", () => {
 		expect(barrier.maxInFlight()).toBeLessThanOrEqual(2);
 	});
 
-	it("interrupting a Python parallel() fan-out aborts in-flight subagents and preserves session state", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-agent-py-interrupt-");
-		const settings = Settings.isolated({
-			"async.enabled": false,
-			"task.isolation.mode": "none",
-			"task.enableLsp": true,
-			"task.maxConcurrency": 6,
-		});
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-interrupt", settings);
-		mockAgents();
-		// Each kernel worker thread blocks in a synchronous `urllib` bridge call,
-		// joined by `parallel()`'s ThreadPoolExecutor exit. A turn cancel must
-		// reach the subagents those calls started — the bridge is handed the real
-		// signal, not the executor's kernel shield — while the kernel itself is
-		// still interrupted cleanly before `parallel()` launches another wave.
-		let inFlight = 0;
-		let completed = 0;
-		let abortedSubagents = 0;
-		let markSaturated: (() => void) | undefined;
-		const saturated = new Promise<void>(resolve => {
-			markSaturated = resolve;
-		});
-		// Mirrors the real executor: park until the run finishes *or* the caller's
-		// signal aborts. Nothing releases these agents, so the only way the cell
-		// can settle is the abort actually reaching them.
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
-			// task.maxConcurrency=6 → six bridge calls block at once; signal then.
-			if (++inFlight >= 6) markSaturated?.();
-			const aborted = Promise.withResolvers<never>();
-			const onAbort = () => aborted.reject(new Error("subagent aborted"));
-			options.signal?.addEventListener("abort", onAbort, { once: true });
-			try {
-				await aborted.promise;
-			} catch {
-				abortedSubagents++;
-				return singleResult(options, { output: "", aborted: true, abortReason: "aborted by user" });
-			} finally {
-				options.signal?.removeEventListener("abort", onAbort);
-			}
-			completed++;
-			return singleResult(options, { output: options.assignment ?? "" });
-		});
+	it.skipIf(process.platform === "win32")(
+		"interrupting a Python parallel() fan-out aborts in-flight subagents and preserves session state",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-eval-agent-py-interrupt-");
+			const settings = Settings.isolated({
+				"async.enabled": false,
+				"task.isolation.mode": "none",
+				"task.enableLsp": true,
+				"task.maxConcurrency": 6,
+			});
+			const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-interrupt", settings);
+			mockAgents();
+			// Each kernel worker thread blocks in a synchronous `urllib` bridge call,
+			// joined by `parallel()`'s ThreadPoolExecutor exit. A turn cancel must
+			// reach the subagents those calls started — the bridge is handed the real
+			// signal, not the executor's kernel shield — while the kernel itself is
+			// still interrupted cleanly before `parallel()` launches another wave.
+			let inFlight = 0;
+			let completed = 0;
+			let abortedSubagents = 0;
+			let markSaturated: (() => void) | undefined;
+			const saturated = new Promise<void>(resolve => {
+				markSaturated = resolve;
+			});
+			// Mirrors the real executor: park until the run finishes *or* the caller's
+			// signal aborts. Nothing releases these agents, so the only way the cell
+			// can settle is the abort actually reaching them.
+			const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+				// task.maxConcurrency=6 → six bridge calls block at once; signal then.
+				if (++inFlight >= 6) markSaturated?.();
+				const aborted = Promise.withResolvers<never>();
+				const onAbort = () => aborted.reject(new Error("subagent aborted"));
+				options.signal?.addEventListener("abort", onAbort, { once: true });
+				try {
+					await aborted.promise;
+				} catch {
+					abortedSubagents++;
+					return singleResult(options, { output: "", aborted: true, abortReason: "aborted by user" });
+				} finally {
+					options.signal?.removeEventListener("abort", onAbort);
+				}
+				completed++;
+				return singleResult(options, { output: options.assignment ?? "" });
+			});
 
-		// Seed persistent session state and confirm the kernel is reusable.
-		const seed = await executePython("PREP_MARKER = 4242", {
-			cwd: tempDir.path(),
-			sessionId,
-			sessionFile,
-			kernelMode: "session",
-			toolSession: session,
-		});
-		if (seed.exitCode === undefined && seed.cancelled) {
-			expect(seed.output).toBe("");
-			return; // kernel unavailable in this environment
-		}
-		expect(seed.exitCode).toBe(0);
-
-		const ac = new AbortController();
-		// Abort the instant all six worker threads are confirmed blocked in their
-		// bridge calls (condition-driven) instead of waiting a fixed wall second.
-		void saturated.then(() => ac.abort(new Error("external interrupt")));
-
-		const resultPromise = executePython(
-			"import json\nprint(json.dumps(parallel([lambda n=n: agent(str(n)) for n in range(12)])))",
-			{
+			// Seed persistent session state and confirm the kernel is reusable.
+			const seed = await executePython("PREP_MARKER = 4242", {
 				cwd: tempDir.path(),
 				sessionId,
 				sessionFile,
 				kernelMode: "session",
 				toolSession: session,
-				idleTimeoutMs: 60_000,
-				signal: ac.signal,
-			},
-		);
-		await saturated;
-		await Promise.resolve();
-		expect(completed).toBe(0);
-		const result = await resultPromise;
+			});
+			if (seed.exitCode === undefined && seed.cancelled) {
+				expect(seed.output).toBe("");
+				return; // kernel unavailable in this environment
+			}
+			expect(seed.exitCode).toBe(0);
 
-		// The interrupt reached every in-flight subagent: nothing here released
-		// them, so the cell could only settle because the abort propagated.
-		expect(abortedSubagents).toBe(6);
-		expect(completed).toBe(0);
-		// Cancelled, but cleanly: no hard-kill, and no second fan-out wave started.
-		expect(result.cancelled).toBe(true);
-		expect(result.output).not.toContain("Python kernel shutdown");
-		expect(runSpy).toHaveBeenCalledTimes(6);
+			const ac = new AbortController();
+			// Abort the instant all six worker threads are confirmed blocked in their
+			// bridge calls (condition-driven) instead of waiting a fixed wall second.
+			void saturated.then(() => ac.abort(new Error("external interrupt")));
 
-		// The persistent kernel survived the interrupt: prior state is intact.
-		const after = await executePython("print(PREP_MARKER)", {
-			cwd: tempDir.path(),
-			sessionId,
-			sessionFile,
-			kernelMode: "session",
-			toolSession: session,
-		});
-		expect(after.exitCode).toBe(0);
-		expect(after.output.trim()).toBe("4242");
-	}, 30_000);
+			const resultPromise = executePython(
+				"import json\nprint(json.dumps(parallel([lambda n=n: agent(str(n)) for n in range(12)])))",
+				{
+					cwd: tempDir.path(),
+					sessionId,
+					sessionFile,
+					kernelMode: "session",
+					toolSession: session,
+					idleTimeoutMs: 60_000,
+					signal: ac.signal,
+				},
+			);
+			await saturated;
+			await Promise.resolve();
+			expect(completed).toBe(0);
+			const result = await resultPromise;
+
+			// The interrupt reached every in-flight subagent: nothing here released
+			// them, so the cell could only settle because the abort propagated.
+			expect(abortedSubagents).toBe(6);
+			expect(completed).toBe(0);
+			// Cancelled, but cleanly: no hard-kill, and no second fan-out wave started.
+			expect(result.cancelled).toBe(true);
+			expect(result.output).not.toContain("Python kernel shutdown");
+			expect(runSpy).toHaveBeenCalledTimes(6);
+
+			// The persistent kernel survived the interrupt: prior state is intact.
+			const after = await executePython("print(PREP_MARKER)", {
+				cwd: tempDir.path(),
+				sessionId,
+				sessionFile,
+				kernelMode: "session",
+				toolSession: session,
+			});
+			expect(after.exitCode).toBe(0);
+			expect(after.output.trim()).toBe("4242");
+		},
+		30_000,
+	);
 
 	it("streams enriched agent progress through onStatus before the cell finishes", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
@@ -1418,8 +1435,7 @@ describe("runEvalAgent isolation", () => {
 			caught = err as Error;
 		}
 		expect(caught).toBeDefined();
-		const match = caught?.message.match(/(\/[^\s,]+?\.nested-0-sub_nested\.patch)/);
-		expect(match).not.toBeNull();
+		const match = caught?.message.match(/((?:[A-Za-z]:)?[\\/][^\s,]+?\.nested-0-sub_nested\.patch)/);
 		const persistedPath = match?.[1];
 		expect(persistedPath).toBeDefined();
 		const contents = await fs.readFile(persistedPath!, "utf-8");

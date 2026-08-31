@@ -1,6 +1,9 @@
+import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
+import type { Socket } from "bun";
+import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
@@ -325,4 +328,139 @@ export async function gracefulKillTreeOnce(pid: number, gracePeriodMs = 2_000): 
 	const process = Process.fromPid(pid);
 	if (!process) return;
 	await process.terminate({ gracefulMs: gracePeriodMs, timeoutMs: 500 });
+}
+/**
+ * Allocate an unused loopback port for an attached-browser launch.
+ */
+export async function findFreeCdpPort(): Promise<number> {
+	const { promise, resolve, reject } = Promise.withResolvers<number>();
+	const server = net.createServer();
+	server.unref();
+	server.once("error", reject);
+	server.listen(0, "127.0.0.1", () => {
+		const address = server.address();
+		if (address && typeof address === "object" && typeof address.port === "number") {
+			server.close(error => (error ? reject(error) : resolve(address.port)));
+		} else {
+			server.close();
+			reject(new Error("Failed to allocate ephemeral CDP port"));
+		}
+	});
+	return promise;
+}
+
+/**
+ * Probe a loopback CDP HTTP endpoint without honoring proxy environment
+ * variables. Returns the HTTP status or null for unreachable/aborted endpoints.
+ */
+export async function probeCdpStatus(
+	url: string,
+	options: { timeoutMs: number; signal?: AbortSignal },
+): Promise<number | null> {
+	let target: URL;
+	try {
+		target = new URL(url);
+	} catch {
+		return null;
+	}
+	if (options.signal?.aborted) return null;
+	const port = target.port ? Number(target.port) : 80;
+	const requestPath = `${target.pathname}${target.search}` || "/";
+	const { promise, resolve } = Promise.withResolvers<number | null>();
+	let socket: Socket<undefined> | undefined;
+	let settled = false;
+	const finish = (status: number | null): void => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		options.signal?.removeEventListener("abort", onAbort);
+		try {
+			socket?.end();
+		} catch {}
+		resolve(status);
+	};
+	const onAbort = (): void => finish(null);
+	const timer = setTimeout(() => finish(null), options.timeoutMs);
+	options.signal?.addEventListener("abort", onAbort, { once: true });
+	let buffered = "";
+	try {
+		socket = await Bun.connect({
+			hostname: target.hostname,
+			port,
+			socket: {
+				open(connection) {
+					connection.write(
+						`GET ${requestPath} HTTP/1.1\r\nHost: ${target.hostname}:${port}\r\nConnection: close\r\n\r\n`,
+					);
+				},
+				data(_connection, chunk) {
+					buffered += chunk.toString("latin1");
+					const match = /^HTTP\/\d(?:\.\d)? (\d{3})/.exec(buffered);
+					if (match) finish(Number(match[1]));
+				},
+				error() {
+					finish(null);
+				},
+				close() {
+					finish(null);
+				},
+			},
+		});
+	} catch {
+		finish(null);
+	}
+	return promise;
+}
+
+/**
+ * Pick the best page target from a connected browser, preferring discoverable
+ * page targets and optionally the visible foreground page.
+ */
+export async function pickElectronTarget(
+	browser: Browser,
+	options: { matcher?: string; preferVisible?: boolean } = {},
+): Promise<Page> {
+	const discoveredPages = await Promise.all(
+		browser.targets().map(async target => {
+			if (String(target.type()) !== "page") return null;
+			return await target.page().catch(() => null);
+		}),
+	);
+	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
+	const pages = usablePages.length > 0 ? usablePages : await browser.pages();
+	if (pages.length === 0) throw new ToolError("No page targets available on the attached browser");
+	const enriched = await Promise.all(
+		pages.map(async page => ({
+			page,
+			url: page.url(),
+			title: ((await page.title().catch(() => "")) ?? "").trim(),
+		})),
+	);
+	if (options.matcher) {
+		const needle = options.matcher.toLowerCase();
+		const hit = enriched.find(
+			item => item.url.toLowerCase().includes(needle) || item.title.toLowerCase().includes(needle),
+		);
+		if (hit) return hit.page;
+		const summary = enriched.map(item => `- ${item.title || "(untitled)"}  ${item.url}`).join("\n");
+		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
+	}
+	const filtered = enriched.filter(
+		item => !ATTACH_TARGET_SKIP_PATTERN.test(item.url) && !ATTACH_TARGET_SKIP_PATTERN.test(item.title),
+	);
+	const candidates = filtered.length > 0 ? filtered : enriched;
+	if (options.preferVisible && candidates.length > 1) {
+		const visibility = await Promise.all(
+			candidates.map(async item => {
+				try {
+					return (await item.page.evaluate(() => document.visibilityState === "visible")) === true;
+				} catch {
+					return false;
+				}
+			}),
+		);
+		const foreground = visibility.indexOf(true);
+		if (foreground >= 0) return candidates[foreground]!.page;
+	}
+	return candidates[0]!.page;
 }

@@ -42,7 +42,7 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 				removeChildView: vi.fn(),
 			},
 		};
-		const host = new WorkspaceHost(window as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(window as never);
 		return { host, send };
 	}
 
@@ -51,7 +51,15 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 			version: 1,
 			revision: 1,
 			workspaces: [{ id: "ws_1", label: "Main", locationId: "loc_1" }],
-			locations: [{ id: "loc_1", kind: "local", path: "/test", lifecycle: { generation: 1 } }],
+			locations: [
+				{
+					id: "loc_1",
+					kind: "local",
+					path: "/test",
+					address: { kind: "local", path: "/test" },
+					lifecycle: { generation: 1 },
+				},
+			],
 			tabs: [
 				{
 					id: "tab_terminal",
@@ -115,6 +123,7 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 			id: "pane-term-1",
 			tabId: "tab_terminal",
 			workspaceId: "ws_1",
+			name: "Terminal",
 			cols: 80,
 			rows: 24,
 		});
@@ -140,5 +149,44 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 
 		// New client should have subscribed with retained offset 100!
 		expect(client2.subscribeTerminal).toHaveBeenCalledWith("term-1", 100);
+	});
+	it("collects replay chunks with offsets and deduplicates overlap", async () => {
+		const { host } = createHost();
+		const doc = createMockDocument();
+		const listeners = new Set<(frame: { offset: number; data: string }) => void>();
+		const client = {
+			isConnected: true,
+			document: doc,
+			onTerminalOutput: vi.fn((_id: string, listener: (frame: { offset: number; data: string }) => void) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			}),
+			subscribeTerminal: vi.fn(async () => {
+				for (const listener of listeners) {
+					listener({ offset: 100, data: "abc" });
+					listener({ offset: 102, data: "cde" });
+				}
+				return {
+					status: "running" as const,
+					cwd: "/test",
+					firstAvailableOffset: 100,
+					totalBytesProduced: 105,
+				};
+			}),
+		};
+		host.setClient(client as never);
+		host.syncWithDocument(doc);
+
+		await expect(host.attachTerminal("pane-term-1", 0)).resolves.toEqual({
+			id: "pane-term-1",
+			status: "running",
+			cwd: "/test",
+			chunks: [
+				{ offset: 100, data: "abc" },
+				{ offset: 103, data: "de" },
+			],
+			firstAvailableOffset: 100,
+			totalBytesProduced: 105,
+		});
 	});
 });

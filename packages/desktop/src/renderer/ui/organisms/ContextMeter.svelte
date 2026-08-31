@@ -7,9 +7,13 @@
 		contextLimit: number;
 		tokensPerSecond?: number;
 		modelName: string;
+		compactDisabled: boolean;
+		handoffDisabled: boolean;
+		oncompact: () => void;
+		onhandoff: () => void;
 	}
 
-	const { usedTokens, contextLimit, tokensPerSecond, modelName }: Props = $props();
+	const { usedTokens, contextLimit, tokensPerSecond, modelName, compactDisabled, handoffDisabled, oncompact, onhandoff }: Props = $props();
 	const panelId = "context-meter-panel";
 
 	let open = $state(false);
@@ -113,6 +117,10 @@
 				<div class="context-model-name">
 					<span>Active Model:</span>
 					<code>{modelName}</code>
+				</div>
+				<div class="context-actions">
+					<button type="button" class="secondary-button" disabled={compactDisabled} onclick={() => { close(false); oncompact(); }}>Compact…</button>
+					<button type="button" class="secondary-button" disabled={handoffDisabled} onclick={() => { close(false); onhandoff(); }}>Hand off…</button>
 				</div>
 			</div>
 		</div>

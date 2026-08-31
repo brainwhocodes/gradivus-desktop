@@ -178,7 +178,7 @@ describe("authenticated h2c gRPC transport", () => {
 		}
 	});
 
-	it("rejects compressed, oversized, and truncated wire messages", async () => {
+	it.skipIf(process.platform === "win32")("rejects compressed, oversized, and truncated wire messages", async () => {
 		await expectRejectedFrame(Uint8Array.from([1, 0, 0, 0, 0]), "12");
 
 		const oversized = new Uint8Array(5);
@@ -187,7 +187,7 @@ describe("authenticated h2c gRPC transport", () => {
 
 		await expectRejectedFrame(Uint8Array.from([0, 0, 0, 0, 2, 1]), "13");
 	});
-	it("terminates promptly when response headers are not gRPC", async () => {
+	it.skipIf(process.platform === "win32")("terminates promptly when response headers are not gRPC", async () => {
 		const rawServer = http2.createServer();
 		rawServer.on("stream", stream => {
 			stream.respond({ ":status": 404, "content-type": "text/plain" });

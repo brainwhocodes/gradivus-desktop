@@ -5,18 +5,10 @@ import {
 	isApiKeyResolver,
 	isAuthRetryableError,
 	resolveApiKeyOnce,
-	resolveRetryKey,
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import {
-	classify,
-	Flag,
-	is,
-	isOAuthAccountSelectionError,
-	OAuthAccountSelectionError,
-	ProviderHttpError,
-} from "@oh-my-pi/pi-ai/error";
+import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -30,24 +22,6 @@ function usageLimitError(): Error & { status: number } {
 
 function opaque429Error(): Error & { status: number } {
 	return Object.assign(new Error(""), { status: 429 });
-}
-
-const SELECTION_PROVIDER = "prov";
-const SELECTION_IDENTITY_HASH = "ab".repeat(32);
-const SELECTION_ERROR_MESSAGE =
-	'Locked OAuth account for "prov" is unavailable. Choose another account in /settings > Providers > Accounts.';
-
-function oauthAccountSelectionError(): OAuthAccountSelectionError {
-	return new OAuthAccountSelectionError(SELECTION_PROVIDER, SELECTION_IDENTITY_HASH);
-}
-
-function expectOAuthAccountSelectionError(error: OAuthAccountSelectionError): void {
-	expect(isOAuthAccountSelectionError(error)).toBe(true);
-	expect(error).toBeInstanceOf(OAuthAccountSelectionError);
-	expect(error.message).toBe(SELECTION_ERROR_MESSAGE);
-	expect(error.provider).toBe(SELECTION_PROVIDER);
-	expect(error.identityHash).toBe(SELECTION_IDENTITY_HASH);
-	expect(is(classify(error), Flag.AuthFailed)).toBe(true);
 }
 
 describe("isApiKeyResolver / resolveApiKeyOnce", () => {
@@ -70,38 +44,26 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 	});
 });
 
-describe("resolveRetryKey", () => {
-	it("propagates account-selection failures from the retry resolver", async () => {
-		const selectionError = oauthAccountSelectionError();
-
-		await expect(
-			resolveRetryKey(
-				async () => {
-					throw selectionError;
-				},
-				true,
-				usageLimitError(),
-			),
-		).rejects.toBe(selectionError);
-		expectOAuthAccountSelectionError(selectionError);
-	});
-
-	it("retains legacy swallowing for unrelated retry resolver failures", async () => {
-		const resolverError = new Error("credential resolver unavailable");
-
-		const result = await resolveRetryKey(
-			async () => {
-				throw resolverError;
-			},
-			true,
-			usageLimitError(),
-		);
-
-		expect(result).toBeUndefined();
-	});
-});
-
 describe("isAuthRetryableError", () => {
+	it("retries typed token-refresh requests without treating other OAuth failures as retryable", () => {
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth token expired before request", {
+					kind: "token-refresh",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth provider is misconfigured", {
+					kind: "configuration",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(false);
+	});
+
 	it("treats 401/403 and usage-limit phrasing as retryable, everything else as not", () => {
 		expect(isAuthRetryableError(authError(401))).toBe(true);
 		expect(isAuthRetryableError(usageLimitError())).toBe(true);
@@ -581,38 +543,40 @@ describe("withOAuthAccess", () => {
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
 	});
 
-	it("propagates an account-selection failure from force refresh", async () => {
-		const selectionError = oauthAccountSelectionError();
-		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
-		const storage: OAuthAccessSource = {
-			async getOAuthAccess(_provider, _sessionId, options) {
-				calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) throw selectionError;
-				return access("stale", { credentialId: 7 });
-			},
-			async rotateSessionCredential() {
-				calls.push("rotate");
-				return false;
-			},
-		};
-
+	it("allows one token-refresh replay without rotating to a sibling", async () => {
+		const storage = fakeStorage({
+			initial: access("stale", { credentialId: 7 }),
+			forced: access("fresh", { credentialId: 7 }),
+			rotated: access("sibling", { credentialId: 8 }),
+		});
+		const firstError = new OAuthError("First token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const secondError = new OAuthError("Refreshed token also expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const attempts: string[] = [];
 		await expect(
-			withOAuthAccess(storage, SELECTION_PROVIDER, async () => {
-				throw authError();
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw attempts.length === 1 ? firstError : secondError;
 			}),
-		).rejects.toBe(selectionError);
-		expectOAuthAccountSelectionError(selectionError);
-		expect(calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+		).rejects.toBe(secondError);
+
+		expect(attempts).toEqual(["stale", "fresh"]);
+		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
 	});
 
-	it("retains legacy swallowing for an unrelated force-refresh failure", async () => {
-		const resolverError = new Error("refresh service unavailable");
+	it("honors a token-refresh request after an earlier 401 refresh", async () => {
+		const attempts: string[] = [];
 		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
+		const forced = [access("fresh-but-expired", { credentialId: 7 }), access("renewed", { credentialId: 7 })];
 		const storage: OAuthAccessSource = {
 			async getOAuthAccess(_provider, _sessionId, options) {
 				calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) throw resolverError;
-				if (calls.includes("rotate")) return access("sibling", { credentialId: 8 });
+				if (options?.forceRefresh) return forced.shift();
 				return access("stale", { credentialId: 7 });
 			},
 			async rotateSessionCredential() {
@@ -620,22 +584,21 @@ describe("withOAuthAccess", () => {
 				return true;
 			},
 		};
-		const attempts: string[] = [];
+		const refreshRequest = new OAuthError("Refreshed token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
 
-		const result = await withOAuthAccess(storage, SELECTION_PROVIDER, async oauth => {
-			attempts.push(oauth.accessToken);
-			if (oauth.accessToken === "stale") throw authError();
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "stale") throw authError();
+			if (a.accessToken === "fresh-but-expired") throw refreshRequest;
 			return "ok";
 		});
 
 		expect(result).toBe("ok");
-		expect(attempts).toEqual(["stale", "sibling"]);
-		expect(calls).toEqual([
-			{ forceRefresh: undefined },
-			{ forceRefresh: true },
-			"rotate",
-			{ forceRefresh: undefined },
-		]);
+		expect(attempts).toEqual(["stale", "fresh-but-expired", "renewed"]);
+		expect(calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }, { forceRefresh: true }]);
 	});
 
 	it("tries a refreshed bearer for the same credential id on 401 before rotating", async () => {
@@ -731,67 +694,6 @@ describe("withOAuthAccess", () => {
 		// force-refresh of the same account would duplicate the failed side effect.
 		expect(attempts).toEqual(["dead", "sibling"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, "rotate", { forceRefresh: undefined }]);
-	});
-
-	it("propagates an account-selection failure from credential rotation", async () => {
-		const selectionError = oauthAccountSelectionError();
-		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				return access("limited", { credentialId: 7 });
-			},
-			async rotateSessionCredential() {
-				throw selectionError;
-			},
-		};
-
-		await expect(
-			withOAuthAccess(storage, SELECTION_PROVIDER, async () => {
-				throw usageLimitError();
-			}),
-		).rejects.toBe(selectionError);
-		expectOAuthAccountSelectionError(selectionError);
-	});
-
-	it("propagates an account-selection failure when resolving after rotation", async () => {
-		const selectionError = oauthAccountSelectionError();
-		let getCalls = 0;
-		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				getCalls += 1;
-				if (getCalls > 1) throw selectionError;
-				return access("limited", { credentialId: 7 });
-			},
-			async rotateSessionCredential() {
-				return true;
-			},
-		};
-
-		await expect(
-			withOAuthAccess(storage, SELECTION_PROVIDER, async () => {
-				throw usageLimitError();
-			}),
-		).rejects.toBe(selectionError);
-		expectOAuthAccountSelectionError(selectionError);
-		expect(getCalls).toBe(2);
-	});
-
-	it("retains legacy swallowing for unrelated credential-rotation failures", async () => {
-		const providerError = usageLimitError();
-		const resolverError = new Error("rotation service unavailable");
-		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				return access("limited", { credentialId: 7 });
-			},
-			async rotateSessionCredential() {
-				throw resolverError;
-			},
-		};
-
-		await expect(
-			withOAuthAccess(storage, SELECTION_PROVIDER, async () => {
-				throw providerError;
-			}),
-		).rejects.toBe(providerError);
 	});
 
 	it("passes the failed OAuth bearer to rotation", async () => {

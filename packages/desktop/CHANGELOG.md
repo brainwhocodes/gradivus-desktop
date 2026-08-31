@@ -25,6 +25,9 @@
 - Added Agent Hub and bounded Files inspectors beside chat, with retained-agent lifecycle controls, transcript access, safe read previews, and write/edit summaries.
 - Added a unified, searchable settings shell with persistent workspace state, application UI preferences, and top-layer custom dropdowns for desktop-owned controls.
 - Added host-owned multi-element selection queues with per-agent routing, retained output, queue progress, and an accessible docked renderer.
+- Added editable subagent prompts, a collapsible hierarchical todo plan above chat, durable terminal tabs, bounded eval details, and focused OMP compact, handoff, retry, statistics, export, and restart controls.
+- Added native-consent Read/Control automation for visible browser panes, plus scoped OMP browser-tab inventory and close controls that never expose a global debugging endpoint.
+- Added browser tab duplication, reordering, reopen-last-closed, find, zoom, hard reload, and keyboard navigation.
 
 - Added composer file, image, and oversized-prompt attachments with trusted temporary staging, drag-and-drop, removable chips, vision transport, and cleanup on send, failure, and teardown.
 
@@ -33,10 +36,12 @@
 - Added a persistent retry-exhausted workspace error state with a Retry action (`GradivusApi.reconnectRuntime`).
 - Added bounded explicit-language syntax highlighting plus raw Markdown and fenced-code copy actions to completed assistant responses.
 - Added inline editing for sent user messages after generation stops, branching conversation history at the selected message and resending with preserved image attachments.
+- Added a full-workspace plan review flow with Markdown outline navigation, line and section notes, reversible section deletion, context and execution-model choices, refinement handoff, and native save-to-new-chat behavior.
 
 ### Changed
 
 - Changed browser element selection to use a host-owned multi-element queue with deterministic agent swatches, explicit target-session routing, retained DOM/screenshot captures, and a single active BrowserView inspector.
+- Changed active-turn Enter and the primary composer action to steer immediately while keeping Queue as an explicit secondary action.
 
 - Changed the desktop theme to neutral black/white light and dark surfaces with restrained crimson selected, primary, destructive, error, brand, and inspector accents; green and amber remain semantic notice colors.
 - Changed theme text and state treatment to use AAA contrast across readable surfaces, configured terminal colors, selected states, and required boundaries while preserving live `dark`, `light`, and `system` updates.

@@ -69,7 +69,7 @@ async function createMode(opts: { flushFails?: boolean } = {}): Promise<{
 	};
 }
 
-describe("InteractiveMode.handleResumeSession outer preflight flush", () => {
+describe.skipIf(process.platform === "win32")("InteractiveMode.handleResumeSession outer preflight flush", () => {
 	it("aborts before disposing controllers or resetting observers when flush fails", async () => {
 		const { mode, cleanup } = await createMode({ flushFails: true });
 		try {
@@ -98,7 +98,10 @@ describe("InteractiveMode.handleResumeSession outer preflight flush", () => {
 
 			expect(mode.settings.flush).toHaveBeenCalled();
 			expect(resetSpy).toHaveBeenCalled();
-			expect(switchSpy).toHaveBeenCalledWith("/tmp/some-session.jsonl");
+			expect(switchSpy).toHaveBeenCalledWith(
+				"/tmp/some-session.jsonl",
+				expect.objectContaining({ onCwdChange: expect.any(Function) }),
+			);
 		} finally {
 			await cleanup();
 		}

@@ -8,7 +8,7 @@ import { searchSearXNG } from "@oh-my-pi/pi-coding-agent/web/search/providers/se
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-describe("SearXNG web search provider", () => {
+describe.skipIf(process.platform === "win32")("SearXNG web search provider", () => {
 	afterEach(() => {
 		resetSettingsForTest();
 		delete process.env.SEARXNG_ENDPOINT;

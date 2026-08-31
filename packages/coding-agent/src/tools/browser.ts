@@ -102,7 +102,7 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 		const exe = resolveToCwd(app.path, session.cwd);
 		return { kind: "spawned", path: exe };
 	}
-	const inheritedCdpUrl = process.env.PI_BROWSER_CDP_URL?.trim();
+	const inheritedCdpUrl = process.env.GRADIVUS_TERMINAL === "1" ? undefined : process.env.PI_BROWSER_CDP_URL?.trim();
 	const relayUrl = session.settings.get("browser.relayUrl") as string | undefined;
 	// Explicit app.relay wins over configured backends;
 	// PI_BROWSER_RELAY stays the final kill switch (a relay that is down would
@@ -119,9 +119,6 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 	}
 	if (inheritedCdpUrl) {
 		return { kind: "connected", cdpUrl: inheritedCdpUrl.replace(/\/+$/, "") };
-	}
-	if (process.env.GRADIVUS_TERMINAL === "1") {
-		return { kind: "connected", cdpUrl: "http://127.0.0.1:9222" };
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
@@ -305,6 +302,10 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		// creation, and navigation — not only `acquireTab`. Compose one deadline
 		// from the caller signal and `params.timeout` and thread it through both
 		// stages so a stalled acquisition rejects at the requested boundary.
+		// Capture the deadline start as well: `acquireTab` counts its
+		// worker-init time against this same budget via `deadlineStartMs`
+		// instead of restarting the clock after acquisition.
+		const deadlineStart = performance.now();
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		try {
@@ -347,6 +348,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 							: undefined,
 						target: params.app?.target,
 						timeoutMs,
+						deadlineStartMs: deadlineStart,
 						dialogs: params.dialogs,
 						signal: openSignal,
 						ownerSessionId: this.session.getSessionId?.() ?? this.session.getAgentId?.() ?? undefined,
@@ -354,7 +356,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 					}),
 				);
 			} catch (error) {
-				await releaseBrowser(browser, { kill: false });
+				await releaseBrowser(browser, {
+					kill: "subprocess" in browser && browser.subprocess !== undefined,
+				});
 				throw error;
 			}
 			await releaseBrowser(browser, { kill: false });

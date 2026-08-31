@@ -566,7 +566,11 @@ describe("PlanReviewOverlay", () => {
 		const emptyFeedbackChange = vi.fn();
 		new PlanReviewOverlay(
 			"# B\n\nbeta body\n",
-			{ promptTitle: "next", options: APPROVAL_OPTIONS, annotationState: { annotations: [] } },
+			{
+				promptTitle: "next",
+				options: APPROVAL_OPTIONS,
+				annotationState: { annotations: [], deletedSections: [], additionalFeedback: "" },
+			},
 			{
 				onPick: vi.fn(),
 				onCancel: vi.fn(),
@@ -587,6 +591,8 @@ describe("PlanReviewOverlay", () => {
 				options: APPROVAL_OPTIONS,
 				annotationState: {
 					annotations: [{ section: { index: 0, title: "A" }, target: { kind: "section" }, note }],
+					deletedSections: [],
+					additionalFeedback: "",
 				},
 			},
 			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
@@ -594,7 +600,11 @@ describe("PlanReviewOverlay", () => {
 
 		expect(render(restored)).not.toContain(note);
 		expect(onAnnotationStateChange).toHaveBeenCalledTimes(1);
-		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({
+			annotations: [],
+			deletedSections: [],
+			additionalFeedback: "",
+		});
 		expect(onFeedbackChange).toHaveBeenCalledTimes(1);
 		expect(onFeedbackChange).toHaveBeenCalledWith("");
 	});
@@ -621,7 +631,11 @@ describe("PlanReviewOverlay", () => {
 
 		expect(render(overlay)).not.toContain(note);
 		expect(onFeedbackChange).toHaveBeenCalledWith("");
-		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({
+			annotations: [],
+			deletedSections: [],
+			additionalFeedback: "",
+		});
 	});
 
 	it("does not migrate annotations between duplicate headings after a plan edit", () => {
@@ -649,7 +663,11 @@ describe("PlanReviewOverlay", () => {
 		overlay.setPlanContent("# Plan\n\n## Phase A\n\n### Steps\n\nalpha\n");
 
 		expect(render(overlay)).not.toContain(note);
-		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({
+			annotations: [],
+			deletedSections: [],
+			additionalFeedback: "",
+		});
 		expect(onFeedbackChange).toHaveBeenCalledWith("");
 	});
 
@@ -669,6 +687,8 @@ describe("PlanReviewOverlay", () => {
 							note,
 						},
 					],
+					deletedSections: [],
+					additionalFeedback: "",
 				},
 			},
 			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange },
@@ -725,7 +745,11 @@ describe("PlanReviewOverlay", () => {
 		const out = render(overlay);
 		expect(out).not.toContain(note);
 		expect(onFeedbackChange).toHaveBeenCalledWith("");
-		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({
+			annotations: [],
+			deletedSections: [],
+			additionalFeedback: "",
+		});
 	});
 
 	it("opens the external editor for an active annotation draft", () => {

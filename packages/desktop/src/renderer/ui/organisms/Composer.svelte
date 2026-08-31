@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import type { PromptAttachmentView, ThinkingLevel } from "../../../shared/contracts";
+	import type { PromptAttachmentView, SlashCommand, ThinkingLevel } from "../../../shared/contracts";
 	import { formatBytes } from "@oh-my-pi/pi-utils/format";
 	import { highlightMagicKeywords } from "../../markdown";
 	import ArrowUp from "@solar-icons/svelte/linear/arrow-up";
@@ -9,6 +9,7 @@
 	import type { DropdownOption } from "../../settings-types";
 	import AttachmentChip from "../molecules/AttachmentChip.svelte";
 	import RuntimePicker from "../molecules/RuntimePicker.svelte";
+	import SessionActionsMenu from "../molecules/SessionActionsMenu.svelte";
 	import ContextMeter from "./ContextMeter.svelte";
 
 	interface Props {
@@ -42,11 +43,32 @@
 		onPaste: (event: ClipboardEvent) => void;
 		turnActive: boolean;
 		sendDisabled: boolean;
+		queuedMessageCount: number;
 		contextUsedTokens: number;
 		contextLimit: number;
 		contextTokensPerSecond?: number;
 		contextModelName: string;
 		planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
+		planRefinementAwaiting?: boolean;
+		inspectorOpen: boolean;
+		inspectorTab: "agents" | "files";
+		agentUnreadCount: number;
+		fileActivityCount: number;
+		commandShortcuts: SlashCommand[];
+		commandsAvailable: boolean;
+		onCommand: (command: SlashCommand) => void;
+		onAllCommands: () => void;
+		onToggleInspector: (tab: "agents" | "files") => void;
+		compactDisabled: boolean;
+		handoffDisabled: boolean;
+		retryDisabled: boolean;
+		restartDisabled: boolean;
+		onCompact: () => void;
+		onHandoff: () => void;
+		onRetry: () => void;
+		onStats: () => void;
+		onExport: () => void;
+		onRestart: () => void;
 		onTogglePlanMode?: () => void;
 		onSend: () => void;
 		onQueueFollowUp: () => void;
@@ -82,11 +104,32 @@
 		onPaste,
 		turnActive,
 		sendDisabled,
+		queuedMessageCount,
 		contextUsedTokens,
 		contextLimit,
 		contextTokensPerSecond,
 		contextModelName,
 		planMode,
+		planRefinementAwaiting = false,
+		inspectorOpen,
+		inspectorTab,
+		agentUnreadCount,
+		fileActivityCount,
+		commandShortcuts,
+		commandsAvailable,
+		onCommand,
+		onAllCommands,
+		onToggleInspector,
+		compactDisabled,
+		handoffDisabled,
+		retryDisabled,
+		restartDisabled,
+		onCompact,
+		onHandoff,
+		onRetry,
+		onStats,
+		onExport,
+		onRestart,
 		onTogglePlanMode,
 		onSend,
 		onQueueFollowUp,
@@ -243,6 +286,18 @@
     {/if}
   </div>
 </div>
+  {#if commandShortcuts.length > 0 || commandsAvailable}
+    <nav class="composer-command-shortcuts" aria-label="OMP command shortcuts">
+      {#each commandShortcuts as command (command.name)}
+        <button type="button" title={command.description ?? `Prepare /${command.name}`} onclick={() => onCommand(command)}>
+          /{command.name}
+        </button>
+      {/each}
+      {#if commandsAvailable}
+        <button type="button" class="all-commands" onclick={onAllCommands}>All commands…</button>
+      {/if}
+    </nav>
+  {/if}
   {#if dragging}
     <div class="composer-drop-overlay" role="status" aria-live="polite">Drop files to attach</div>
   {/if}
@@ -263,9 +318,11 @@
       aria-expanded={commandMenuOpen}
       aria-controls={commandMenuOpen ? "slash-command-menu" : undefined}
       aria-activedescendant={commandMenuOpen && commandOptionCount > 0 ? `slash-command-option-${commandSelectedIndex}` : undefined}
-      placeholder={planMode?.enabled
-        ? (turnActive ? "Steer the current turn in plan mode…" : "Plan mode active: Ask OMP to create or update an implementation plan…")
-        : (turnActive ? "Steer the current turn…" : "Ask OMP to work in this folder…")}
+      placeholder={planRefinementAwaiting
+        ? "Describe how OMP should refine the plan…"
+        : planMode?.enabled
+          ? (turnActive ? "Steer the current turn in plan mode…" : "Plan mode active: Ask OMP to create or update an implementation plan…")
+          : (turnActive ? "Steer the current turn…" : "Ask OMP to work in this folder…")}
       disabled={!canCompose}
       oninput={handleTextareaInput}
       onkeydown={onKeydown}
@@ -275,6 +332,20 @@
   </div>
   <div class="composer-actions">
     <div class="composer-tools">
+      <nav class="composer-inspector-links" aria-label="Run details">
+        <button
+          type="button"
+          class:is-active={inspectorOpen && inspectorTab === "agents"}
+          aria-label={`${inspectorOpen && inspectorTab === "agents" ? "Close" : "Open"} Agent Hub${agentUnreadCount > 0 ? `, ${agentUnreadCount} unread` : ""}`}
+          onclick={() => onToggleInspector("agents")}
+        >Agents{#if agentUnreadCount > 0}<span>{agentUnreadCount}</span>{/if}</button>
+        <button
+          type="button"
+          class:is-active={inspectorOpen && inspectorTab === "files"}
+          aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} changed` : ""}`}
+          onclick={() => onToggleInspector("files")}
+        >Files{#if fileActivityCount > 0}<span>{fileActivityCount}</span>{/if}</button>
+      </nav>
       <RuntimePicker
         {providerOptions}
         {providerSelectedKey}
@@ -294,6 +365,18 @@
         contextLimit={contextLimit}
         tokensPerSecond={contextTokensPerSecond}
         modelName={contextModelName}
+        {compactDisabled}
+        {handoffDisabled}
+        oncompact={onCompact}
+        onhandoff={onHandoff}
+      />
+      <SessionActionsMenu
+        {retryDisabled}
+        {restartDisabled}
+        onretry={onRetry}
+        onstats={onStats}
+        onexport={onExport}
+        onrestart={onRestart}
       />
     </div>
 
@@ -311,35 +394,35 @@
             <button
               type="button"
               class="secondary-button queue-follow-up-button"
-              title="Queue for the next turn"
-              aria-label="Queue for the next turn"
+              title={`Queue for the next turn${queuedMessageCount > 0 ? ` (${queuedMessageCount} queued)` : ""}`}
+              aria-label={`Queue for the next turn${queuedMessageCount > 0 ? `, ${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"}` : ""}`}
               disabled={sendDisabled}
               onclick={() => { actionMenuOpen = false; onQueueFollowUp(); }}
-            >Queue for next turn</button>
+            >Queue for next turn{#if queuedMessageCount > 0}<span class="queue-count">{queuedMessageCount}</span>{/if}</button>
           </div>
         </details>
         <button
           type="button"
           class="action-button send-turn-btn"
-          title="Queue for the next turn"
-          aria-label="Queue for the next turn"
+          title="Steer the current turn"
+          aria-label="Steer"
           disabled={sendDisabled}
           onclick={onSend}
         >
           <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} aria-hidden="true" /></span>
-          <span class="send-label">Queue</span>
+          <span class="send-label">Steer</span>
         </button>
       {:else}
         <button
           type="button"
           class="action-button send-turn-btn"
-          title="Send message (Enter)"
-          aria-label="Send message"
+          title={planRefinementAwaiting ? "Refine plan (Enter)" : "Send message (Enter)"}
+          aria-label={planRefinementAwaiting ? "Refine plan" : "Send message"}
           disabled={sendDisabled}
           onclick={onSend}
         >
           <span class="send-glyph" aria-hidden="true"><ArrowUp size={15} /></span>
-          <span class="send-label">Send</span>
+          <span class="send-label">{planRefinementAwaiting ? "Refine plan" : "Send"}</span>
         </button>
       {/if}
     </div>

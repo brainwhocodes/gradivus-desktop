@@ -78,7 +78,7 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 				removeChildView,
 			},
 		};
-		const host = new WorkspaceHost(window as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(window as never);
 		return { host, send, addChildView, removeChildView, window };
 	}
 
@@ -305,7 +305,7 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			webContents: { isDestroyed: () => false, send: vi.fn(), getZoomFactor: () => 1.5 },
 			contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
 		};
-		const host = new WorkspaceHost(hostWindow as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(hostWindow as never);
 		host.syncWithDocument(createMockDocument());
 		host.setVisibleBrowsers(["pane-browser-1"]);
 		const view = mockViewInstances[0];
@@ -315,6 +315,8 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			async (_promptText: string, _sessionId: string, _deliveryOptions: unknown) => undefined,
 		);
 		host.setDesktopHost({
+			setPaneBroker: vi.fn(),
+			refreshPaneBroker: vi.fn(),
 			resolveChatSessionForBrowserAgent: vi.fn((sessionId: string) => sessionId),
 			deliverElementPrompt,
 		} as never);
@@ -421,7 +423,12 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			if (sessionId === "session-agent-b") throw new Error("Agent B failed");
 			return "Agent A response";
 		});
-		host.setDesktopHost({ resolveSelectionTarget, executeInlinePrompt } as never);
+		host.setDesktopHost({
+			setPaneBroker: vi.fn(),
+			refreshPaneBroker: vi.fn(),
+			resolveSelectionTarget,
+			executeInlinePrompt,
+		} as never);
 
 		const actions = [
 			{
@@ -642,7 +649,12 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			scope: { ...scope, documentEpoch },
 			target,
 		}));
-		host.setDesktopHost({ resolveSelectionTarget, executeInlinePrompt: vi.fn() } as never);
+		host.setDesktopHost({
+			setPaneBroker: vi.fn(),
+			refreshPaneBroker: vi.fn(),
+			resolveSelectionTarget,
+			executeInlinePrompt: vi.fn(),
+		} as never);
 		let nextTask = 0;
 		const makeAction = () => {
 			nextTask += 1;
@@ -707,7 +719,12 @@ describe("WorkspaceHost position-aware browser bounds", () => {
 			target,
 		}));
 		const executeInlinePrompt = vi.fn(() => response.promise);
-		host.setDesktopHost({ resolveSelectionTarget, executeInlinePrompt } as never);
+		host.setDesktopHost({
+			setPaneBroker: vi.fn(),
+			refreshPaneBroker: vi.fn(),
+			resolveSelectionTarget,
+			executeInlinePrompt,
+		} as never);
 		let initial = true;
 		mockExecuteJavaScript.mockImplementation(async script => {
 			if (typeof script !== "string") return { canceled: true };

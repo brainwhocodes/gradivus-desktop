@@ -5,7 +5,13 @@ import {
 	type OmpGrpcServerFrame,
 } from "@oh-my-pi/pi-grpc";
 import type { PromptImageContent } from "../shared/contracts";
-import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse } from "../shared/rpc-wire";
+import type {
+	RpcCommand,
+	RpcExtensionUIRequest,
+	RpcExtensionUIResponse,
+	RpcHostToolResult,
+	RpcResponse,
+} from "../shared/rpc-wire";
 
 type RpcEventListener = (event: unknown) => void;
 type RpcExtensionListener = (request: RpcExtensionUIRequest) => void;
@@ -46,13 +52,18 @@ export class RpcClient {
 	async start(): Promise<void> {
 		await this.#ready.promise;
 	}
-	async prompt(message: string, images?: PromptImageContent[]): Promise<string> {
+	async prompt(
+		message: string,
+		images?: PromptImageContent[],
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<string> {
 		const id = `gradivus-${++this.#sequence}`;
 		const response = await this.request({
 			id,
 			type: "prompt",
 			message,
 			...(images && images.length > 0 ? { images } : {}),
+			...(streamingBehavior ? { streamingBehavior } : {}),
 		});
 		if (!response.success) throw new Error(response.error);
 		return id;
@@ -84,6 +95,12 @@ export class RpcClient {
 		void this.#connection
 			.send({ kind: "push", type, payload })
 			.catch(error => this.#fail(error instanceof Error ? error : new Error(String(error))));
+	}
+
+	async sendHostToolResult(frame: RpcHostToolResult): Promise<void> {
+		if (this.#closed) throw new Error("RPC process is closed");
+		const { type, ...payload } = frame;
+		await this.#connection.send({ kind: "push", type, payload });
 	}
 
 	close(): Promise<void> {

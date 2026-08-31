@@ -1,15 +1,19 @@
 <script lang="ts">
 	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
-	import { tick } from "svelte";
+	import { onMount, tick } from "svelte";
 	import {
+		type BrowserFindState,
 		type BrowserNavigationAction,
 		type BrowserViewState,
+		type PaneAutomationState,
 		type ElementEditState,
 	} from "../../../shared/contracts";
 	import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../../../shared/selection-agent";
 	import { isDeliverableWorkspaceAgent } from "../../agent-projection";
 	import BrowserSurface from "../atoms/BrowserSurface.svelte";
 	import BrowserToolbar from "../molecules/BrowserToolbar.svelte";
+	import BrowserFindBar from "../molecules/BrowserFindBar.svelte";
+	import BrowserAutomationPane from "./BrowserAutomationPane.svelte";
 	import IconButton from "../molecules/IconButton.svelte";
 	import SelectionQueuePane from "./SelectionQueuePane.svelte";
 	import type { WorkspaceAgent, WorkspaceLayout, WorkspacePane } from "../../workspace-types";
@@ -18,10 +22,14 @@
 		pane: WorkspacePane;
 		tabId: string;
 		workspaceId: string;
+		sessionId: string;
 		focused: boolean;
 		active: boolean;
 		canSplit: boolean;
 		browserState: BrowserViewState | undefined;
+		findOpen: boolean;
+		findState?: BrowserFindState;
+		automationState?: PaneAutomationState;
 		selectionState: ElementEditState | undefined;
 		agents: WorkspaceAgent[];
 		isSelecting: boolean;
@@ -30,6 +38,10 @@
 		onactivate: () => void;
 		onnavigate: (address: string) => void;
 		oncontrol: (action: BrowserNavigationAction) => void;
+		onopenfind: () => void;
+		onfind: (query: string, forward: boolean) => void;
+		onstopfind: () => void;
+		onautomationstate: (state: PaneAutomationState) => void;
 		ontoggleselection: () => void;
 		onrunqueue: () => void;
 		onclearqueue: () => void;
@@ -42,18 +54,26 @@
 	let {
 		pane,
 		tabId,
+		findOpen,
+		findState,
+		sessionId,
 		workspaceId,
 		focused,
 		active,
 		canSplit,
 		browserState,
 		selectionState,
+		automationState,
 		agents,
 		isSelecting,
 		selectionPending,
 		defaultUrl,
 		onactivate,
+		onopenfind,
+		onfind,
+		onstopfind,
 		onnavigate,
+		onautomationstate,
 		oncontrol,
 		ontoggleselection,
 		onrunqueue,
@@ -81,6 +101,8 @@
 	let agentHubPane = $state<HTMLElement>();
 	let agentHubReturnFocus = $state<HTMLElement>();
 	let queueOpen = $state(false);
+	let findQuery = $state("");
+	let automationOpen = $state(false);
 	let previousQueueCount = 0;
 
 	$effect(() => {
@@ -93,6 +115,29 @@
 		}
 		previousQueueCount = queueCount;
 	});
+
+	$effect(() => {
+		if (!sessionId) return;
+		void window.gradivus.getPaneAutomation(sessionId, pane.id).then(onautomationstate).catch(() => {});
+	});
+
+	onMount(() =>
+		window.gradivus.onEvent(event => {
+			if (event.type !== "browser_inventory" || event.sessionId !== sessionId || !event.browserInventory) return;
+			onautomationstate({
+				...(automationState ?? { available: true }),
+				tabs: event.browserInventory,
+			});
+		}),
+	);
+
+	function toggleAutomation(): void {
+		automationOpen = !automationOpen;
+		if (automationOpen) {
+			closeAgentHub(false);
+			queueOpen = false;
+		}
+	}
 
 
 	function closeAgentHub(restoreFocus = true): void {
@@ -109,6 +154,7 @@
 			return;
 		}
 		queueOpen = false;
+		automationOpen = false;
 		agentHubReturnFocus = trigger;
 		agentHubOpen = true;
 		void tick().then(() => {
@@ -141,17 +187,25 @@
 		agentHubOpen={agentHubOpen}
 		queueCount={queuedTasks.length}
 		queueOpen={queueOpen}
+		automationOpen={automationOpen}
+		automationAccess={automationState?.lease?.access}
 		oncontrol={oncontrol}
 		ontoggleselection={ontoggleselection}
+		onopenfind={onopenfind}
 		onopenagenthub={toggleAgentHub}
+		onopenautomation={toggleAutomation}
 		onopenqueue={() => {
 			closeAgentHub(false);
+			automationOpen = false;
 			queueOpen = true;
 		}}
 		onnavigate={onnavigate}
 		onsplit={onsplit}
 		onclosepane={onclosepane}
 	/>
+	{#if findOpen}
+		<BrowserFindBar bind:value={findQuery} findState={findState} {onfind} onclose={onstopfind} />
+	{/if}
 
 	<div class="browser-pane-content">
 		<div class="browser-surface-host">
@@ -166,7 +220,15 @@
 			/>
 		</div>
 
-		{#if agentHubOpen}
+		{#if automationOpen}
+			<BrowserAutomationPane
+				{sessionId}
+				paneId={pane.id}
+				automationState={automationState}
+				onstate={onautomationstate}
+				onclose={() => { automationOpen = false; }}
+			/>
+		{:else if agentHubOpen}
 			<aside
 				bind:this={agentHubPane}
 				id={agentHubId}

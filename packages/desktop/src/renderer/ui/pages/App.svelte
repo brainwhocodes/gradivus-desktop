@@ -4,11 +4,15 @@
 	import type {
 		GradivusSettings,
 		BrowserNavigationAction,
+		BrowserFindState,
+		BrowserShortcut,
 		BrowserViewState,
+		PaneAutomationState,
 		ElementEditState,
 		UpdateGradivusSettingsInput,
 		WorkspaceEvent,
 	} from "../../../shared/contracts";
+	import ModalShell from "../molecules/ModalShell.svelte";
 	import Toast from "../molecules/Toast.svelte";
 	import BrowserPane from "../organisms/BrowserPane.svelte";
 	import WorkspaceShell from "../templates/WorkspaceShell.svelte";
@@ -31,9 +35,18 @@
 		return `${prefix}-${crypto.randomUUID()}`;
 	}
 	let browserTabs: WorkspaceTab[] = [];
+	let terminalTabs: WorkspaceTab[] = [];
 	let activeTabId = CHAT_TAB_ID;
+	let chatPresentationReady = false;
+	let chatAttentionCount = 0;
+	let observedPresentationTab = "";
+	let presentationRevision = 0;
 	let activeWorkspaceId = "";
 	let browserStates = new Map<string, BrowserViewState>();
+	let paneAutomationStates = new Map<string, PaneAutomationState>();
+	let activeSessionId = "";
+	let browserFindStates = new Map<string, BrowserFindState>();
+	let openBrowserFindPanes = new Set<string>();
 	let selectionStatesByPane = new Map<string, ElementEditState>();
 	type SelectorLatch = { paneId: string; operationToken: number; selectionId?: string };
 	let selectorLatch: SelectorLatch | undefined;
@@ -60,6 +73,22 @@
 	let runtimeRetryExhausted = false;
 	let hydrated = false;
 	let maximized = false;
+	interface ClosedBrowserTabDescriptor {
+		title: string;
+		layout: WorkspaceLayout;
+		activePaneIndex: number;
+		paneUrls: string[];
+	}
+	let closedBrowserTabs: ClosedBrowserTabDescriptor[] = [];
+	let pendingBrowserClose:
+		| {
+				title: string;
+				paneCount: number;
+				returnFocus?: HTMLElement;
+				resolve: (confirmed: boolean) => void;
+		  }
+		| undefined;
+	let browserCloseCancelButton: HTMLButtonElement | undefined;
 	let unsubscribeWorkspace: (() => void) | undefined;
 	let unsubscribeWorkspaceDocument: (() => void) | undefined;
 	let unsubscribeSelection: (() => void) | undefined;
@@ -86,9 +115,10 @@
 	$: activeBrowserTab = browserTabs.find(tab => tab.id === activeTabId);
 	$: activeBrowserPane = activeBrowserTab?.panes.find(pane => pane.id === activeBrowserTab.activePaneId)
 		?? activeBrowserTab?.panes[0];
+	$: activeBrowserState = activeBrowserPane ? browserStates.get(activeBrowserPane.id) : undefined;
 	$: activeTitle = activeTabId === CHAT_TAB_ID
 		? "Gradivus"
-		: activeBrowserTab?.title || activeBrowserPane?.title || "Browser";
+		: activeBrowserState?.title || activeBrowserTab?.title || activeBrowserPane?.title || "Browser";
 	$: documentTitle = `${activeTitle} · Gradivus`;
 
 	onMount(() => {
@@ -242,6 +272,7 @@
 		const projection = projectWorkspaceTabs(document, activeWorkspaceId || undefined, activeTabId);
 		activeWorkspaceId = projection.workspaceId;
 		browserTabs = projection.tabs.filter(tab => tab.kind === "browser");
+		terminalTabs = projection.tabs.filter(tab => tab.kind === "terminal");
 		agents = reconcileWorkspaceAgents(document, agents, activeWorkspaceId);
 		hydrated = true;
 
@@ -252,6 +283,9 @@
 		const validPaneIds = new Set(browserTabs.flatMap(tab => tab.panes.map(pane => pane.id)));
 		if (selectorLatch && !validPaneIds.has(selectorLatch.paneId)) selectorLatch = undefined;
 		browserStates = new Map([...browserStates].filter(([paneId]) => validPaneIds.has(paneId)));
+		paneAutomationStates = new Map([...paneAutomationStates].filter(([paneId]) => validPaneIds.has(paneId)));
+		browserFindStates = new Map([...browserFindStates].filter(([paneId]) => validPaneIds.has(paneId)));
+		openBrowserFindPanes = new Set([...openBrowserFindPanes].filter(paneId => validPaneIds.has(paneId)));
 		selectionStatesByPane = new Map(
 			[...selectionStatesByPane].filter(([paneId]) => validPaneIds.has(paneId)),
 		);
@@ -337,15 +371,29 @@
 
 
 
+	async function reconcileChatPresentation(tabId: string): Promise<void> {
+		const revision = ++presentationRevision;
+		chatPresentationReady = false;
+		await syncVisibleBrowsers();
+		if (revision !== presentationRevision || activeTabId !== tabId) return;
+		if (tabId === CHAT_TAB_ID) {
+			window.focus();
+			chatPresentationReady = true;
+		}
+	}
+
+	$: if (activeTabId !== observedPresentationTab) {
+		observedPresentationTab = activeTabId;
+		void reconcileChatPresentation(activeTabId);
+	}
+
 	function activateChat(): void {
 		activeTabId = CHAT_TAB_ID;
-		void syncVisibleBrowsers();
 	}
 
 	function activateBrowser(tabId: string): void {
 		if (!browserTabs.some(tab => tab.id === tabId)) return;
 		activeTabId = tabId;
-		void syncVisibleBrowsers();
 	}
 
 	async function addBrowserTab(url?: string): Promise<void> {
@@ -369,6 +417,72 @@
 		}
 	}
 
+	function browserTabDescriptor(tab: WorkspaceTab): ClosedBrowserTabDescriptor {
+		const activePaneIndex = Math.max(0, tab.panes.findIndex(pane => pane.id === tab.activePaneId));
+		return {
+			title: browserStates.get(tab.activePaneId)?.title || tab.title || "Browser",
+			layout: tab.layout,
+			activePaneIndex,
+			paneUrls: tab.panes.map(pane => browserStates.get(pane.id)?.url || pane.url || DEFAULT_BROWSER_URL),
+		};
+	}
+
+	async function createBrowserFromDescriptor(descriptor: ClosedBrowserTabDescriptor): Promise<boolean> {
+		if (!hydrated || !activeWorkspaceId || descriptor.paneUrls.length === 0) return false;
+		const tabId = id("tab-browser");
+		const paneIds: string[] = [];
+		activeTabId = tabId;
+		try {
+			for (let index = 0; index < descriptor.paneUrls.length; index++) {
+				const paneId = id("browser");
+				paneIds.push(paneId);
+				await window.gradivus.createBrowser({
+					id: paneId,
+					tabId,
+					workspaceId: activeWorkspaceId,
+					url: descriptor.paneUrls[index],
+					...(index === 1
+						? { layout: descriptor.layout === "rows" ? "rows" as const : "columns" as const }
+						: index >= 2
+							? { layout: "grid" as const }
+							: {}),
+				});
+			}
+			await window.gradivus.updateTab(tabId, {
+				name: descriptor.title,
+				layout: paneIds.length >= 3 ? "grid" : paneIds.length === 2 ? descriptor.layout : "columns",
+				activePaneId: paneIds[Math.min(descriptor.activePaneIndex, paneIds.length - 1)],
+			});
+			return true;
+		} catch (error) {
+			await window.gradivus.closeTab(tabId).catch(() => {});
+			activeTabId = CHAT_TAB_ID;
+			showError(error);
+			return false;
+		}
+	}
+
+	async function duplicateBrowserTab(tabId: string): Promise<void> {
+		const tab = browserTabs.find(candidate => candidate.id === tabId);
+		if (tab) await createBrowserFromDescriptor(browserTabDescriptor(tab));
+	}
+
+	function moveBrowserTab(tabId: string, direction: "left" | "right"): void {
+		const index = browserTabs.findIndex(tab => tab.id === tabId);
+		if (index < 0) return;
+		if (direction === "left" && index > 0) {
+			void reorderBrowserTab(tabId, browserTabs[index - 1].id);
+		} else if (direction === "right" && index < browserTabs.length - 1) {
+			void reorderBrowserTab(tabId, browserTabs[index + 2]?.id);
+		}
+	}
+
+	async function reopenBrowserTab(): Promise<void> {
+		const descriptor = closedBrowserTabs.at(-1);
+		if (!descriptor) return;
+		if (await createBrowserFromDescriptor(descriptor)) closedBrowserTabs = closedBrowserTabs.slice(0, -1);
+	}
+
 	async function splitBrowser(tab: WorkspaceTab, sourcePaneId: string, layout: WorkspaceLayout): Promise<void> {
 		if (!activeWorkspaceId || tab.panes.length >= MAX_BROWSER_PANES) return;
 		if (!tab.panes.some(pane => pane.id === sourcePaneId)) return;
@@ -379,7 +493,7 @@
 				id: paneId,
 				tabId: tab.id,
 				workspaceId: activeWorkspaceId,
-				url: appSettings?.browser.defaultUrl ?? DEFAULT_BROWSER_URL,
+				url: browserStates.get(sourcePaneId)?.url ?? tab.panes.find(pane => pane.id === sourcePaneId)?.url ?? DEFAULT_BROWSER_URL,
 				layout: requestedLayout,
 			});
 		} catch (error) {
@@ -410,23 +524,72 @@
 		void tick().then(() => {
 			const target = isFocusableTrigger(settingsReturnFocus) ? settingsReturnFocus : undefined;
 			if (target) target.focus();
-			else document.querySelector<HTMLElement>(".workspace-tab.is-active")?.focus();
+			else document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
 			settingsReturnFocus = undefined;
 		});
 	}
 
 
+	function settleBrowserClose(confirmed: boolean): void {
+		const request = pendingBrowserClose;
+		if (!request) return;
+		pendingBrowserClose = undefined;
+		request.resolve(confirmed);
+		if (!confirmed) {
+			void tick().then(() => request.returnFocus?.focus({ preventScroll: true }));
+		}
+	}
+
+	async function confirmBrowserClose(title: string, paneCount: number): Promise<boolean> {
+		if (!appSettings?.confirmCloseTab) return true;
+		const gate = Promise.withResolvers<boolean>();
+		pendingBrowserClose = {
+			title,
+			paneCount,
+			returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : undefined,
+			resolve: gate.resolve,
+		};
+		await tick();
+		browserCloseCancelButton?.focus({ preventScroll: true });
+		return gate.promise;
+	}
+
 	async function closeBrowserTab(tabId: string): Promise<void> {
-		const tab = browserTabs.find(item => item.id === tabId);
+		const closingIndex = browserTabs.findIndex(item => item.id === tabId);
+		const tab = browserTabs[closingIndex];
 		if (!tab) return;
-		if (appSettings?.confirmCloseTab && !window.confirm(`Close tab “${tab.title || "Browser"}”?`)) return;
+		const descriptor = browserTabDescriptor(tab);
+		if (!(await confirmBrowserClose(descriptor.title, tab.panes.length))) return;
+		const nextActiveId = browserTabs[closingIndex + 1]?.id ?? browserTabs[closingIndex - 1]?.id ?? CHAT_TAB_ID;
+		if (activeTabId === tabId) activeTabId = nextActiveId;
 		try {
 			await window.gradivus.closeTab(tabId);
 			for (const pane of tab.panes) browserStates.delete(pane.id);
 			browserStates = new Map(browserStates);
-			if (activeTabId === tabId) activeTabId = CHAT_TAB_ID;
+			closedBrowserTabs = [...closedBrowserTabs.slice(-9), descriptor];
 			await syncVisibleBrowsers();
+			await tick();
+			document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
 		} catch (error) {
+			if (activeTabId === nextActiveId) activeTabId = tabId;
+			showError(error);
+		}
+	}
+
+	async function reorderBrowserTab(tabId: string, beforeTabId?: string): Promise<void> {
+		const sourceIndex = browserTabs.findIndex(tab => tab.id === tabId);
+		if (sourceIndex < 0 || beforeTabId === tabId) return;
+		const previous = browserTabs;
+		const next = [...browserTabs];
+		const [moved] = next.splice(sourceIndex, 1);
+		const targetIndex = beforeTabId ? next.findIndex(tab => tab.id === beforeTabId) : next.length;
+		if (targetIndex < 0) return;
+		next.splice(targetIndex, 0, moved);
+		browserTabs = next;
+		try {
+			await window.gradivus.reorderTab(tabId, beforeTabId);
+		} catch (error) {
+			browserTabs = previous;
 			showError(error);
 		}
 	}
@@ -448,7 +611,7 @@
 	function activatePane(tab: WorkspaceTab, paneId: string): void {
 		activeTabId = tab.id;
 		void window.gradivus.updateTab(tab.id, { activePaneId: paneId }).catch(showError);
-		void syncVisibleBrowsers();
+		void syncVisibleBrowsers(paneId);
 	}
 
 	function browserCreated(pane: WorkspacePane, state: BrowserViewState): void {
@@ -473,25 +636,78 @@
 		void window.gradivus.controlBrowser(paneId, action).catch(showError);
 	}
 
-	async function syncVisibleBrowsers(): Promise<void> {
+	function openBrowserFind(paneId: string): void {
+		const next = new Set(openBrowserFindPanes);
+		next.add(paneId);
+		openBrowserFindPanes = next;
+	}
+
+	function findInBrowser(paneId: string, query: string, forward: boolean): void {
+		void window.gradivus.findBrowser(paneId, query, forward).catch(showError);
+	}
+
+	function closeBrowserFind(paneId: string): void {
+		const next = new Set(openBrowserFindPanes);
+		next.delete(paneId);
+		openBrowserFindPanes = next;
+		browserFindStates.delete(paneId);
+		browserFindStates = new Map(browserFindStates);
+		void window.gradivus.stopBrowserFind(paneId).catch(showError);
+	}
+
+	function handleBrowserShortcut(paneId: string, shortcut: BrowserShortcut): void {
+		const tab = browserTabs.find(candidate => candidate.panes.some(pane => pane.id === paneId));
+		if (!tab) return;
+		if (shortcut === "new-tab") void addBrowserTab();
+		else if (shortcut === "reopen-tab") void reopenBrowserTab();
+		else if (shortcut === "close-tab") void closeBrowserTab(tab.id);
+		else if (shortcut === "next-tab") cycleWorkspaceTab(false);
+		else if (shortcut === "previous-tab") cycleWorkspaceTab(true);
+		else if (shortcut === "focus-address") {
+			activatePane(tab, paneId);
+			void tick().then(focusActiveBrowserAddress);
+		} else if (shortcut === "find") {
+			activatePane(tab, paneId);
+			openBrowserFind(paneId);
+		} else {
+			controlBrowser(
+				paneId,
+				shortcut === "back"
+					? "back"
+					: shortcut === "forward"
+						? "forward"
+						: shortcut,
+			);
+		}
+	}
+
+	async function syncVisibleBrowsers(activePaneOverride?: string): Promise<void> {
 		await tick();
 		const tab = browserTabs.find(item => item.id === activeTabId);
 		const desired = settingsRoute.open
 			? []
 			: (tab?.panes.map(pane => pane.id) ?? []);
+		const activePaneId = settingsRoute.open ? undefined : activePaneOverride ?? tab?.activePaneId;
 		const revision = ++visibilityRevision;
 		visibilityWriteQueue = visibilityWriteQueue
 			.catch(() => undefined)
 			.then(async () => {
 				if (revision !== visibilityRevision) return;
-				await window.gradivus.setVisibleBrowsers(desired);
+				await window.gradivus.setVisibleBrowsers(desired, activePaneId);
 			});
 		await visibilityWriteQueue;
 	}
 
 	function handleWorkspaceEvent(event: WorkspaceEvent): void {
 		if (event.type === "browser-state") updateBrowserState(event.paneId, event.state);
-		else if (event.type === "browser-focus") {
+		else if (event.type === "browser-find") {
+			browserFindStates.set(event.paneId, event.state);
+			browserFindStates = new Map(browserFindStates);
+		} else if (event.type === "browser-warning") {
+			showNotice(event.message);
+		} else if (event.type === "browser-shortcut") {
+			handleBrowserShortcut(event.paneId, event.shortcut);
+		} else if (event.type === "browser-focus") {
 			const tab = browserTabs.find(item => item.panes.some(pane => pane.id === event.paneId));
 			if (tab) activatePane(tab, event.paneId);
 		} else if (event.type === "browser-new-window") {
@@ -556,6 +772,24 @@
 		}
 	}
 
+	function cycleWorkspaceTab(reverse: boolean): void {
+		const ids = [CHAT_TAB_ID, ...browserTabs.map(tab => tab.id)];
+		const currentIndex = Math.max(0, ids.indexOf(activeTabId));
+		const nextIndex = (currentIndex + (reverse ? -1 : 1) + ids.length) % ids.length;
+		const nextId = ids[nextIndex];
+		if (nextId === CHAT_TAB_ID) activateChat();
+		else activateBrowser(nextId);
+	}
+
+	function focusActiveBrowserAddress(): void {
+		const input = document.querySelector<HTMLInputElement>(
+			".browser-tab-stage.is-active .browser-pane.is-focused input[aria-label='Address']",
+		);
+		if (!input) return;
+		input.focus();
+		input.select();
+	}
+
 	function minimizeWindow(): void {
 		void window.gradivus.minimizeWindow().catch(showError);
 	}
@@ -589,6 +823,16 @@
 			return;
 		}
 		if (document.querySelector("dialog[open]")) return;
+		if (
+			(event.ctrlKey || event.metaKey) &&
+			event.shiftKey &&
+			event.key.toLowerCase() === "t" &&
+			closedBrowserTabs.length > 0
+		) {
+			event.preventDefault();
+			void reopenBrowserTab();
+			return;
+		}
 		if (event.key === "Escape" && selectorLatch) {
 			event.preventDefault();
 			void cancelSelectionForPane(selectorLatch.paneId);
@@ -604,13 +848,57 @@
 			void toggleSelectionForPane(activeBrowserPane.id);
 			return;
 		}
-		if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
-			if (event.key.toLowerCase() === "t") {
+		if (
+			(event.ctrlKey || event.metaKey) &&
+			event.shiftKey &&
+			event.key.toLowerCase() === "r" &&
+			activeBrowserPane
+		) {
+			event.preventDefault();
+			controlBrowser(activeBrowserPane.id, "hard-reload");
+			return;
+		}
+		const commandModifier = event.ctrlKey || event.metaKey;
+		if (commandModifier && !event.altKey && event.key === "Tab") {
+			event.preventDefault();
+			cycleWorkspaceTab(event.shiftKey);
+			return;
+		}
+		if (commandModifier && !event.shiftKey && !event.altKey) {
+			const key = event.key.toLowerCase();
+			if (key === "t") {
 				event.preventDefault();
 				void addBrowserTab();
-			} else if (event.key.toLowerCase() === "w" && activeBrowserTab) {
+				return;
+			}
+			if (key === "w" && activeBrowserTab) {
 				event.preventDefault();
 				void closeBrowserTab(activeBrowserTab.id);
+				return;
+			}
+			if (key === "l" && activeBrowserPane) {
+				event.preventDefault();
+				focusActiveBrowserAddress();
+				return;
+			}
+			if (key === "f" && activeBrowserPane) {
+				event.preventDefault();
+				openBrowserFind(activeBrowserPane.id);
+				return;
+			}
+			if ((key === "+" || key === "=" || key === "-" || key === "0") && activeBrowserPane) {
+				event.preventDefault();
+				controlBrowser(
+					activeBrowserPane.id,
+					key === "-" ? "zoom-out" : key === "0" ? "zoom-reset" : "zoom-in",
+				);
+				return;
+			}
+		}
+		if (!commandModifier && event.altKey && activeBrowserPane) {
+			if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+				event.preventDefault();
+				controlBrowser(activeBrowserPane.id, event.key === "ArrowLeft" ? "back" : "forward");
 			}
 		}
 	}
@@ -625,22 +913,39 @@
 		activeTabId={activeTabId}
 		chatTabId={CHAT_TAB_ID}
 		browserTabs={browserTabs}
+		chatAttentionCount={chatAttentionCount}
+		canReopen={closedBrowserTabs.length > 0}
 		onminimize={minimizeWindow}
+		browserStates={browserStates}
 		ontogglemaximize={() => void toggleMaximizeWindow()}
 		onclose={closeWindow}
 		onactivatechat={activateChat}
 		onactivatetab={activateBrowser}
 		onclosetab={(tabId) => void closeBrowserTab(tabId)}
+		onduplicatetab={(tabId) => void duplicateBrowserTab(tabId)}
+		onmovetab={moveBrowserTab}
 		onaddbrowser={() => void addBrowserTab()}
+		onreopen={() => void reopenBrowserTab()}
+		onreordertab={(tabId, beforeTabId) => void reorderBrowserTab(tabId, beforeTabId)}
 	>
-		<section
+		<div
 			class="chat-stage"
+			id="workspace-panel-chat"
+			role="tabpanel"
+			aria-labelledby="workspace-tab-chat"
 			class:is-active={activeTabId === CHAT_TAB_ID || settingsRoute.open}
 			aria-hidden={settingsRoute.open ? undefined : activeTabId !== CHAT_TAB_ID}
+			inert={!settingsRoute.open && activeTabId !== CHAT_TAB_ID}
 		>
 			<OmpChat
 				appSettings={appSettings}
 				theme={resolvedTheme}
+				terminalTabs={terminalTabs}
+				workspaceId={activeWorkspaceId}
+				active={activeTabId === CHAT_TAB_ID && !settingsRoute.open}
+				{chatPresentationReady}
+				onPlanReviewCountChange={(count) => { chatAttentionCount = count; }}
+				onActiveSessionChange={(sessionId) => { activeSessionId = sessionId; }}
 				settingsRoute={settingsRoute}
 				onOpenSettings={openSettings}
 				onSettingsRouteChange={updateSettingsRoute}
@@ -650,10 +955,13 @@
 				appSettingsBusy={appSettingsBusy}
 				appSettingsStatus={appSettingsStatus}
 			/>
-		</section>
+		</div>
 
 		{#each browserTabs as tab (tab.id)}
-			<section
+			<div
+				id={`workspace-panel-${tab.id}`}
+				role="tabpanel"
+				aria-labelledby={`workspace-tab-${tab.id}`}
 				class="browser-tab-stage"
 				class:is-active={!settingsRoute.open && activeTabId === tab.id}
 				aria-hidden={settingsRoute.open || activeTabId !== tab.id}
@@ -664,6 +972,7 @@
 					<div class={`browser-pane-grid ${layoutClass(tab)}`} style={tab.panes.length === 2 && tab.layout === "columns" ? `grid-template-columns: ${tab.ratio}% ${100 - tab.ratio}%` : tab.panes.length === 2 && tab.layout === "rows" ? `grid-template-rows: ${tab.ratio}% ${100 - tab.ratio}%` : ""}>
 						{#each tab.panes as pane (pane.id)}
 							{@const state = browserStates.get(pane.id)}
+							{@const findState = browserFindStates.get(pane.id)}
 							{@const selectionState = selectionStatesByPane.get(pane.id)}
 							{@const selectionPending = selectorLatch?.paneId === pane.id && !selectorLatch.selectionId}
 							{@const isSelecting = selectorLatch?.paneId === pane.id && Boolean(selectorLatch.selectionId)}
@@ -675,6 +984,10 @@
 								active={!settingsRoute.open && activeTabId === tab.id}
 								canSplit={tab.panes.length < MAX_BROWSER_PANES}
 								browserState={state}
+								sessionId={activeSessionId}
+								automationState={paneAutomationStates.get(pane.id)}
+								findOpen={openBrowserFindPanes.has(pane.id)}
+								findState={findState}
 								selectionState={selectionState}
 								agents={agents}
 								isSelecting={isSelecting}
@@ -683,6 +996,13 @@
 								onactivate={() => activatePane(tab, pane.id)}
 								onnavigate={(address) => void navigateBrowser(pane.id, address)}
 								oncontrol={(action) => controlBrowser(pane.id, action)}
+								onopenfind={() => openBrowserFind(pane.id)}
+								onfind={(query, forward) => findInBrowser(pane.id, query, forward)}
+								onstopfind={() => closeBrowserFind(pane.id)}
+								onautomationstate={(automationState) => {
+									paneAutomationStates.set(pane.id, automationState);
+									paneAutomationStates = new Map(paneAutomationStates);
+								}}
 								ontoggleselection={() => void toggleSelectionForPane(pane.id)}
 								onrunqueue={() => void runSelectionQueue(pane.id)}
 								onclearqueue={() => void clearSelectionQueue(pane.id)}
@@ -695,7 +1015,7 @@
 					</div>
 
 				</div>
-			</section>
+			</div>
 		{/each}
 
 		{#if notice}<Toast variant="notice-toast tone-info" role="status" message={notice} />{/if}
@@ -725,5 +1045,26 @@
 			<div class="workspace-loading" role="status"><span></span>Connecting to the workspace runtime…</div>
 		{/if}
 	</WorkspaceShell>
+	{#if pendingBrowserClose}
+		<ModalShell
+			backdrop={true}
+			backdropClass="browser-close-backdrop"
+			dialogClass="browser-close-dialog"
+			labelledbyId="browser-close-title"
+			onclose={() => settleBrowserClose(false)}
+			cancelable={true}
+		>
+			<h2 id="browser-close-title">Close “{pendingBrowserClose.title}”?</h2>
+			<p>
+				{pendingBrowserClose.paneCount === 1
+					? "This closes its browser pane."
+					: `This closes all ${pendingBrowserClose.paneCount} panes in the tab.`}
+			</p>
+			<div class="dialog-actions">
+				<button bind:this={browserCloseCancelButton} type="button" class="secondary-button" onclick={() => settleBrowserClose(false)}>Cancel</button>
+				<button type="button" class="danger-button" onclick={() => settleBrowserClose(true)}>Close tab</button>
+			</div>
+		</ModalShell>
+	{/if}
 </div>
 

@@ -52,15 +52,23 @@ interface TanSessionEvent {
 function createCloneStub(overrides?: {
 	prompt?: () => Promise<void>;
 	abort?: () => void;
-	sessionManager?: { appendSessionInit: (init: unknown) => void };
+	sessionManager?: Partial<Pick<SessionManager, "appendSessionInit" | "appendCustomEntry">>;
 	lastAssistantText?: string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
 }) {
 	const appendMessage = vi.fn();
 	let listener: ((event: TanSessionEvent) => void) | undefined;
 	const clone = {
 		agent: { appendMessage },
 		sessionManager: overrides?.sessionManager,
-		setTodoPhases: vi.fn(),
+		getTodoRevision: vi.fn(() => 0),
+		commitUserTodoEdit: vi.fn((phases: unknown[]) => {
+			overrides?.sessionManager?.appendCustomEntry?.("user_todo_edit", { phases });
+			return { phases, revision: 1 };
+		}),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -88,6 +96,8 @@ function createContext(overrides?: {
 	agentId?: string;
 	parentPromptCacheKey?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
@@ -112,7 +122,8 @@ function createContext(overrides?: {
 		sessionId: "parent-session",
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
-		getActiveToolNames: vi.fn(() => ["read", "bash"]),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		getAgentId: vi.fn(() => overrides?.agentId),
 		sendCustomMessage: vi.fn(async () => {
@@ -386,11 +397,36 @@ describe("TanCommandController", () => {
 		expect(unregister).not.toHaveBeenCalled();
 	});
 
+	it("copies and persists the full enabled tool set", async () => {
+		const enabledToolNames = ["eval", "read", "bash"];
+		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const appendSessionInit = vi.fn();
+		const { clone } = createCloneStub({
+			sessionManager: { appendSessionInit },
+			activeToolNames: ["eval"],
+			enabledToolNames,
+		});
+		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("preserve bridge tools");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(enabledToolNames);
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: enabledToolNames }));
+	});
+
 	it("isolates the fork: clears inherited todos, injects the fork notice, and re-injects after compaction", async () => {
 		const harness = createContext();
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const compacted = Promise.withResolvers<void>();
 		const stub = createCloneStub({
+			sessionManager: harness.cloneManager,
 			prompt: async () => {
 				// Simulate the clone's history compacting mid-run: the summarizer
 				// erases the fork notice, so the controller must append it again.
@@ -412,7 +448,7 @@ describe("TanCommandController", () => {
 		// Inherited parent todos are wiped both in-memory and in the persisted
 		// session so reloads agree; otherwise todo reminders drag the tan back
 		// onto the parent's task.
-		expect(stub.clone.setTodoPhases).toHaveBeenCalledWith([]);
+		expect(stub.clone.commitUserTodoEdit).toHaveBeenCalledWith([], 0, "tangent context reset", { removed: true });
 		expect(harness.cloneManager.appendCustomEntry).toHaveBeenCalledWith("user_todo_edit", { phases: [] });
 		// Fork notice injected before the prompt and again after compaction.
 		expect(stub.appendMessage).toHaveBeenCalledTimes(2);

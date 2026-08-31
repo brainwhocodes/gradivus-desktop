@@ -251,6 +251,7 @@ export class WorkspaceServer {
 				case "terminal":
 					if (
 						effect.operation !== "terminal.open" &&
+						effect.operation !== "terminal.restart" &&
 						effect.operation !== "terminal.input" &&
 						effect.operation !== "terminal.resize" &&
 						effect.operation !== "terminal.close" &&
@@ -448,13 +449,13 @@ export class WorkspaceServer {
 		if (!session.authenticated) {
 			if (type !== "auth") {
 				this.#sendFrame(session.socket, { type: "auth.error", message: "Authentication required" });
-				session.socket.destroy();
+				session.socket.end();
 				return;
 			}
 			const token = msg.token;
 			if (typeof token !== "string") {
 				this.#sendFrame(session.socket, { type: "auth.error", message: "Invalid control token" });
-				session.socket.destroy();
+				session.socket.end();
 				return;
 			}
 
@@ -476,8 +477,10 @@ export class WorkspaceServer {
 							"profile.update",
 							"profile.delete",
 							"tab.update",
+							"tab.reorder",
 							"tab.close",
 							"terminal.open",
+							"terminal.restart",
 							"terminal.status",
 							"terminal.input",
 							"terminal.resize",
@@ -546,7 +549,7 @@ export class WorkspaceServer {
 			}
 
 			this.#sendFrame(session.socket, { type: "auth.error", message: "Invalid control token" });
-			session.socket.destroy();
+			session.socket.end();
 			return;
 		}
 
@@ -672,6 +675,11 @@ export class WorkspaceServer {
 				case "terminal.open":
 					await this.#startTerminal(effect, id);
 					return;
+				case "terminal.restart":
+					this.#revokeTerminalToken(id);
+					await this.#terminalManager.close(id);
+					await this.#startTerminal(effect, id);
+					return;
 				case "terminal.input": {
 					const data = effect.payload.data;
 					if (typeof data !== "string") throw new Error("terminal input data is invalid");
@@ -717,9 +725,11 @@ export class WorkspaceServer {
 		if (!terminal || this.#terminalManager.getSession(terminalId)) return;
 		const tokenRecord = this.#mintTerminalToken(effect.workspaceId, terminal);
 		const payload = effect.payload;
-		const shell = typeof payload.shell === "string" ? payload.shell : undefined;
+		const shell = typeof payload.shell === "string" ? payload.shell : terminal.shell;
 		const args =
-			Array.isArray(payload.args) && payload.args.every(item => typeof item === "string") ? payload.args : undefined;
+			Array.isArray(payload.args) && payload.args.every(item => typeof item === "string")
+				? payload.args
+				: terminal.args;
 		const inheritedPath = process.platform === "win32" ? ";" : ":";
 		const env = buildChildEnvironment({
 			explicitBindings: {
@@ -734,7 +744,6 @@ export class WorkspaceServer {
 				...(terminal.profileId ? { GRADIVUS_PROFILE_ID: terminal.profileId } : {}),
 				PI_RUNTIME_DIR: this.#runtimeRoot,
 				PI_RUNTIME_TOKEN: tokenRecord.token,
-				PI_BROWSER_CDP_URL: "http://127.0.0.1:9222",
 			},
 		});
 		if (this.#executablePath) {
@@ -1000,6 +1009,7 @@ export class WorkspaceServer {
 			pid: terminalSession?.pid,
 			cwd: terminalSession?.cwd ?? terminal.cwd,
 			columns: terminalSession?.columns ?? terminal.columns,
+			firstAvailableOffset: terminalSession?.firstAvailableOffset ?? 0,
 			rows: terminalSession?.rows ?? terminal.rows,
 			totalBytesProduced: terminalSession?.totalBytesProduced ?? 0,
 		});

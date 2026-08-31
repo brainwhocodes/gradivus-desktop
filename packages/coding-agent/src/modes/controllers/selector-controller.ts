@@ -1,8 +1,10 @@
-import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
+import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
-import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
+import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
@@ -13,6 +15,7 @@ import {
 	saveWatchdogConfigFile,
 } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
+import { showGitOverlay } from "../../cli/git-tui";
 import {
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
@@ -43,18 +46,16 @@ import type { InteractiveModeContext } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
-	GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE,
-	installOAuthAccountSelectionFromSettings,
-} from "../../session/credential-pin";
-import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
 	foreignSessionSourceName,
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import type { SessionEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
+import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
@@ -71,7 +72,6 @@ import {
 } from "../../thinking";
 import {
 	isSearchProviderId,
-	setExcludedImageProviders,
 	setExcludedSearchProviders,
 	setImageProviderOrder,
 	setSearchProviderOrder,
@@ -81,7 +81,6 @@ import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask
 import { shortenPath } from "../../tools/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { copyToClipboard } from "../../utils/clipboard";
-import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
@@ -89,18 +88,12 @@ import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
 import { ExtensionDashboard } from "../components/extensions";
+import { listLiveToolRecords, liveToolRecordFromSession } from "../components/extensions/live-tool-session";
 import { HistorySearchComponent } from "../components/history-search";
 import { LoginDialogComponent } from "../components/login-dialog";
 import { LogoutAccountSelectorComponent } from "../components/logout-account-selector";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
-import {
-	loginOAuthAccount,
-	type OAuthAccountBlockedReason,
-	type OAuthAccountLoginDialogPort,
-	type OAuthAccountManagerActions,
-	removeOAuthAccountCredential,
-} from "../components/oauth-account-manager";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
@@ -115,6 +108,8 @@ import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
+
+const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -199,43 +194,6 @@ export class SelectorController {
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			};
-			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const accountActions: OAuthAccountManagerActions = {
-				login: (
-					provider: OAuthProviderInfo,
-					dialog: OAuthAccountLoginDialogPort,
-					blockedReason?: OAuthAccountBlockedReason,
-				) =>
-					loginOAuthAccount(
-						{
-							authStorage,
-							refreshProvider: (providerId, strategy) =>
-								this.ctx.session.modelRegistry.refreshProvider(providerId, strategy),
-						},
-						provider,
-						dialog,
-						blockedReason,
-					),
-				remove: (
-					storageProvider: string,
-					credentialId: number,
-					refreshProviderId: string,
-					blockedReason?: OAuthAccountBlockedReason,
-					afterRemoved?: () => void,
-				) =>
-					removeOAuthAccountCredential(
-						{
-							authStorage,
-							refreshProvider: (providerId, strategy) =>
-								this.ctx.session.modelRegistry.refreshProvider(providerId, strategy),
-						},
-						storageProvider,
-						credentialId,
-						refreshProviderId,
-						blockedReason,
-						afterRemoved,
-					),
-			};
 			const selector = new SettingsSelectorComponent(
 				{
 					availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
@@ -248,21 +206,7 @@ export class SelectorController {
 					model: this.ctx.session.model,
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
-					oauthAccounts: {
-						settings,
-						authStorage,
-						tui: this.ctx.ui,
-						sessionId: this.ctx.session.sessionId,
-						getLoginMethods: getOAuthProviders,
-						isStreaming: () => this.ctx.session.isStreaming,
-						installPolicy: () => installOAuthAccountSelectionFromSettings(settings, authStorage),
-						invalidate: () => {
-							this.ctx.statusLine.invalidate();
-							this.ctx.ui.invalidate();
-							this.ctx.ui.requestRender();
-						},
-						actions: accountActions,
-					},
+					composerPreviewStatus: this.ctx.statusLine,
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
@@ -285,14 +229,16 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							contextLine: settings.get("statusLine.contextLine"),
 							...previewSettings,
 						});
 						this.ctx.ui.requestRender();
 					},
 					getStatusLinePreview: () => {
-						// Return the rendered status line for inline preview
+						// The bar exactly as the active composer shape renders it (box top
+						// border, claude rule + chip, or the plain standalone bottom bar).
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
@@ -314,6 +260,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							contextLine: settings.get("statusLine.contextLine"),
 						});
 						this.ctx.ui.requestRender();
 					},
@@ -332,7 +279,7 @@ export class SelectorController {
 			// discovery walks), not the launch subdir — `getProjectDir()` is only cwd.
 			let projectDir = cwd;
 			try {
-				projectDir = (await repo.root(cwd)) ?? cwd;
+				projectDir = vcs.repo(cwd)?.root() ?? cwd;
 			} catch {
 				projectDir = cwd;
 			}
@@ -427,7 +374,18 @@ export class SelectorController {
 	 * Replaces /status with a unified view of all providers and extensions.
 	 */
 	async showExtensionsDashboard(): Promise<void> {
-		const dashboard = await ExtensionDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows);
+		const dashboard = await ExtensionDashboard.create({
+			cwd: getProjectDir(),
+			settings: this.ctx.settings,
+			terminalHeight: this.ctx.ui.terminal.rows,
+			mcpManager: this.ctx.mcpManager,
+			eventBus: this.ctx.eventBus,
+			toolSource: {
+				getLiveTool: name => liveToolRecordFromSession(this.ctx.session, name),
+				listLiveTools: () => listLiveToolRecords(this.ctx.session),
+			},
+			onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
+		});
 		// Fullscreen dashboard on the alternate screen (the /settings idiom): the
 		// overlay borrows the terminal's alt buffer and enables mouse tracking for
 		// its lifetime, leaving the transcript untouched underneath.
@@ -439,6 +397,7 @@ export class SelectorController {
 			fullscreen: true,
 		});
 		dashboard.onClose = () => {
+			dashboard.dispose();
 			overlay.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
@@ -446,6 +405,21 @@ export class SelectorController {
 		dashboard.onRequestRender = () => {
 			this.ctx.ui.requestRender();
 		};
+	}
+
+	/**
+	 * Fullscreen git UI on the alternate screen (the /models idiom): split
+	 * diff viewer, staging sidebar, and commit composer. Resolves focus back
+	 * to the editor when the user closes it.
+	 */
+	async showGitTui(revision?: string): Promise<void> {
+		try {
+			await showGitOverlay(this.ctx.ui, { cwd: getProjectDir(), revision });
+		} catch (error) {
+			this.ctx.showStatus(error instanceof Error ? error.message : String(error));
+		}
+		this.focusActiveEditorArea();
+		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -475,6 +449,7 @@ export class SelectorController {
 				modelRegistry: this.ctx.session.modelRegistry,
 				activeModelPattern,
 				defaultModelPattern,
+				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,
 			},
 			{ onCancel: () => done() },
 		);
@@ -503,6 +478,9 @@ export class SelectorController {
 			case "autoCompact":
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
+				break;
+			case "composer.shape":
+				this.ctx.syncComposerShape();
 				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);
@@ -553,6 +531,12 @@ export class SelectorController {
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
+			case "spelling.typoDetection":
+			case "spelling.autocomplete":
+			case "spelling.autocorrect":
+				this.ctx.syncEditorSpelling();
+				this.ctx.ui.requestRender();
+				break;
 
 			// Settings with UI side effects
 			case "display.hideToolActivity": {
@@ -568,7 +552,7 @@ export class SelectorController {
 				}
 				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
-				this.ctx.ui.resetDisplay();
+				this.ctx.ui.requestRender(true);
 				break;
 			}
 			case "terminal.showImages":
@@ -582,7 +566,7 @@ export class SelectorController {
 					}
 				}
 				if (!visible) this.ctx.ui.clearInlineImages();
-				this.ctx.ui.resetDisplay();
+				this.ctx.ui.requestRender(true);
 				break;
 			}
 			case "hideThinkingBlock":
@@ -592,10 +576,7 @@ export class SelectorController {
 						child.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 					}
 				}
-				// Full clear + replay so blocks frozen in committed scrollback on
-				// ED3-risk terminals retire their stale snapshots too (see
-				// InputController.toggleThinkingBlockVisibility).
-				this.ctx.ui.resetDisplay();
+				this.ctx.ui.requestRender(true);
 				break;
 			case "proseOnlyThinking":
 				this.ctx.proseOnlyThinking = value as boolean;
@@ -604,10 +585,10 @@ export class SelectorController {
 						child.setProseOnlyThinking(value as boolean);
 					}
 				}
-				this.ctx.ui.resetDisplay();
+				this.ctx.ui.requestRender(true);
 				break;
 			case "omitThinking":
-				this.ctx.session.setOmitThinking(value as boolean);
+				this.ctx.session.agent.hideThinkingSummary = value as boolean;
 				break;
 			case "display.cacheMissMarker":
 				// Rebuild re-runs the usage-based detection under the new setting so
@@ -629,14 +610,19 @@ export class SelectorController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();
 				break;
+			case "display.showTurnTime":
+				// Same as showTokenUsage: the prompt→yield delta lives in the same
+				// usage row, so toggling it must rebuild and retire committed rows.
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
 			case "tui.tight":
 				setTuiTight(value as boolean);
 				this.ctx.ui.invalidate();
 				this.ctx.ui.requestRender();
 				break;
-
-			case "tui.scrollbackRebuild":
-				this.ctx.ui.setScrollbackRebuild(value as boolean);
+			case "tui.resizeScrollback":
+				this.ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);
 				break;
 
 			case "tui.renderMermaid":
@@ -674,33 +660,33 @@ export class SelectorController {
 				break;
 			}
 			case "temperature": {
-				const temperature = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ temperature });
+				const temp = typeof value === "number" ? value : Number(value);
+				this.ctx.session.agent.temperature = temp >= 0 ? temp : undefined;
 				break;
 			}
 			case "topP": {
 				const topP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ topP });
+				this.ctx.session.agent.topP = topP >= 0 ? topP : undefined;
 				break;
 			}
 			case "topK": {
 				const topK = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ topK });
+				this.ctx.session.agent.topK = topK >= 0 ? topK : undefined;
 				break;
 			}
 			case "minP": {
 				const minP = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ minP });
+				this.ctx.session.agent.minP = minP >= 0 ? minP : undefined;
 				break;
 			}
 			case "presencePenalty": {
 				const presencePenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ presencePenalty });
+				this.ctx.session.agent.presencePenalty = presencePenalty >= 0 ? presencePenalty : undefined;
 				break;
 			}
 			case "repetitionPenalty": {
 				const repetitionPenalty = typeof value === "number" ? value : Number(value);
-				this.ctx.session.setSamplingParameters({ repetitionPenalty });
+				this.ctx.session.agent.repetitionPenalty = repetitionPenalty >= 0 ? repetitionPenalty : undefined;
 				break;
 			}
 			case "git.enabled":
@@ -740,12 +726,6 @@ export class SelectorController {
 				break;
 			}
 
-			case "providers.oauthAccountFailover":
-				installOAuthAccountSelectionFromSettings(settings, this.ctx.session.modelRegistry.authStorage);
-				this.ctx.statusLine.invalidate();
-				this.ctx.ui.invalidate();
-				this.ctx.ui.requestRender();
-				break;
 			// Provider settings - update runtime preferences
 			case "providers.webSearchOrder":
 				if (Array.isArray(value)) {
@@ -760,11 +740,6 @@ export class SelectorController {
 			case "providers.imageOrder":
 				if (Array.isArray(value)) {
 					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
-				}
-				break;
-			case "providers.imageExclude":
-				if (Array.isArray(value)) {
-					setExcludedImageProviders(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 
@@ -796,6 +771,11 @@ export class SelectorController {
 		const current = this.ctx.session.model;
 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
+		const currentSelector = current ? `${current.provider}/${current.id}` : undefined;
+		// Preselect the effective Task model in task mode: the configured override,
+		// else the session model (the bundled task agent inherits it by default).
+		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
+		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
 		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
 		const done = () => {
@@ -864,11 +844,24 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onPickTask: (_model, selector) => {
+					// Session-only: layer the Task override onto the runtime settings
+					// layer so it is never persisted, mirroring the session-model pick.
+					this.ctx.settings.override("task.agentModelOverrides", {
+						...this.ctx.settings.get("task.agentModelOverrides"),
+						task: selector,
+					});
+					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
+					done();
+				},
 				onCancel: done,
 			},
 			{
 				currentContextTokens,
-				currentSelector: current ? `${current.provider}/${current.id}` : undefined,
+				currentSelector,
+				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
+				taskModeKeyLabel: this.ctx.keybindings.getDisplayString("app.model.selectTemporary") || "alt+p",
+				taskSelector,
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
@@ -914,17 +907,16 @@ export class SelectorController {
 					const releaseDefaultMutation = role === "default" ? await this.#acquireDefaultRoleMutation() : undefined;
 					const configuredStorage = this.ctx.settings.get("modelRoleStorage");
 					const targetScope = configuredStorage === "project" ? (scope ?? "project") : "global";
-					// `auto` is session-global: never baked into a per-role model value
-					// (it can't round-trip through `model:<level>`). Apply it to the session
-					// separately and persist via `defaultThinkingLevel`.
-					const isAuto = thinkingLevel === AUTO_THINKING;
-					const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 					const selectorValue = selector ?? `${model.provider}/${model.id}`;
 					const scopeLabel =
 						configuredStorage === "project" ? `${targetScope === "project" ? "Project" : "Global"} ` : "";
 					const defaultStatusLabel = configuredStorage === "project" ? `${scopeLabel}default` : "Default";
 					try {
 						if (role === "default") {
+							// `auto` on the default role configures the active session. Other roles
+							// persist an explicit `:auto` suffix and must not mutate the current model.
+							const isAuto = thinkingLevel === AUTO_THINKING;
+							const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 							const effectiveProvenance = this.ctx.settings.getModelRoleProvenance("default");
 							const shadowedGlobal =
 								configuredStorage === "project" &&
@@ -977,14 +969,11 @@ export class SelectorController {
 							this.ctx.showStatus(`${defaultStatusLabel} model: ${selector ?? model.id}`);
 						} else {
 							// Other roles (smol, slow, custom): update settings, not the current model.
-							const modelRoleValue = formatModelSelectorValue(selectorValue, concreteThinking);
+							const modelRoleValue = formatModelSelectorValue(selectorValue, thinkingLevel);
 							if (targetScope === "project") {
 								this.ctx.settings.setProjectModelRole(role, modelRoleValue);
 							} else {
 								this.ctx.settings.setModelRole(role, modelRoleValue);
-							}
-							if (isAuto) {
-								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
 							}
 							const roleInfo = getRoleInfo(role, settings);
 							this.ctx.showStatus(
@@ -1227,6 +1216,15 @@ export class SelectorController {
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map(m => ({ id: m.entryId, text: m.text })),
 				async entryId => {
+					// Branching rewinds to a strict prefix of the rendered transcript:
+					// the selected user message and everything after it are dropped.
+					// Capture the boundary before branch() so the tail can be dropped
+					// in place when it never reached native scrollback.
+					const branchEntry = this.ctx.sessionManager.getEntry(entryId);
+					const branchMessage =
+						branchEntry?.type === "message" && branchEntry.message.role === "user"
+							? branchEntry.message
+							: undefined;
 					const result = await this.ctx.session.branch(entryId);
 					if (result.cancelled) {
 						// Hook cancelled the branch
@@ -1235,7 +1233,18 @@ export class SelectorController {
 						return;
 					}
 
-					await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+					// A leaf that moved past the branch point (e.g. a session_branch
+					// hook persisted entries) invalidates the prefix assumption.
+					// Root branches (parentId null) start a fresh session file and may
+					// leave pre-message components stale — always replay those.
+					const fastRewind =
+						branchMessage !== undefined &&
+						branchEntry?.parentId != null &&
+						this.ctx.sessionManager.getLeafId() === branchEntry.parentId &&
+						this.ctx.truncateTranscriptFromMessage(branchMessage);
+					if (!fastRewind) {
+						await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+					}
 					this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
 					done();
 					this.ctx.showStatus("Branched to new session");
@@ -1315,6 +1324,12 @@ export class SelectorController {
 
 					// Ask about summarization
 					done(); // Close selector first
+
+					// Pure-rewind probe (before navigation mutates the leaf): when the
+					// target sits on the current leaf's path and no summary is added,
+					// the post-navigation transcript is a strict prefix of the rendered
+					// one and the tail can be dropped in place.
+					const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
 
 					// Loop until user makes a complete choice or cancels to tree.
 					// Shift+Enter in the tree selector pre-answers "Summarize" and
@@ -1408,7 +1423,16 @@ export class SelectorController {
 
 						// Update UI — rebuild the display transcript for the new leaf (the
 						// context from navigateTree is the LLM context, not the transcript).
-						await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+						const fastRewind =
+							treeRewind !== undefined &&
+							!wantsSummary &&
+							!result.summaryEntry &&
+							!result.askReanswerCommitted &&
+							this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
+							this.ctx.truncateTranscriptFromMessage(treeRewind.message);
+						if (!fastRewind) {
+							await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+						}
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
 							this.ctx.editor.setDraft(result.editorText, result.editorImages);
@@ -1445,6 +1469,47 @@ export class SelectorController {
 			);
 			return { component: selector, focus: selector };
 		});
+	}
+
+	/**
+	 * First rendered message a pure tree rewind drops, plus the leaf id the
+	 * navigation is expected to land on. `targetId` must sit on the current
+	 * leaf's path; a user-message target rewinds PAST itself (navigateTree
+	 * moves the leaf to its parent and hands the text back as an editor
+	 * draft), every other target keeps the target as the new leaf. Returns
+	 * undefined when the navigation is not a pure rewind or the boundary entry
+	 * cannot anchor an in-place truncation (non-message boundary; custom
+	 * messages render unkeyed components).
+	 */
+	#treeRewindBoundary(
+		targetId: string,
+		leafId: string | null,
+	): { message: AgentMessage; expectedLeafId: string } | undefined {
+		if (!leafId) return undefined;
+		const target = this.ctx.sessionManager.getEntry(targetId);
+		if (!target) return undefined;
+		const rewindsPastTarget = target.type === "message" && target.message.role === "user";
+		if (!rewindsPastTarget && target.type === "custom_message") return undefined;
+		// Walk leaf → root: proves the target is on the current path and finds
+		// the first entry the rewind drops.
+		let firstDropped: SessionEntry | undefined;
+		let cursor = this.ctx.sessionManager.getEntry(leafId);
+		while (cursor && cursor.id !== targetId) {
+			firstDropped = cursor;
+			cursor = cursor.parentId ? this.ctx.sessionManager.getEntry(cursor.parentId) : undefined;
+		}
+		if (!cursor) return undefined;
+		const boundary = rewindsPastTarget ? target : firstDropped;
+		if (boundary?.type !== "message") return undefined;
+		// A root rewind (expected leaf null) empties the transcript but may leave
+		// components rendered before the first message stale — take the
+		// destructive replay instead.
+		const expectedLeafId = rewindsPastTarget ? target.parentId : targetId;
+		if (expectedLeafId === null) return undefined;
+		return {
+			message: boundary.message,
+			expectedLeafId,
+		};
 	}
 
 	/**
@@ -1541,10 +1606,11 @@ export class SelectorController {
 				showCwd: true,
 			};
 		} else {
-			sessions = await SessionManager.list(
-				this.ctx.sessionManager.getCwd(),
-				this.ctx.sessionManager.getSessionDir(),
-			);
+			const [loadedSessions, pinnedIds] = await Promise.all([
+				SessionManager.list(this.ctx.sessionManager.getCwd(), this.ctx.sessionManager.getSessionDir()),
+				loadPinnedSessionIds(),
+			]);
+			sessions = loadedSessions;
 			const historyStorage = this.ctx.historyStorage;
 			const historyMatcher = historyStorage
 				? (query: string) => historyStorage.matchingSessionIds(query)
@@ -1568,6 +1634,7 @@ export class SelectorController {
 				},
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAll(),
+				pinnedIds,
 			};
 		}
 
@@ -1658,7 +1725,7 @@ export class SelectorController {
 		const previousCwd = this.ctx.sessionManager.getCwd();
 		// Flush pending settings writes before switching sessions so a save
 		// failure leaves the session, process project dir, and Settings in the
-		// source scope — the switch below mutates the SessionManager cwd.
+		// source scope.
 		if (!options?.settingsFlushed) {
 			try {
 				await this.ctx.settings.flush();
@@ -1667,17 +1734,21 @@ export class SelectorController {
 				return false;
 			}
 		}
-		// Switch session via AgentSession (emits hook and tool session events). The
-		// SessionManager adopts the resumed session's own cwd when it differs.
-		await this.ctx.session.switchSession(sessionPath);
+		// AgentSession owns the transaction. It restores the complete source state
+		// if applying the target project's cwd fails, including in-memory sessions.
+		if (
+			(await this.ctx.session.switchSession(sessionPath, {
+				onCwdChange: async (newCwd, sourceCwd) => {
+					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
+					return this.ctx.applyCwdChange(newCwd);
+				},
+			})) === false
+		) {
+			return false;
+		}
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
-		if (movedProject) {
-			// Resumed a session from another project: re-point the process and every
-			// cwd-derived cache at it before rendering.
-			await this.ctx.applyCwdChange(newCwd);
-		}
 		this.#refreshSessionTerminalTitle();
 		this.ctx.updateEditorBorderColor();
 
@@ -1735,11 +1806,7 @@ export class SelectorController {
 	 */
 	async #handleOAuthLogin(providerId: string): Promise<boolean> {
 		this.ctx.showStatus(`Logging in to ${providerId}…`);
-		const loginMethod: OAuthProviderInfo = getOAuthProviders().find(provider => provider.id === providerId) ?? {
-			id: providerId,
-			name: providerId,
-			available: true,
-		};
+		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		let restored = false;
 		const restoreEditor = () => {
 			if (restored) return;
@@ -1760,28 +1827,34 @@ export class SelectorController {
 		this.ctx.ui.setFocus(dialog);
 		this.ctx.ui.requestRender();
 		try {
-			const result = await loginOAuthAccount(
-				{
-					authStorage: this.ctx.session.modelRegistry.authStorage,
-					refreshProvider: (refreshProviderId, strategy) =>
-						this.ctx.session.modelRegistry.refreshProvider(refreshProviderId, strategy),
+			const identity = await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
+				signal: dialog.signal,
+				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
+					// The dialog renders the full URL (SSH-safe copy target) and
+					// opens the browser best-effort.
+					dialog.showAuth(info.url, info.instructions, info.launchUrl);
 				},
-				loginMethod,
-				dialog,
-			);
-			if (result.status === "cancelled") return false;
-			if (result.status === "blocked") {
-				this.ctx.showError(`Login failed: ${result.reason}`);
-				return false;
-			}
-			if (result.status === "error") {
-				this.ctx.showError(
-					`Login failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`,
-				);
-				return false;
-			}
-
-			const identity = result.identity;
+				onPrompt: (prompt: { message: string; placeholder?: string }) =>
+					dialog.showPrompt(prompt.message, prompt.placeholder),
+				onProgress: (message: string) => {
+					dialog.showProgress(message);
+				},
+				// Paste-code providers (e.g. Codex) may need the user to paste the
+				// fallback redirect URL when the loopback callback can't complete
+				// (headless/remote/Windows). Mount a focused input in the dialog so
+				// the paste lands somewhere the OAuth flow consumes — the hidden
+				// editor's `/login <url>` path is unreachable while the dialog holds
+				// focus (#5339).
+				onManualCodeInput: useManualInput ? () => dialog.showManualInput(MANUAL_LOGIN_PROMPT) : undefined,
+			});
+			// Scope the post-login refresh to the just-authenticated provider with an
+			// `online` strategy: the default all-provider `online-if-uncached` reuses
+			// a fresh authoritative cache row (e.g. an empty result fetched before
+			// login), so newly persisted credentials would never re-run discovery and
+			// models would stay unavailable in-session (#5780). Unrelated providers
+			// are left untouched. `refreshProvider` swallows discovery failures, so
+			// awaiting cannot reject the login.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -1800,7 +1873,11 @@ export class SelectorController {
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
-			if (dialog.signal.aborted) return false;
+			if (dialog.signal.aborted) {
+				// User-cancelled: the dialog already restored the editor and
+				// surfaced "Login cancelled".
+				return false;
+			}
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {
@@ -1811,28 +1888,18 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const loginMethod = getOAuthProviders().find(candidate => candidate.id === providerId);
-			const storageProvider = loginMethod?.storeCredentialsAs ?? providerId;
-			const result = await removeOAuthAccountCredential(
-				{
-					authStorage,
-					refreshProvider: (refreshProviderId, strategy) =>
-						this.ctx.session.modelRegistry.refreshProvider(refreshProviderId, strategy),
-				},
-				storageProvider,
-				account.credentialId,
-				providerId,
-			);
-			if (result.status === "missing") {
+			const removed = await authStorage.removeCredential(providerId, account.credentialId);
+			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
 				return;
 			}
-			if (result.status === "blocked") {
-				this.ctx.showError(`Logout failed: ${result.reason}`);
-				return;
-			}
-			if (result.status === "error") throw result.error;
 
+			// Provider-scoped online refresh so the removed credential's stale
+			// endpoint/deployment models are invalidated deterministically; the
+			// default all-provider `online-if-uncached` would reuse the fresh
+			// authoritative cache row and keep showing models the credential
+			// unlocked (#5780). Other providers are left untouched.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
@@ -1845,7 +1912,7 @@ export class SelectorController {
 				),
 			);
 			block.addChild(new Text(theme.fg("dim", `Credential removed from ${getAgentDbPath()}`), 1, 0));
-			const remainingSource = authStorage.describeCredentialSource(storageProvider, this.ctx.session.sessionId);
+			const remainingSource = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
 			if (remainingSource) {
 				block.addChild(
 					new Text(theme.fg("warning", `${providerId} is still authenticated via ${remainingSource}`), 1, 0),
@@ -1868,13 +1935,12 @@ export class SelectorController {
 			return;
 		}
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
-		const storageProvider = provider?.storeCredentialsAs ?? providerId;
-		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(storageProvider), {
-			activeIdentity: authStorage.getOAuthAccountIdentity(storageProvider, this.ctx.session.sessionId),
-			activeApiKey: authStorage.getCredentialOrigin(storageProvider)?.kind === "api_key",
+		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
+			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
+			activeApiKey: authStorage.getCredentialOrigin(providerId)?.kind === "api_key",
 		});
 		if (accounts.length === 0) {
-			const source = authStorage.describeCredentialSource(storageProvider, this.ctx.session.sessionId);
+			const source = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
 			const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
 			this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
 			return;
@@ -1911,7 +1977,7 @@ export class SelectorController {
 			await this.#refreshOAuthProviderAuthState();
 			const oauthProviders = getOAuthProviders();
 			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.has(provider.storeCredentialsAs ?? provider.id),
+				this.ctx.session.modelRegistry.authStorage.has(provider.id),
 			);
 			if (loggedInProviders.length === 0) {
 				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
@@ -1959,10 +2025,6 @@ export class SelectorController {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
 			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
-			return;
-		}
-		if (session.model && session.modelRegistry.authStorage.getOAuthAccountSelection(session.model.provider)) {
-			this.ctx.showStatus(GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE);
 			return;
 		}
 		this.ctx.showStatus("Loading provider accounts…", { dim: true });

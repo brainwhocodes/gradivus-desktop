@@ -5,7 +5,6 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
@@ -95,9 +94,13 @@ function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
 	return fromEntries.length > 0 ? fromEntries : runtime.session.getTodoPhases();
 }
 
-function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
-	runtime.session.setTodoPhases(phases);
-	runtime.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+function commitTodos(
+	runtime: SlashCommandRuntime,
+	phases: TodoPhase[],
+	action = "/todo",
+	options: { removed?: boolean } = {},
+): void {
+	runtime.session.commitUserTodoEdit(phases, runtime.session.getTodoRevision(), action, options);
 }
 
 const TODO_HELP_TEXT = [
@@ -105,6 +108,8 @@ const TODO_HELP_TEXT = [
 	"  /todo                              Show current todos",
 	"  /todo edit                         (TUI only) open in $EDITOR",
 	"  /todo copy                         Print todos as Markdown",
+	"  /todo expand                       (TUI only) expand the sticky HUD",
+	"  /todo collapse                     (TUI only) collapse the sticky HUD",
 	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
 	"  /todo import [<path>]              Replace todos from file (default: TODO.md)",
 	"  /todo append [<phase>] <task...>   Append a task",
@@ -162,24 +167,16 @@ async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRu
 	const current = currentPhases(runtime);
 	const phaseName = tokens.length === 1 ? undefined : tokens[0];
 	const content = tokens.length === 1 ? tokens[0]! : tokens.slice(1).join(" ");
-	const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
-	let targetPhase: TodoPhase;
-
-	if (phaseName) {
-		const existing = findPhaseFuzzy(next, phaseName);
-		targetPhase = existing ?? { name: titleCaseWords(phaseName), tasks: [] };
-		if (!existing) next.push(targetPhase);
-	} else if (next.length > 0) {
-		targetPhase = next[next.length - 1]!;
-	} else {
-		targetPhase = { name: "Todos", tasks: [] };
-		next.push(targetPhase);
-	}
-
+	const targetPhaseName = phaseName
+		? (findPhaseFuzzy(current, phaseName)?.name ?? titleCaseWords(phaseName))
+		: (current.at(-1)?.name ?? "Todos");
 	const finalContent = titleCaseSentence(content);
-	targetPhase.tasks.push({ content: finalContent, status: "pending" });
-	commitTodos(runtime, next);
-	await runtime.output(`Appended to ${targetPhase.name}: ${finalContent}`);
+	const { phases, errors } = applyOpsToPhases(current, [
+		{ op: "append", phase: targetPhaseName, items: [finalContent] },
+	]);
+	if (errors.length > 0) return usage(errors.join("; "), runtime);
+	commitTodos(runtime, phases, `/todo append → ${targetPhaseName}`);
+	await runtime.output(`Appended to ${targetPhaseName}: ${finalContent}`);
 	return commandConsumed();
 }
 
@@ -204,7 +201,7 @@ async function handleTodoMutationCommand(
 	const trimmedArg = restArgs.trim();
 	if (!trimmedArg) {
 		if (verb === "rm") {
-			commitTodos(runtime, []);
+			commitTodos(runtime, [], "/todo rm", { removed: true });
 			await runtime.output("Cleared all todos.");
 			return commandConsumed();
 		}
@@ -217,7 +214,7 @@ async function handleTodoMutationCommand(
 	const taskHit = findTaskFuzzy(current, trimmedArg);
 	if (taskHit) {
 		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }]);
-		commitTodos(runtime, phases);
+		commitTodos(runtime, phases, `/todo ${verb}`, { removed: verb === "rm" });
 		const label = verb === "done" ? "Marked completed" : verb === "drop" ? "Marked abandoned" : "Removed";
 		await runtime.output(`${label}: ${taskHit.task.content}`);
 		return commandConsumed();
@@ -226,7 +223,7 @@ async function handleTodoMutationCommand(
 	const phaseHit = findPhaseFuzzy(current, trimmedArg);
 	if (phaseHit) {
 		const { phases } = applyOpsToPhases(current, [{ op: verb, phase: phaseHit.name }]);
-		commitTodos(runtime, phases);
+		commitTodos(runtime, phases, `/todo ${verb}`, { removed: verb === "rm" });
 		const message =
 			verb === "done"
 				? `Marked phase ${phaseHit.name} completed.`
@@ -275,6 +272,9 @@ export async function handleTodoAcp(
 				"/todo edit requires the TUI editor; use /todo export then /todo import for non-interactive edits.",
 				runtime,
 			);
+		case "expand":
+		case "collapse":
+			return usage(`/todo ${verb} controls the interactive HUD and is unavailable in this mode.`, runtime);
 		case "help":
 		case "?":
 			await runtime.output(TODO_HELP_TEXT);

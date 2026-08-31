@@ -11,7 +11,7 @@ const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform")
 // renderer. These exercise the seam VirtualTerminal cannot model: the OS channel
 // (SIGWINCH) and the DEC 2048 in-band channel disagreeing. The observable
 // contract is `probe.last` — the width the transcript actually reflowed to.
-describe("ProcessTerminal geometry reflow through the renderer", () => {
+describe.skipIf(process.platform === "win32")("ProcessTerminal geometry reflow through the renderer", () => {
 	let harness: ProcessTerminalRenderHarness | undefined;
 
 	afterEach(() => {

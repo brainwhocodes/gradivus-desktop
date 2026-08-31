@@ -1,12 +1,16 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	allTodoLeaves,
+	isTodoContainer,
 	markdownToPhases,
 	nextActionableTask,
+	normalizeTodoPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 	selectCollapsedTodos,
@@ -15,7 +19,9 @@ import {
 	type TodoItem,
 	type TodoPhase,
 	TodoTool,
+	todoLeafTasks,
 	todoMatchesAnyDescription,
+	todoTaskDepth,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -37,6 +43,168 @@ function createSession(initialPhases: TodoPhase[] = []): ToolSession {
 
 beforeAll(async () => {
 	await initTheme();
+});
+
+describe("TodoTool hierarchy", () => {
+	it("normalizes legacy flat entries deterministically without mutating persisted input", () => {
+		const legacy: TodoPhase[] = [
+			{
+				name: "Legacy",
+				tasks: [
+					{ content: "first", status: "pending" },
+					{ content: "second", status: "pending" },
+				],
+			},
+		];
+		const before = JSON.stringify(legacy);
+		const first = normalizeTodoPhases(legacy);
+		const second = normalizeTodoPhases(legacy);
+
+		expect(JSON.stringify(legacy)).toBe(before);
+		expect(first.map(phase => phase.id)).toEqual(["phase-legacy-0"]);
+		expect(first[0]?.tasks.map(task => task.id)).toEqual(["todo-legacy-0-0", "todo-legacy-0-1"]);
+		expect(first).toEqual(second);
+		expect(first[0]?.tasks.map(task => task.status)).toEqual(["in_progress", "pending"]);
+	});
+
+	it("initializes nested preorder and derives container status from leaf work", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("nested-init", {
+			op: "init",
+			list: [
+				{
+					phase: "Build",
+					items: [
+						"parent",
+						{ content: "child", parent: "parent" },
+						{ content: "grandchild", parent: "child" },
+						"sibling",
+					],
+				},
+			],
+		});
+		const phase = result.details!.phases[0]!;
+		expect(phase.tasks.map(task => task.content)).toEqual(["parent", "child", "grandchild", "sibling"]);
+		expect(phase.tasks.map(task => todoTaskDepth(phase, task))).toEqual([0, 1, 2, 0]);
+		expect(phase.tasks.map(task => task.status)).toEqual(["in_progress", "in_progress", "in_progress", "pending"]);
+		expect(todoLeafTasks(phase).map(task => task.content)).toEqual(["grandchild", "sibling"]);
+		expect(isTodoContainer(phase, phase.tasks[0]!)).toBe(true);
+		expect(new Set(phase.tasks.map(task => task.id)).size).toBe(4);
+	});
+
+	it("rejects parents that do not precede their child", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("bad-parent-order", {
+			op: "init",
+			items: [{ content: "child", parent: "parent" }, "parent"],
+		});
+		expect(result.isError).toBe(true);
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("must appear earlier"),
+		});
+		expect(result.details?.phases).toEqual([]);
+	});
+
+	it("transfers active work into the first appended child and reopens closed parents", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("init", { op: "init", items: ["parent"] });
+		const child = await tool.execute("append", {
+			op: "append",
+			phase: "Tasks",
+			items: [{ content: "child", parent: "parent" }],
+		});
+		expect(child.details!.phases[0]!.tasks.map(task => task.status)).toEqual(["in_progress", "in_progress"]);
+		const completed = await tool.execute("done-parent", { op: "done", task: "parent" });
+		expect(completed.details?.completedTasks).toEqual([{ phase: "Tasks", content: "child" }]);
+		const reopened = await tool.execute("append-grandchild", {
+			op: "append",
+			phase: "Tasks",
+			items: [{ content: "grandchild", parent: "child" }],
+		});
+		expect(reopened.details!.phases[0]!.tasks.map(task => task.status)).toEqual([
+			"in_progress",
+			"in_progress",
+			"in_progress",
+		]);
+	});
+
+	it("moves subtrees across phases without changing IDs and rejects cycles", async () => {
+		const tool = new TodoTool(createSession());
+		const initialized = await tool.execute("init", {
+			op: "init",
+			list: [
+				{ phase: "A", items: ["parent", { content: "child", parent: "parent" }, "other"] },
+				{ phase: "B", items: ["target"] },
+			],
+		});
+		const original = initialized.details!.phases[0]!.tasks.slice(0, 2).map(task => task.id);
+		const moved = await tool.execute("move", { op: "move", task: "parent", phase: "B", before: "target" });
+		expect(moved.isError).toBeUndefined();
+		expect(moved.details!.phases[0]!.tasks.map(task => task.content)).toEqual(["other"]);
+		expect(moved.details!.phases[1]!.tasks.map(task => task.content)).toEqual(["parent", "child", "target"]);
+		expect(moved.details!.phases[1]!.tasks.slice(0, 2).map(task => task.id)).toEqual(original);
+
+		const cycle = await tool.execute("cycle", { op: "move", task: "parent", phase: "B", parent: "child" });
+		expect(cycle.isError).toBe(true);
+		expect(cycle.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("own subtree") });
+		expect(cycle.details!.phases).toEqual(moved.details!.phases);
+		const nonSibling = await tool.execute("non-sibling", {
+			op: "move",
+			task: "child",
+			phase: "B",
+			parent: "parent",
+			before: "target",
+		});
+		expect(nonSibling.isError).toBe(true);
+		expect(nonSibling.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("does not share"),
+		});
+	});
+
+	it("cascades container actions over leaves and converts a childless blocked container to pending", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("init", {
+			op: "init",
+			items: ["parent", { content: "child", parent: "parent" }, "other"],
+		});
+		const blocked = await tool.execute("block", { op: "block", task: "parent", reason: "external" });
+		const blockedPhase = blocked.details!.phases[0]!;
+		expect(blockedPhase.tasks.map(task => task.status)).toEqual(["blocked", "blocked", "in_progress"]);
+		expect(blockedPhase.tasks[0]?.blocker).toBeUndefined();
+		expect(blockedPhase.tasks[1]?.blocker).toBe("external");
+		expect(allTodoLeaves(blocked.details!.phases).map(task => task.content)).toEqual(["child", "other"]);
+
+		const removed = await tool.execute("remove-child", { op: "rm", task: "child" });
+		const tasks = removed.details!.phases[0]!.tasks;
+		expect(tasks.map(task => task.content)).toEqual(["parent", "other"]);
+		expect(tasks.map(task => task.status)).toEqual(["pending", "in_progress"]);
+		expect(tasks[0]?.blocker).toBeUndefined();
+	});
+
+	it("round-trips nested Markdown and rejects an indentation jump", () => {
+		const phases = normalizeTodoPhases([
+			{
+				name: "Nested",
+				tasks: [
+					{ content: "parent", status: "pending" },
+					{ content: "child", status: "pending", parentId: "todo-legacy-0-0" },
+					{ content: "grandchild", status: "blocked", blocker: "wait", parentId: "todo-legacy-0-1" },
+				],
+			},
+		]);
+		const markdown = phasesToMarkdown(phases);
+		expect(markdown).toContain("  - [");
+		expect(markdown).toContain("    - [!] grandchild <!-- blocker: wait -->");
+		const parsed = markdownToPhases(markdown);
+		expect(parsed.errors).toEqual([]);
+		expect(parsed.phases[0]?.tasks.map(task => todoTaskDepth(parsed.phases[0]!, task))).toEqual([0, 1, 2]);
+		expect(parsed.phases[0]?.tasks[2]?.blocker).toBe("wait");
+
+		const jumped = markdownToPhases("# Bad\n- [ ] root\n    - [ ] child\n- [ ] sibling\n        - [ ] jump");
+		expect(jumped.errors).toContain("Line 5: indentation jumps to an unseen deeper level");
+	});
 });
 
 describe("resolveTodoMarkdownPath", () => {
@@ -310,6 +478,21 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
+		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
+		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
+		// than error out and drop the user's edits (issue #9188).
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const { phases, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const tasks = phases[0]?.tasks ?? [];
+		expect(tasks).toMatchObject([
+			{ content: "first", status: "completed" },
+			{ content: "second", status: "pending" },
+			{ content: "third", status: "in_progress" },
+		]);
+	});
+
 	it("normalizes a multi-line blocker reason so the markdown round-trip survives", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });
@@ -423,6 +606,18 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
 		expect(result.isError).toBeUndefined();
+	});
+});
+
+describe("TodoTool provider schema", () => {
+	it("advertises items for single-phase init and append", () => {
+		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
+			properties: {
+				items: {
+					description: "tasks for single-phase init or append",
+				},
+			},
+		});
 	});
 });
 

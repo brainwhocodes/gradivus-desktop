@@ -36,6 +36,8 @@ interface BaseSettingDef {
 	path: SettingPath;
 	label: string;
 	description: string;
+	/** Risk note shown in warning styling; set for settings that can get the user flagged or banned. */
+	warning?: string;
 	tab: SettingTab;
 	/** Section within the tab; items are ordered by TAB_GROUPS[tab] and rendered under a heading row. */
 	group?: string;
@@ -99,6 +101,7 @@ export type SettingDef =
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONDITIONS: Record<string, () => boolean> = {
+	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	advisorEnabled: () => {
 		try {
@@ -149,6 +152,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	unexpectedStopSmart: () => {
+		try {
+			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -167,7 +177,15 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+	const base = {
+		path,
+		label: ui.label,
+		description: ui.description,
+		warning: ui.warning,
+		tab: ui.tab,
+		group: ui.group,
+		condition,
+	};
 
 	if (path === "providers.oauthAccountLocks") {
 		return { ...base, type: "oauthAccounts" };

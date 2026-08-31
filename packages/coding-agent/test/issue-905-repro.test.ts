@@ -30,6 +30,7 @@ let shutdownExtPath: string;
 let shutdownPath: string;
 
 beforeAll(async () => {
+	if (process.platform === "win32") return;
 	tmp = await TempDir.create("@issue-905-");
 	extPath = tmp.join("ext.ts");
 	dbPath = tmp.join("auth.db");
@@ -114,184 +115,199 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+	if (process.platform === "win32") return;
 	await Bun.sleep(0);
 	await tmp.remove();
 });
 
-test("omp models surfaces extension-registered providers (issue #905)", async () => {
-	const authStorage = await AuthStorage.create(dbPath);
-	try {
-		const modelRegistry = new ModelRegistry(authStorage);
-
-		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
-		process.stdout.write = ((chunk: string | Uint8Array) => {
-			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-			return true;
-		}) as typeof process.stdout.write;
-
+test.skipIf(process.platform === "win32")(
+	"omp models surfaces extension-registered providers (issue #905)",
+	async () => {
+		const authStorage = await AuthStorage.create(dbPath);
 		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				additionalExtensionPaths: [extPath],
-				disableExtensionDiscovery: true,
-			});
+			const modelRegistry = new ModelRegistry(authStorage);
+
+			const captured: string[] = [];
+			const originalWrite = process.stdout.write.bind(process.stdout);
+			process.stdout.write = ((chunk: string | Uint8Array) => {
+				captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+				return true;
+			}) as typeof process.stdout.write;
+
+			try {
+				await runModelsListing({
+					modelRegistry,
+					cwd: tmp.path(),
+					action: "ls",
+					additionalExtensionPaths: [extPath],
+					disableExtensionDiscovery: true,
+				});
+			} finally {
+				process.stdout.write = originalWrite;
+			}
+
+			const output = captured.join("");
+			expect(output).toContain("test-gw");
+			expect(output).toContain("test-model");
 		} finally {
-			process.stdout.write = originalWrite;
+			authStorage.close();
 		}
+	},
+);
 
-		const output = captured.join("");
-		expect(output).toContain("test-gw");
-		expect(output).toContain("test-model");
-	} finally {
-		authStorage.close();
-	}
-});
+test.skipIf(process.platform === "win32")(
+	"omp models installs persisted OAuth routing before its first registry refresh",
+	async () => {
+		const originalAgentDir = getAgentDir();
+		const originalProjectDir = getProjectDir();
+		const agentDir = tmp.join("models-policy-agent");
+		const projectDir = tmp.join("models-policy-project");
+		const selectedIdentityHash = credentialPinHash("anthropic", {
+			accountId: "models-account-b",
+			email: "models-b@example.com",
+		});
+		if (!selectedIdentityHash) throw new Error("expected a stable models account identity");
 
-test("omp models installs persisted OAuth routing before its first registry refresh", async () => {
-	const originalAgentDir = getAgentDir();
-	const originalProjectDir = getProjectDir();
-	const agentDir = tmp.join("models-policy-agent");
-	const projectDir = tmp.join("models-policy-project");
-	const selectedIdentityHash = credentialPinHash("anthropic", {
-		accountId: "models-account-b",
-		email: "models-b@example.com",
-	});
-	if (!selectedIdentityHash) throw new Error("expected a stable models account identity");
-
-	await fs.mkdir(agentDir, { recursive: true });
-	await fs.mkdir(projectDir, { recursive: true });
-	await fs.mkdir(`${agentDir}/data`, { recursive: true });
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath(agentDir));
-	store.saveOAuth("anthropic", {
-		access: "sk-ant-oat-models-a",
-		refresh: "refresh-models-a",
-		expires: Date.now() + 3_600_000,
-		accountId: "models-account-a",
-		email: "models-a@example.com",
-	});
-	store.saveOAuth("anthropic", {
-		access: "sk-ant-oat-models-b",
-		refresh: "refresh-models-b",
-		expires: Date.now() + 3_600_000,
-		accountId: "models-account-b",
-		email: "models-b@example.com",
-	});
-	const selectedRow = store
-		.listAuthCredentials("anthropic")
-		.find(row => row.credential.type === "oauth" && row.credential.email === "models-b@example.com");
-	if (!selectedRow) throw new Error("expected the selected models OAuth row");
-	store.close();
-	await Bun.write(
-		`${agentDir}/config.yml`,
-		`providers:
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(projectDir, { recursive: true });
+		await fs.mkdir(`${agentDir}/data`, { recursive: true });
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath(agentDir));
+		store.saveOAuth("anthropic", {
+			access: "sk-ant-oat-models-a",
+			refresh: "refresh-models-a",
+			expires: Date.now() + 3_600_000,
+			accountId: "models-account-a",
+			email: "models-a@example.com",
+		});
+		store.saveOAuth("anthropic", {
+			access: "sk-ant-oat-models-b",
+			refresh: "refresh-models-b",
+			expires: Date.now() + 3_600_000,
+			accountId: "models-account-b",
+			email: "models-b@example.com",
+		});
+		const selectedRow = store
+			.listAuthCredentials("anthropic")
+			.find(row => row.credential.type === "oauth" && row.credential.email === "models-b@example.com");
+		if (!selectedRow) throw new Error("expected the selected models OAuth row");
+		store.close();
+		await Bun.write(
+			`${agentDir}/config.yml`,
+			`providers:
   oauthAccountLocks:
     anthropic: ${selectedIdentityHash}
   oauthAccountFailover: true
 `,
-	);
+		);
 
-	const stopAfterFirstRefresh = new Error("models-policy-installed-before-first-refresh");
-	let observedIdentityHash: string | undefined;
-	let observedCredentialId: number | undefined;
-	let observedAvailable: boolean | undefined;
-	let observedFailover: boolean | undefined;
-	let observedAccessToken: string | undefined;
-	const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async function (
-		this: ModelRegistry,
-	): Promise<void> {
-		const selection = this.authStorage.getOAuthAccountSelection("anthropic");
-		observedIdentityHash = selection?.identityHash;
-		observedCredentialId = selection?.credentialId;
-		observedAvailable = selection?.available;
-		observedFailover = selection?.allowSiblingFailover;
-		observedAccessToken = (await this.authStorage.getOAuthAccess("anthropic"))?.accessToken;
-		throw stopAfterFirstRefresh;
-	});
-
-	resetSettingsForTest();
-	setAgentDir(agentDir);
-	setProjectDir(projectDir);
-	try {
-		await expect(
-			runModelsCommand({
-				action: "ls",
-				flags: { noExtensions: true },
-			}),
-		).rejects.toBe(stopAfterFirstRefresh);
-		expect(observedIdentityHash).toBe(selectedIdentityHash);
-		expect(observedCredentialId).toBe(selectedRow.id);
-		expect(observedAvailable).toBe(true);
-		expect(observedFailover).toBe(true);
-		expect(observedAccessToken).toBe("sk-ant-oat-models-b");
-	} finally {
-		refreshSpy.mockRestore();
-		resetSettingsForTest();
-		setAgentDir(originalAgentDir);
-		setProjectDir(originalProjectDir);
-	}
-});
-
-test("omp models emits extension shutdown after listing (issue #6297)", async () => {
-	const authStorage = await AuthStorage.create(":memory:");
-	try {
-		const modelRegistry = new ModelRegistry(authStorage);
-		await runModelsListing({
-			modelRegistry,
-			cwd: tmp.path(),
-			action: "ls",
-			pattern: "issue-6297-no-models",
-			additionalExtensionPaths: [shutdownExtPath],
-			disableExtensionDiscovery: true,
+		const stopAfterFirstRefresh = new Error("models-policy-installed-before-first-refresh");
+		let observedIdentityHash: string | undefined;
+		let observedCredentialId: number | undefined;
+		let observedAvailable: boolean | undefined;
+		let observedFailover: boolean | undefined;
+		let observedAccessToken: string | undefined;
+		const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async function (
+			this: ModelRegistry,
+		): Promise<void> {
+			const selection = this.authStorage.getOAuthAccountSelection("anthropic");
+			observedIdentityHash = selection?.identityHash;
+			observedCredentialId = selection?.credentialId;
+			observedAvailable = selection?.available;
+			observedFailover = selection?.allowSiblingFailover;
+			observedAccessToken = (await this.authStorage.getOAuthAccess("anthropic"))?.accessToken;
+			throw stopAfterFirstRefresh;
 		});
 
-		expect(await Bun.file(shutdownPath).text()).toBe("shutdown");
-	} finally {
-		authStorage.close();
-	}
-});
-
-test("omp models explicit-only mode resolves a package and excludes settings providers", async () => {
-	const authStorage = await AuthStorage.create(":memory:");
-	try {
-		const modelRegistry = new ModelRegistry(authStorage);
-		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
-		process.stdout.write = ((chunk: string | Uint8Array) => {
-			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-			return true;
-		}) as typeof process.stdout.write;
-
+		resetSettingsForTest();
+		setAgentDir(agentDir);
+		setProjectDir(projectDir);
 		try {
+			await expect(
+				runModelsCommand({
+					action: "ls",
+					flags: { noExtensions: true },
+				}),
+			).rejects.toBe(stopAfterFirstRefresh);
+			expect(observedIdentityHash).toBe(selectedIdentityHash);
+			expect(observedCredentialId).toBe(selectedRow.id);
+			expect(observedAvailable).toBe(true);
+			expect(observedFailover).toBe(true);
+			expect(observedAccessToken).toBe("sk-ant-oat-models-b");
+		} finally {
+			refreshSpy.mockRestore();
+			resetSettingsForTest();
+			setAgentDir(originalAgentDir);
+			setProjectDir(originalProjectDir);
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32")(
+	"omp models emits extension shutdown after listing (issue #6297)",
+	async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const modelRegistry = new ModelRegistry(authStorage);
 			await runModelsListing({
 				modelRegistry,
 				cwd: tmp.path(),
 				action: "ls",
-				additionalExtensionPaths: [explicitPackagePath],
-				settingsExtensions: [ambientExtPath],
+				pattern: "issue-6297-no-models",
+				additionalExtensionPaths: [shutdownExtPath],
 				disableExtensionDiscovery: true,
 			});
+
+			expect(await Bun.file(shutdownPath).text()).toBe("shutdown");
 		} finally {
-			process.stdout.write = originalWrite;
+			authStorage.close();
 		}
+	},
+);
 
-		const output = captured.join("");
-		expect(output).toContain("explicit-gw");
-		expect(output).toContain("explicit-model");
-		expect(output).not.toContain("ambient-gw");
-		expect(output).not.toContain("ambient-model");
-	} finally {
-		authStorage.close();
-	}
-});
+test.skipIf(process.platform === "win32")(
+	"omp models explicit-only mode resolves a package and excludes settings providers",
+	async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const modelRegistry = new ModelRegistry(authStorage);
+			const captured: string[] = [];
+			const originalWrite = process.stdout.write.bind(process.stdout);
+			process.stdout.write = ((chunk: string | Uint8Array) => {
+				captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+				return true;
+			}) as typeof process.stdout.write;
 
-test("omp models prints invalid models.yml schema errors before listing output", async () => {
-	const modelsPath = tmp.join("invalid-models.yml");
-	await fs.writeFile(
-		modelsPath,
-		`providers:
+			try {
+				await runModelsListing({
+					modelRegistry,
+					cwd: tmp.path(),
+					action: "ls",
+					additionalExtensionPaths: [explicitPackagePath],
+					settingsExtensions: [ambientExtPath],
+					disableExtensionDiscovery: true,
+				});
+			} finally {
+				process.stdout.write = originalWrite;
+			}
+
+			const output = captured.join("");
+			expect(output).toContain("explicit-gw");
+			expect(output).toContain("explicit-model");
+			expect(output).not.toContain("ambient-gw");
+			expect(output).not.toContain("ambient-model");
+		} finally {
+			authStorage.close();
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32")(
+	"omp models prints invalid models.yml schema errors before listing output",
+	async () => {
+		const modelsPath = tmp.join("invalid-models.yml");
+		await fs.writeFile(
+			modelsPath,
+			`providers:
   myprovider:
     baseUrl: http://localhost:8000/v1
     api: openai-completions
@@ -307,36 +323,37 @@ test("omp models prints invalid models.yml schema errors before listing output",
         contextWindow: 8192
         maxTokens: 4096
 `,
-	);
+		);
 
-	const authStorage = await AuthStorage.create(":memory:");
-	try {
-		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
-
-		const captured: string[] = [];
-		const originalWrite = process.stdout.write;
-		Reflect.set(process.stdout, "write", (chunk: string | Uint8Array) => {
-			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-			return true;
-		});
-
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				pattern: "myprovider",
-				disableExtensionDiscovery: true,
-			});
-		} finally {
-			process.stdout.write = originalWrite;
-		}
+			const modelRegistry = new ModelRegistry(authStorage, modelsPath);
 
-		const output = captured.join("");
-		expect(output).toContain("Warning: models.yml validation failed — custom providers disabled");
-		expect(output).toContain("providers.myprovider.compat.thinkingFormat");
-		expect(output).toContain("deepseek");
-	} finally {
-		authStorage.close();
-	}
-});
+			const captured: string[] = [];
+			const originalWrite = process.stdout.write;
+			Reflect.set(process.stdout, "write", (chunk: string | Uint8Array) => {
+				captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+				return true;
+			});
+
+			try {
+				await runModelsListing({
+					modelRegistry,
+					cwd: tmp.path(),
+					action: "ls",
+					pattern: "myprovider",
+					disableExtensionDiscovery: true,
+				});
+			} finally {
+				process.stdout.write = originalWrite;
+			}
+
+			const output = captured.join("");
+			expect(output).toContain("Warning: models.yml validation failed — custom providers disabled");
+			expect(output).toContain("providers.myprovider.compat.thinkingFormat");
+			expect(output).toContain("deepseek");
+		} finally {
+			authStorage.close();
+		}
+	},
+);

@@ -6,6 +6,7 @@
   import type { SessionKind, TimelineImage, TimelineItem, TimelineToolActivity } from "../../../shared/contracts";
   import TimelinePresentation from "./TimelinePresentation.svelte";
   import MarkdownBody from "../molecules/MarkdownBody.svelte";
+  import EvalToolActivity from "../molecules/EvalToolActivity.svelte";
 
   export let item: TimelineItem;
   export let kind: SessionKind;
@@ -16,6 +17,11 @@
   export let showToolDetails = true;
   export let queued = false;
   export let queuedSteering = false;
+  export let queuedError: string | undefined;
+  export let loadedToolActivity: TimelineToolActivity | undefined;
+  export let toolDetailLoading = false;
+  export let toolDetailError = "";
+  export let onLoadToolDetail: () => void = () => undefined;
   export let onSteer: () => void = () => undefined;
   export let canEdit = false;
   export let onEdit: (item: TimelineItem) => void = () => undefined;
@@ -49,6 +55,7 @@
 
   function extractToolArgBadges(item: TimelineItem): Array<{ key: string; value: string }> {
     const args = item.args;
+    if (item.toolActivity?.operation === "eval") return [];
     if (!args || typeof args !== "object") return [];
     const record = args as Record<string, unknown>;
     const isEditTool = item.toolName === "edit" || item.toolActivity?.operation === "edit";
@@ -102,6 +109,7 @@
   function activityTarget(activity: TimelineToolActivity): string {
     if (activity.operation === "read" || activity.operation === "write") return activity.path;
     if (activity.operation === "edit") return activity.paths.join(", ");
+    if (activity.operation === "eval") return activity.title ?? (activity.languages.join(", ") || "eval");
     return activity.target ? `${activity.operationName} → ${activity.target}` : activity.operationName;
   }
 
@@ -109,6 +117,7 @@
     if (activity.operation === "read") return "Read";
     if (activity.operation === "write") return "Wrote";
     if (activity.operation === "edit") return "Edited";
+    if (activity.operation === "eval") return "Eval";
     return "Hub";
   }
 
@@ -143,6 +152,10 @@
   }
 
   $: toolArgBadges = item.kind === "tool" ? extractToolArgBadges(item) : [];
+  $: displayedToolActivity =
+    item.toolActivity?.operation === "eval" && loadedToolActivity?.operation === "eval"
+      ? loadedToolActivity
+      : item.toolActivity;
 </script>
 
 <article class="timeline-item item-{item.kind}" data-timeline-id={item.id} class:has-error={item.isError} class:is-running={item.status === "running"} class:is-queued={queued}>
@@ -162,26 +175,34 @@
         <strong class="tool-name">{toolLabel(item)}</strong>
         <span class="activity-status" class:status-running={item.status === "running"}>{toolStatus(item)}</span>
       </div>
-      {#if item.toolActivity && showToolDetails}
-        <div class="tool-activity-summary" aria-label={`${activityLabel(item.toolActivity)} activity`}>
+      {#if displayedToolActivity?.operation === "eval"}
+        <EvalToolActivity
+          activity={displayedToolActivity}
+          status={item.status}
+          loading={toolDetailLoading}
+          error={toolDetailError}
+          onLoad={onLoadToolDetail}
+        />
+      {:else if displayedToolActivity && showToolDetails}
+        <div class="tool-activity-summary" aria-label={`${activityLabel(displayedToolActivity)} activity`}>
           <div class="tool-activity-target">
-            <span class="tool-arg-key">{activityLabel(item.toolActivity)}</span>
-            <code title={activityTarget(item.toolActivity)}>{activityTarget(item.toolActivity)}</code>
-            {#if item.toolActivity.operation === "read" && (item.toolActivity.range || item.toolActivity.count !== undefined)}
-              <span class="activity-status">{item.toolActivity.range ?? ""}{item.toolActivity.range && item.toolActivity.count !== undefined ? " · " : ""}{item.toolActivity.count !== undefined ? `${item.toolActivity.count} lines` : ""}</span>
+            <span class="tool-arg-key">{activityLabel(displayedToolActivity)}</span>
+            <code title={activityTarget(displayedToolActivity)}>{activityTarget(displayedToolActivity)}</code>
+            {#if displayedToolActivity.operation === "read" && (displayedToolActivity.range || displayedToolActivity.count !== undefined)}
+              <span class="activity-status">{displayedToolActivity.range ?? ""}{displayedToolActivity.range && displayedToolActivity.count !== undefined ? " · " : ""}{displayedToolActivity.count !== undefined ? `${displayedToolActivity.count} lines` : ""}</span>
             {/if}
           </div>
-          {#if activityPreview(item.toolActivity).length > 0}
+          {#if activityPreview(displayedToolActivity).length > 0}
             <div class="tool-activity-preview" role="region" aria-label="Activity preview">
-              {#each activityPreview(item.toolActivity) as line}
+              {#each activityPreview(displayedToolActivity) as line}
                 <div class="diff-line line-{lineKind(line)}"><code>{line || " "}</code></div>
               {/each}
             </div>
-            {#if activityExpanded(item.toolActivity).length > activityPreview(item.toolActivity).length}
+            {#if activityExpanded(displayedToolActivity).length > activityPreview(displayedToolActivity).length}
               <details class="tool-activity-preview-more">
                 <summary>Show full preview</summary>
                 <div class="tool-activity-preview">
-                  {#each activityExpanded(item.toolActivity) as line}
+                  {#each activityExpanded(displayedToolActivity) as line}
                     <div class="diff-line line-{lineKind(line)}"><code>{line || " "}</code></div>
                   {/each}
                 </div>
@@ -197,7 +218,7 @@
           {/each}
         </div>
       {/if}
-      {#if item.images && item.images.length > 0}
+      {#if item.toolActivity?.operation !== "eval" && item.images && item.images.length > 0}
         <div class="tool-images" aria-label="Generated images">
           {#each item.images as image, index (image.mimeType + ":" + index)}
             <figure class="tool-image">
@@ -265,6 +286,7 @@
               onclick={onSteer}
             >{queuedSteering ? "Steering…" : "Steer"}</button>
           {/if}
+          {#if queuedError}<span class="queued-steer-error" role="alert">{queuedError}</span>{/if}
         </div>
         {#if item.kind === "assistant" && item.status === "running"}<span class="typing-cursor-blink" aria-hidden="true">▌</span>{/if}
       {/if}

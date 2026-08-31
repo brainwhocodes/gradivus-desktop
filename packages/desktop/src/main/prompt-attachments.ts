@@ -17,6 +17,8 @@ import {
 	type PromptImageContent,
 } from "../shared/contracts";
 
+export * from "../shared/attachment-display";
+
 const MAX_NAME_CODE_POINTS = 160;
 const MAX_MIME_CODE_POINTS = 160;
 const MAX_RETAINED_BYTES = 64 * 1024 * 1024;
@@ -266,13 +268,6 @@ function expandAttachment(record: StoredAttachment): string {
 		return `${record.view.reference}\nPrompt text: ${mention}. Read the referenced UTF-8 text at this exact position in the request.`;
 	}
 	return `${record.view.reference}\nFile ${JSON.stringify(record.view.name)}: ${mention}. Read this attachment as needed.`;
-}
-
-const PROMPT_ATTACHMENT_DISPLAY_ENVELOPE =
-	/(\[Document A\d+: "(?:[^"\\]|\\.)*"\])\n(?:Prompt text:\s+@(?:"[^"\r\n]*gradivus-prompt-[^"\r\n]*"|'[^'\r\n]*gradivus-prompt-[^'\r\n]*')\. Read the referenced UTF-8 text at this exact position in the request\.|File\s+"(?:[^"\\]|\\.)*":\s+@(?:"[^"\r\n]*gradivus-prompt-[^"\r\n]*"|'[^'\r\n]*gradivus-prompt-[^'\r\n]*')\. Read this attachment as needed\.)/g;
-
-export function promptAttachmentDisplayText(value: string): string {
-	return value.replace(PROMPT_ATTACHMENT_DISPLAY_ENVELOPE, "$1");
 }
 
 function validateUploads(value: unknown): PromptAttachmentUpload[] {

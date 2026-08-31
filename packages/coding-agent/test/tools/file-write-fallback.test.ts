@@ -241,7 +241,7 @@ describe("writeFileWithFallback", () => {
 	// A privileged user is not constrained by mode bits, so `chmod 0o500` denies
 	// nothing and every expectation here would fail for a reason unrelated to this
 	// seam. Root is real for a Docker-based local run and for a self-hosted runner.
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("against real kernel permissions", () => {
 		let root = "";
 
 		beforeEach(async () => {
@@ -456,86 +456,89 @@ describe("writeFileWithFallback", () => {
 
 	// `apply_patch` creates a missing parent before writing, so a denial there used
 	// to throw before the write — and therefore before the seam — was ever reached.
-	describe.skipIf(process.getuid?.() === 0)("apply_patch into a denied new directory", () => {
-		let root = "";
-		let locked = "";
+	describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"apply_patch into a denied new directory",
+		() => {
+			let root = "";
+			let locked = "";
 
-		beforeEach(async () => {
-			root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "fallback-patch-")));
-			locked = path.join(root, "locked");
-			await fs.mkdir(locked);
-			await fs.chmod(locked, 0o500);
-		});
-		afterEach(async () => {
-			await fs.chmod(locked, 0o700).catch(() => {});
-			await fs.rm(root, { recursive: true, force: true });
-		});
+			beforeEach(async () => {
+				root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "fallback-patch-")));
+				locked = path.join(root, "locked");
+				await fs.mkdir(locked);
+				await fs.chmod(locked, 0o500);
+			});
+			afterEach(async () => {
+				await fs.chmod(locked, 0o700).catch(() => {});
+				await fs.rm(root, { recursive: true, force: true });
+			});
 
-		it("reaches a registered handler with the bytes for the created file", async () => {
-			const brokered: Array<{ dst: string; content: string }> = [];
-			disposers.push(
-				addFileWriteFallback(async req => {
-					brokered.push({ dst: req.dst, content: req.content });
-					return true;
-				}),
-			);
+			it("reaches a registered handler with the bytes for the created file", async () => {
+				const brokered: Array<{ dst: string; content: string }> = [];
+				disposers.push(
+					addFileWriteFallback(async req => {
+						brokered.push({ dst: req.dst, content: req.content });
+						return true;
+					}),
+				);
 
-			const target = path.join(locked, "sub", "new.txt");
-			const result = await applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root });
+				const target = path.join(locked, "sub", "new.txt");
+				const result = await applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root });
 
-			expect(result.change).toMatchObject({ type: "create", path: target });
-			expect(brokered).toEqual([{ dst: target, content: "hello\n" }]);
-		});
+				expect(result.change).toMatchObject({ type: "create", path: target });
+				expect(brokered).toEqual([{ dst: target, content: "hello\n" }]);
+			});
 
-		it("still fails when no handler is registered", async () => {
-			const target = path.join(locked, "sub", "new.txt");
-			await expect(applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root })).rejects.toMatchObject(
-				{
-					code: expect.stringMatching(/^(EACCES|EPERM)$/),
-				},
-			);
-		});
-
-		it("never brokers an exclusive create whose destination cannot be proven absent", async () => {
-			// `apply_patch`'s `create` refuses to overwrite, and it decides that with
-			// `Bun.file(dst).exists()`, which reports `false` when the parent hides the
-			// target's metadata instead of distinguishing "absent" from "unknown". The
-			// non-overwrite contract survives regardless, because the same denied `lstat`
-			// that fools the existence check also stops the seam from brokering: a
-			// privileged writer is never handed a destination whose identity is unproven,
-			// and it is the only party that could have enforced exclusivity itself.
-			//
-			// Those are two independent guards in two files, so this pins the pair. If the
-			// seam is ever relaxed to broker an unverifiable path, a `create` would start
-			// silently clobbering a protected file it was told not to touch.
-			const opaque = path.join(root, "opaque");
-			await fs.mkdir(opaque);
-			const victim = path.join(opaque, "victim.txt");
-			await Bun.write(victim, "original\n");
-			await fs.chmod(opaque, 0o000);
-
-			let called = false;
-			disposers.push(
-				addFileWriteFallback(async () => {
-					called = true;
-					return true;
-				}),
-			);
-
-			try {
-				// The premise: the existence check cannot see the file it must not clobber.
-				expect(await Bun.file(victim).exists()).toBe(false);
-
+			it("still fails when no handler is registered", async () => {
+				const target = path.join(locked, "sub", "new.txt");
 				await expect(
-					applyPatch({ path: victim, op: "create", diff: "clobbered\n" }, { cwd: root }),
-				).rejects.toMatchObject({ code: expect.stringMatching(/^(EACCES|EPERM)$/) });
-				expect(called).toBe(false);
-			} finally {
-				await fs.chmod(opaque, 0o700);
-			}
-			expect(await Bun.file(victim).text()).toBe("original\n");
-		});
-	});
+					applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root }),
+				).rejects.toMatchObject({
+					code: expect.stringMatching(/^(EACCES|EPERM)$/),
+				});
+			});
+
+			it("never brokers an exclusive create whose destination cannot be proven absent", async () => {
+				// `apply_patch`'s `create` refuses to overwrite, and it decides that with
+				// `Bun.file(dst).exists()`, which reports `false` when the parent hides the
+				// target's metadata instead of distinguishing "absent" from "unknown". The
+				// non-overwrite contract survives regardless, because the same denied `lstat`
+				// that fools the existence check also stops the seam from brokering: a
+				// privileged writer is never handed a destination whose identity is unproven,
+				// and it is the only party that could have enforced exclusivity itself.
+				//
+				// Those are two independent guards in two files, so this pins the pair. If the
+				// seam is ever relaxed to broker an unverifiable path, a `create` would start
+				// silently clobbering a protected file it was told not to touch.
+				const opaque = path.join(root, "opaque");
+				await fs.mkdir(opaque);
+				const victim = path.join(opaque, "victim.txt");
+				await Bun.write(victim, "original\n");
+				await fs.chmod(opaque, 0o000);
+
+				let called = false;
+				disposers.push(
+					addFileWriteFallback(async () => {
+						called = true;
+						return true;
+					}),
+				);
+
+				try {
+					// The premise: the existence check cannot see the file it must not clobber.
+					expect(await Bun.file(victim).exists()).toBe(false);
+
+					await expect(
+						applyPatch({ path: victim, op: "create", diff: "clobbered\n" }, { cwd: root }),
+					).rejects.toMatchObject({ code: expect.stringMatching(/^(EACCES|EPERM)$/) });
+					expect(called).toBe(false);
+				} finally {
+					await fs.chmod(opaque, 0o700);
+				}
+				expect(await Bun.file(victim).text()).toBe("original\n");
+			});
+		},
+	);
 });
 
 describe("deleteFileWithFallback", () => {
@@ -573,7 +576,7 @@ describe("deleteFileWithFallback", () => {
 		expect(writeCalled).toBe(false);
 	});
 
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("against real kernel permissions", () => {
 		let root = "";
 		let locked = "";
 

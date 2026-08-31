@@ -83,8 +83,11 @@ export class WorkspaceServiceRunner {
 		if (this.#isDisposed) throw new Error("Service is disposed");
 		this.#setStatus("starting");
 
-		const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
-		const args = process.platform === "win32" ? ["/d", "/s", "/c", this.command] : ["-c", this.command];
+		const isWindows = process.platform === "win32";
+		const shell = isWindows ? "cmd.exe" : "/bin/sh";
+		// cmd.exe with /s strips the outer quotes, so the command's own quotes
+		// survive; verbatim args keep Bun from MSVCRT-escaping them.
+		const args = isWindows ? ["/d", "/s", "/c", `"${this.command}"`] : ["-c", this.command];
 
 		try {
 			const proc = Bun.spawn([shell, ...args], {
@@ -93,6 +96,7 @@ export class WorkspaceServiceRunner {
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
+				windowsVerbatimArguments: isWindows,
 			});
 			this.#process = proc;
 			this.#pid = proc.pid;

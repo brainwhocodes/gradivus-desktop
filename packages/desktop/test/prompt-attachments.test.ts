@@ -54,7 +54,7 @@ describe("PromptAttachmentStore", () => {
 		const stagedPath = resolved.text.match(/@"([^"]+)"/)?.[1];
 
 		expect(stagedPath).toContain("gradivus-prompt-");
-		await expect(fs.access(stagedPath!)).resolves.toBeUndefined();
+		await fs.access(stagedPath!);
 		await store.release([view!.id]);
 		await expect(fs.access(stagedPath!)).rejects.toMatchObject({ code: "ENOENT" });
 		await expect(
@@ -71,7 +71,7 @@ describe("PromptAttachmentStore", () => {
 		);
 		const stagedPath = resolved.text.match(/@"([^"]+)"/)?.[1];
 		const tempDir = path.dirname(stagedPath!);
-		await expect(fs.access(tempDir)).resolves.toBeUndefined();
+		await fs.access(tempDir);
 
 		await store.release([view!.id]);
 		await expect(fs.access(tempDir)).rejects.toMatchObject({ code: "ENOENT" });
@@ -291,7 +291,12 @@ describe("PromptAttachmentStore", () => {
 		expect(promptAttachmentDisplayText('File "notes.md": @"/tmp/unowned". Read this attachment as needed.')).toBe(
 			'File "notes.md": @"/tmp/unowned". Read this attachment as needed.',
 		);
-		const authoredImageEnvelope = '[Image A99: "first.png"]\nImage "different.png" is attached to this message.';
-		expect(promptAttachmentDisplayText(authoredImageEnvelope)).toBe(authoredImageEnvelope);
+		const imageEnvelope = '[Image A99: "first.png"]\nImage "first.png" is attached to this message.';
+		expect(promptAttachmentDisplayText(imageEnvelope)).toBe('[Image A99: "first.png"]');
+		const promptEnvelope =
+			'[Prompt A4: "Pasted prompt"]\nPrompt text: @"/tmp/gradivus-prompt-example.txt". Read the referenced UTF-8 text at this exact position in the request.';
+		expect(promptAttachmentDisplayText(promptEnvelope)).toBe('[Prompt A4: "Pasted prompt"]');
+		const mismatchedImageEnvelope = '[Image A99: "first.png"]\nImage "different.png" is attached to this message.';
+		expect(promptAttachmentDisplayText(mismatchedImageEnvelope)).toBe(mismatchedImageEnvelope);
 	});
 });

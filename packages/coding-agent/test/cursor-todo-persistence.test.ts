@@ -24,6 +24,17 @@ interface Harness {
 	/** Replays `event-controller.ts`'s todo refresh over the emitted events. */
 	uiTodos: () => TodoPhase[] | null;
 }
+function withoutIds(phases: TodoPhase[]): unknown {
+	return phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => ({
+			content: task.content,
+			status: task.status,
+			...(task.blocker ? { blocker: task.blocker } : {}),
+			...(task.parentId ? { parentId: task.parentId } : {}),
+		})),
+	}));
+}
 
 function newHarness(initial: TodoPhase[] = []): Harness {
 	const entries: SessionEntry[] = [];
@@ -95,7 +106,7 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.reload()).toEqual(h.current());
-		expect(h.reload()).toEqual([
+		expect(withoutIds(h.reload())).toEqual([
 			{
 				name: "Tasks",
 				tasks: [
@@ -120,7 +131,7 @@ describe("cursor todo persistence", () => {
 			"call-1",
 		);
 
-		expect(h.reload()).toEqual([
+		expect(withoutIds(h.reload())).toEqual([
 			{
 				name: "Tasks",
 				tasks: [
@@ -148,14 +159,14 @@ describe("cursor todo persistence", () => {
 			"call-1",
 		);
 
-		expect(h.reload()).toEqual([
+		expect(withoutIds(h.reload())).toEqual([
 			{ name: "Foundation", tasks: [{ content: "scaffold", status: "completed" }] },
 			{ name: "Auth", tasks: [{ content: "oauth", status: "in_progress" }] },
 			{ name: "Tasks", tasks: [{ content: "unknown", status: "pending" }] },
 		]);
 	});
 
-	it("never invents an active task for an all-pending remote snapshot", () => {
+	it("promotes the first pending leaf in a remote snapshot", () => {
 		const h = newHarness();
 		h.handlers.todoSync(
 			{
@@ -168,7 +179,12 @@ describe("cursor todo persistence", () => {
 			"call-1",
 		);
 
-		expect(h.reload()[0].tasks.every(task => task.status === "pending")).toBe(true);
+		expect(
+			h
+				.reload()
+				.flatMap(phase => phase.tasks)
+				.map(task => task.status),
+		).toEqual(["in_progress", "pending"]);
 	});
 
 	it("writes nothing when the session exposes no todo state", () => {
@@ -206,7 +222,7 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.uiTodos()).toEqual(h.current());
-		expect(h.uiTodos()).toEqual([
+		expect(withoutIds(h.uiTodos() ?? [])).toEqual([
 			{
 				name: "Tasks",
 				tasks: [

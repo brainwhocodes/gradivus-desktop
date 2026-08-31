@@ -14,6 +14,8 @@
 		showResponseCopy?: boolean;
 		onCopyText?: MarkdownCopyText;
 		className?: string;
+		lineOffset?: number;
+		onAnnotateLine?: (anchor: { row: number; context: string }) => void;
 	}
 
 	let {
@@ -22,6 +24,8 @@
 		showResponseCopy = false,
 		onCopyText,
 		className = "message-copy",
+		lineOffset = 0,
+		onAnnotateLine,
 	}: Props = $props();
 	let responseCopying = $state(false);
 	let responseStatus = $state("");
@@ -33,10 +37,17 @@
 		pendingRender = undefined;
 	}
 
-	function renderCurrent(valueToRender: string, isStreaming: boolean, copyText: MarkdownCopyText | undefined): void {
+	function renderCurrent(
+		valueToRender: string,
+		isStreaming: boolean,
+		copyText: MarkdownCopyText | undefined,
+		annotateLine: Props["onAnnotateLine"],
+		sourceLineOffset: number,
+	): void {
 		rendered = renderMarkdownDocument(valueToRender, {
 			syntaxHighlight: !isStreaming,
 			codeCopyActions: !isStreaming && copyText !== undefined,
+			...(annotateLine ? { sourceAnchors: { lineOffset: sourceLineOffset } } : {}),
 		});
 	}
 
@@ -44,17 +55,19 @@
 		const valueToRender = value;
 		const isStreaming = streaming;
 		const copyText = onCopyText;
+		const annotateLine = onAnnotateLine;
+		const sourceLineOffset = lineOffset;
 		cancelPendingRender();
 
 		if (!isStreaming) {
-			renderCurrent(valueToRender, isStreaming, copyText);
+			renderCurrent(valueToRender, isStreaming, copyText, annotateLine, sourceLineOffset);
 			return;
 		}
 
 		pendingRender = setTimeout(() => {
 			pendingRender = undefined;
 			if (value !== valueToRender || !streaming) return;
-			renderCurrent(valueToRender, true, copyText);
+			renderCurrent(valueToRender, true, copyText, annotateLine, sourceLineOffset);
 		}, 16);
 	});
 
@@ -71,7 +84,17 @@
 
 	function copyCodeBlocks(node: HTMLElement): { destroy(): void } {
 		async function handleClick(event: MouseEvent): Promise<void> {
-			if (!(event.target instanceof Element) || !onCopyText || streaming) return;
+			if (!(event.target instanceof Element)) return;
+			const annotationButton = event.target.closest<HTMLButtonElement>("button[data-markdown-annotate-line]");
+			if (annotationButton && node.contains(annotationButton) && onAnnotateLine) {
+				const row = Number.parseInt(annotationButton.dataset.markdownAnnotateLine ?? "", 10);
+				const block = annotationButton.closest<HTMLElement>(".markdown-source-block");
+				if (Number.isSafeInteger(row) && block) {
+					onAnnotateLine({ row, context: block.dataset.sourceContext ?? "" });
+				}
+				return;
+			}
+			if (!onCopyText || streaming) return;
 			const button = event.target.closest<HTMLButtonElement>("button[data-markdown-code-copy]");
 			if (!button || !node.contains(button) || button.disabled) return;
 

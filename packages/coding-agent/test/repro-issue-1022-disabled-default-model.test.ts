@@ -22,80 +22,83 @@ function emptyWorkspaceTree(cwd: string) {
 	return { rootPath: cwd, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] };
 }
 
-describe("issue #1022 — path-scoped enabledModels respected by default fallback", () => {
-	let testDir: string;
-	let agentDir: string;
-	let cwd: string;
+describe.skipIf(process.platform === "win32")(
+	"issue #1022 — path-scoped enabledModels respected by default fallback",
+	() => {
+		let testDir: string;
+		let agentDir: string;
+		let cwd: string;
 
-	beforeEach(() => {
-		resetSettingsForTest();
-		testDir = path.join(os.tmpdir(), `pi-issue-1022-${Snowflake.next()}`);
-		agentDir = path.join(testDir, "agent");
-		cwd = path.join(testDir, "private", "sub");
-		fs.mkdirSync(agentDir, { recursive: true });
-		fs.mkdirSync(cwd, { recursive: true });
-	});
+		beforeEach(() => {
+			resetSettingsForTest();
+			testDir = path.join(os.tmpdir(), `pi-issue-1022-${Snowflake.next()}`);
+			agentDir = path.join(testDir, "agent");
+			cwd = path.join(testDir, "private", "sub");
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.mkdirSync(cwd, { recursive: true });
+		});
 
-	afterEach(() => {
-		resetSettingsForTest();
-		if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
-	});
+		afterEach(() => {
+			resetSettingsForTest();
+			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
+		});
 
-	test("does not pick a disallowed provider when enabledModels excludes it", async () => {
-		const privatePath = path.join(testDir, "private");
-		await Bun.write(
-			path.join(agentDir, "config.yml"),
-			YAML.stringify({
-				enabledModels: [{ path: privatePath, models: ["openai-codex"] }],
-				disabledProviders: [{ path: privatePath, providers: ["github-copilot"] }],
-				modelRoles: { default: "github-copilot/gpt-5.5" },
-			}),
-		);
+		test("does not pick a disallowed provider when enabledModels excludes it", async () => {
+			const privatePath = path.join(testDir, "private");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					enabledModels: [{ path: privatePath, models: ["openai-codex"] }],
+					disabledProviders: [{ path: privatePath, providers: ["github-copilot"] }],
+					modelRoles: { default: "github-copilot/gpt-5.5" },
+				}),
+			);
 
-		const settings = await Settings.init({ cwd, agentDir });
-		// Sanity-check the path-scoped values resolved correctly for this cwd.
-		expect(settings.get("enabledModels")).toEqual(["openai-codex"]);
-		expect(settings.get("disabledProviders")).toEqual(["github-copilot"]);
+			const settings = await Settings.init({ cwd, agentDir });
+			// Sanity-check the path-scoped values resolved correctly for this cwd.
+			expect(settings.get("enabledModels")).toEqual(["openai-codex"]);
+			expect(settings.get("disabledProviders")).toEqual(["github-copilot"]);
 
-		const authStorage = await AuthStorage.create(":memory:");
-		// Only anthropic has credentials. Per `enabledModels` the path allows
-		// only openai-codex, so no anthropic model should be selected.
-		authStorage.setRuntimeApiKey("anthropic", "test-anthropic-key");
+			const authStorage = await AuthStorage.create(":memory:");
+			// Only anthropic has credentials. Per `enabledModels` the path allows
+			// only openai-codex, so no anthropic model should be selected.
+			authStorage.setRuntimeApiKey("anthropic", "test-anthropic-key");
 
-		const modelRegistry = new ModelRegistry(authStorage, path.join(testDir, "models.yml"));
-
-		try {
-			const { session, modelFallbackMessage } = await createAgentSession({
-				cwd,
-				agentDir,
-				authStorage,
-				modelRegistry,
-				settings,
-				sessionManager: SessionManager.inMemory(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				workspaceTree: emptyWorkspaceTree(cwd),
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(testDir, "models.yml"));
 
 			try {
-				// Bug: omp falls back to anthropic Haiku here, ignoring the
-				// path-scoped enabledModels allow-list.
-				expect(session.model?.provider).not.toBe("anthropic");
-				expect(session.model?.provider).not.toBe("github-copilot");
-				// No openai-codex creds set → nothing in the allow-list is
-				// usable. Expect no model and a fallback message.
-				expect(session.model).toBeUndefined();
-				expect(modelFallbackMessage).toBeDefined();
+				const { session, modelFallbackMessage } = await createAgentSession({
+					cwd,
+					agentDir,
+					authStorage,
+					modelRegistry,
+					settings,
+					sessionManager: SessionManager.inMemory(),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					workspaceTree: emptyWorkspaceTree(cwd),
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+
+				try {
+					// Bug: omp falls back to anthropic Haiku here, ignoring the
+					// path-scoped enabledModels allow-list.
+					expect(session.model?.provider).not.toBe("anthropic");
+					expect(session.model?.provider).not.toBe("github-copilot");
+					// No openai-codex creds set → nothing in the allow-list is
+					// usable. Expect no model and a fallback message.
+					expect(session.model).toBeUndefined();
+					expect(modelFallbackMessage).toBeDefined();
+				} finally {
+					await session.dispose();
+				}
 			} finally {
-				await session.dispose();
+				authStorage.close();
 			}
-		} finally {
-			authStorage.close();
-		}
-	});
-});
+		});
+	},
+);

@@ -30,19 +30,25 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { copyLocalArtifacts, resolveLocalUrlToPath } from "../../internal-urls";
 import { type Theme, theme } from "../../modes/theme/theme";
-import type { AgentSession } from "../../session/agent-session";
+import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { PlanModeReviewController, PlanReviewError, type PlanReviewState } from "../../plan-mode/review-controller";
+import { type AgentSession, TodoConflictError } from "../../session/agent-session";
 import { credentialPinHash, installOAuthAccountSelectionFromSettings } from "../../session/credential-pin";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { getTabsInventory, releaseTab, subscribeBrowserTabInventory } from "../../tools/browser/tab-supervisor";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { RpcAgentHub } from "./rpc-agent-hub";
+import { AgentPromptConflictError, getRpcAgentPrompts, resetRpcAgentPrompt, saveRpcAgentPrompt } from "./rpc-agents";
 import { getRpcFileDiff } from "./rpc-file-diff";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { getRpcOpenRouterModelRouting, setRpcOpenRouterProviderEnabled } from "./rpc-openrouter-routing";
@@ -52,6 +58,7 @@ import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcExtensionUISelectOptionDetail,
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
@@ -62,6 +69,8 @@ import type {
 	RpcHostUriResult,
 	RpcOAuthAccounts,
 	RpcOAuthProvider,
+	RpcPlanReviewState,
+	RpcPlanReviewUpdateFrame,
 	RpcPromptResultFrame,
 	RpcResponse,
 	RpcSessionState,
@@ -271,12 +280,15 @@ export function watchAndReportPromptResult(input: {
 export interface RpcCommandDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
-	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	errorResponse: (id: string | undefined, command: string, message: string, code?: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
 	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
 	onHostUriResult: (frame: RpcHostUriResult) => void;
+}
+function rpcErrorCode(error: unknown): string | undefined {
+	return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
 /**
@@ -347,7 +359,7 @@ export function dispatchRpcCommand(parsed: unknown, deps: RpcCommandDeps): Promi
 				deps.output(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				deps.output(deps.errorResponse(command.id, "bash", message));
+				deps.output(deps.errorResponse(command.id, "bash", message, rpcErrorCode(err)));
 			}
 		})();
 		deps.trackBackgroundTask?.(task);
@@ -410,7 +422,7 @@ export class RpcCommandDispatcher {
 			if (awaited) await awaited;
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.#deps.output(this.#deps.errorResponse(command.id, command.type, message));
+			this.#deps.output(this.#deps.errorResponse(command.id, command.type, message, rpcErrorCode(err)));
 		} finally {
 			await this.#afterSerialCommand?.();
 		}
@@ -554,6 +566,42 @@ function shouldEmitRpcTitles(): boolean {
 
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
 	return value === "off" || value === "progress" || value === "events";
+}
+
+/** Sends an RPC select request while retaining aligned option descriptions. */
+export function requestRpcSelect(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	options: ExtensionUISelectItem[],
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	const labels = new Array<string>(options.length);
+	let optionDetails: RpcExtensionUISelectOptionDetail[] | undefined;
+	for (let index = 0; index < options.length; index++) {
+		const option = options[index]!;
+		labels[index] = getExtensionUISelectOptionLabel(option);
+		if (typeof option === "string") continue;
+		const description = option.description?.trim();
+		if (!description) continue;
+		optionDetails ??= Array.from({ length: options.length }, () => ({}));
+		optionDetails[index] = { description };
+	}
+
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "select",
+			title,
+			options: labels,
+			...(optionDetails ? { optionDetails } : {}),
+			timeout: dialogOptions?.timeout,
+		},
+		response => parseValueDialogResponse(response, dialogOptions),
+	);
 }
 
 export function requestRpcEditor(
@@ -787,6 +835,9 @@ export async function runRpcMode(
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		grpcOutput.output(obj);
 	};
+	const unsubscribeBrowserInventory = subscribeBrowserTabInventory(inventory => {
+		output({ type: "browser_inventory_update", inventory });
+	});
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(
@@ -879,19 +930,7 @@ export async function runRpcMode(
 			options: ExtensionUISelectItem[],
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{
-					method: "select",
-					title,
-					options: options.map(getExtensionUISelectOptionLabel),
-					timeout: dialogOptions?.timeout,
-				},
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions);
 		}
 
 		confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
@@ -1096,9 +1135,117 @@ export async function runRpcMode(
 		uiContext: rpcUiContext,
 	});
 
-	// Output all agent events as JSON
+	const planReviewTasks = new Set<Promise<void>>();
+	const trackPlanReviewTask = (task: Promise<void>): void => {
+		planReviewTasks.add(task);
+		void task.finally(() => planReviewTasks.delete(task));
+	};
+	const localProtocolOptions = () => ({
+		getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+		getSessionId: () => session.sessionManager.getSessionId(),
+	});
+	const toRpcPlanReview = (state: PlanReviewState): RpcPlanReviewState => ({
+		id: state.id,
+		title: state.title,
+		planFilePath: state.planFilePath,
+		revision: state.revision,
+		status: state.status,
+		phase: state.phase,
+		content: state.content,
+		annotationState: state.annotationState,
+		suggestedSaveName: state.suggestedSaveName,
+		...(state.contextUsage ? { contextUsage: state.contextUsage } : {}),
+		keepContextDisabled: state.keepContextDisabled,
+		executionModels: state.executionModels,
+		...(state.defaultExecutionRole ? { defaultExecutionRole: state.defaultExecutionRole } : {}),
+		...(state.error ? { error: state.error } : {}),
+	});
+	const planReviewController = new PlanModeReviewController({
+		session,
+		resetForApprovedPlan: async document => {
+			const oldLocalRoot = resolveLocalUrlToPath("local://", localProtocolOptions());
+			const reset = await session.newSession();
+			if (!reset) throw new Error("Starting a fresh execution session was cancelled.");
+			const newLocalRoot = resolveLocalUrlToPath("local://", localProtocolOptions());
+			await copyLocalArtifacts(oldLocalRoot, newLocalRoot);
+			await Bun.write(resolveLocalUrlToPath(document.planFilePath, localProtocolOptions()), document.content);
+		},
+		compactForApprovedPlan: async (internalGuidance, beforeFlush) => {
+			try {
+				await session.compact(undefined, { internalGuidance });
+				await beforeFlush("ok");
+				return "ok";
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const cancelled = (error instanceof Error && error.name === "AbortError") || /cancel/i.test(message);
+				const outcome = cancelled ? "cancelled" : "failed";
+				await beforeFlush(outcome);
+				if (!cancelled) output({ type: "notice", level: "error", message: `Plan compaction failed: ${message}` });
+				return outcome;
+			}
+		},
+		submitRefinement: input =>
+			session.dispatchPlanReviewPrompt({
+				kind: "refinement",
+				reviewId: input.reviewId,
+				planFilePath: session.getPlanModeState()?.planFilePath ?? "local://PLAN.md",
+				content: input.text,
+				images: input.images,
+			}),
+		afterPlanSaved: async () => ({ sessionReset: false }),
+		beforeExecutionDispatch: () => {},
+		emitReview: (planReview, options) => {
+			output({
+				type: "plan_review_update",
+				...(planReview ? { planReview: toRpcPlanReview(planReview) } : {}),
+				...(options?.sessionReset ? { sessionReset: options.sessionReset } : {}),
+			} satisfies RpcPlanReviewUpdateFrame);
+		},
+		notifyConfigChanged: () => {
+			output({
+				type: "config_update",
+				model: session.model,
+				thinkingLevel: session.thinkingLevel,
+				planMode: session.getPlanModeState(),
+			});
+		},
+		report: (level, message) => {
+			output({ type: "notice", level: level === "status" ? "info" : level, message });
+		},
+	});
+	const isPlanApprovalDetails = (value: unknown): value is PlanApprovalDetails =>
+		isRecord(value) &&
+		typeof value.planFilePath === "string" &&
+		typeof value.title === "string" &&
+		value.planExists === true;
+
+	// Output all agent events first, then stage successful proposal writes
+	// asynchronously so the approved planning turn never blocks the event stream.
 	session.subscribe(event => {
 		output(event);
+		if (event.type !== "tool_execution_end" || event.isError) return;
+		const dispatch = writeDeviceDispatch(event.toolName, event.result);
+		if (
+			dispatch?.tool !== PROPOSE_DEVICE_NAME ||
+			dispatch.mode !== "execute" ||
+			!isPlanApprovalDetails(dispatch.inner)
+		) {
+			return;
+		}
+		const task = planReviewController.stage(dispatch.inner).then(
+			() => {},
+			error => {
+				output({
+					type: "notice",
+					level: "error",
+					message: error instanceof Error ? error.message : String(error),
+				});
+			},
+		);
+		trackPlanReviewTask(task);
+	});
+	session.subscribeTodos((phases, revision) => {
+		output({ type: "todo_update", phases, revision });
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
@@ -1108,7 +1255,12 @@ export async function runRpcMode(
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
 		await session.refreshSkills();
-		session.setSlashCommands(await loadSlashCommands({ cwd }));
+		session.setSlashCommands(
+			await loadSlashCommands({
+				cwd,
+				extensionRoots: session.effectiveExtensionRoots,
+			}),
+		);
 		await emitAvailableCommandsUpdate();
 	};
 	const emitAvailableCommandsUpdate = async () => {
@@ -1142,6 +1294,8 @@ export async function runRpcMode(
 					output: text => output({ type: "command_output", text }),
 					refreshCommands: emitAvailableCommandsUpdate,
 					reloadPlugins: reloadPluginState,
+					planModeReview: planReviewController,
+					runCommandInBackground: task => shutdownCoordinator.track(task()),
 					notifyTitleChanged: async () => {
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
@@ -1164,8 +1318,13 @@ export async function runRpcMode(
 						});
 						return success(id, "prompt");
 					}
-					output({ type: "prompt_result", id, agentInvoked: false } satisfies RpcPromptResultFrame);
-					return success(id, "prompt");
+					// A consumed builtin is normally local-only, but some (e.g.
+					// `/retry`) schedule an agent turn whose events stream after
+					// this response. Report that while retaining the Gradivus
+					// prompt settlement push consumed by desktop clients.
+					const agentInvoked = builtinResult.agentInvoked === true;
+					output({ type: "prompt_result", id, agentInvoked } satisfies RpcPromptResultFrame);
+					return success(id, "prompt", { agentInvoked });
 				}
 
 				// Don't await - events will stream. The prompt_result push is the
@@ -1219,7 +1378,19 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
+				const review = await planReviewController.snapshot();
+				if (review?.status === "applying") {
+					throw new PlanReviewError("The plan action is already applying.", "plan_review_busy");
+				}
+				const token = planReviewController.suspendForSessionTransition();
+				let result: RpcSessionChangeResult;
+				try {
+					result = await handleRpcSessionChange(session, command, subagentRegistry);
+				} catch (error) {
+					await planReviewController.restoreAfterSessionTransition(token, false);
+					throw error;
+				}
+				await planReviewController.restoreAfterSessionTransition(token, !result.data.cancelled);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);
 			}
@@ -1230,7 +1401,9 @@ export async function runRpcMode(
 
 			case "get_state": {
 				const memory = process.memoryUsage();
+				const planReview = await planReviewController.snapshot();
 				const state: RpcSessionState = {
+					capabilities: { planReview: 1 },
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
@@ -1244,7 +1417,7 @@ export async function runRpcMode(
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					autoRetryEnabled: session.autoRetryEnabled,
 					queuedMessageCount: session.queuedMessageCount,
-					todoPhases: session.getTodoPhases(),
+					todoState: { phases: session.getTodoPhases(), revision: session.getTodoRevision() },
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
@@ -1258,6 +1431,7 @@ export async function runRpcMode(
 					})),
 					contextUsage: session.getContextUsage(),
 					planMode: session.getPlanModeState(),
+					...(planReview ? { planReview: toRpcPlanReview(planReview) } : {}),
 					runtime: {
 						pid: process.pid,
 						uptimeMs: process.uptime() * 1_000,
@@ -1286,25 +1460,57 @@ export async function runRpcMode(
 			}
 			case "set_plan_mode": {
 				if (command.enabled) {
-					const planFilePath = command.planFilePath ?? "local://PLAN.md";
-					const previousTools = session.getEnabledToolNames();
-					const planAugmentations: string[] = [];
-					if (session.hasBuiltInTool("write")) {
-						planAugmentations.push("write");
-					}
-					const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
-					await session.setActiveToolsByName(uniquePlanTools);
-					session.setPlanModeState({
-						enabled: true,
-						planFilePath,
-						workflow: command.workflow ?? "parallel",
+					await planReviewController.enter({
+						planFilePath: command.planFilePath,
+						workflow: command.workflow,
 					});
-					session.setPlanProposalHandler?.(title => session.preparePlanForReview(title));
 				} else {
-					session.setPlanModeState(undefined);
+					await planReviewController.exit();
 				}
 				void emitAvailableCommandsUpdate();
 				return success(id, "set_plan_mode", { planMode: session.getPlanModeState() });
+			}
+
+			case "request_plan_review": {
+				const planReview = await planReviewController.requestReview();
+				return success(id, "request_plan_review", { planReview: toRpcPlanReview(planReview) });
+			}
+
+			case "update_plan_review": {
+				const planReview = await planReviewController.update({
+					reviewId: command.reviewId,
+					content: command.content,
+					expectedRevision: command.expectedRevision,
+					annotationState: command.annotationState,
+				});
+				return success(id, "update_plan_review", { planReview: toRpcPlanReview(planReview) });
+			}
+
+			case "resolve_plan_review": {
+				const resolution = await planReviewController.resolve({
+					reviewId: command.reviewId,
+					expectedRevision: command.expectedRevision,
+					decision: command.decision,
+				});
+				if (resolution.completion) {
+					if (command.decision.kind === "save") {
+						await resolution.completion;
+					} else {
+						trackPlanReviewTask(
+							resolution.completion.then(
+								() => {},
+								error => {
+									output({
+										type: "notice",
+										level: "error",
+										message: error instanceof Error ? error.message : String(error),
+									});
+								},
+							),
+						);
+					}
+				}
+				return success(id, "resolve_plan_review", resolution.result);
 			}
 
 			case "get_settings": {
@@ -1316,13 +1522,78 @@ export async function runRpcMode(
 				return success(id, "set_setting", { setting });
 			}
 
+			case "get_agent_prompts": {
+				const agents = await getRpcAgentPrompts({
+					cwd: session.sessionManager.getCwd(),
+					extensionRoots: session.effectiveExtensionRoots,
+				});
+				return success(id, "get_agent_prompts", { agents });
+			}
+
+			case "save_agent_prompt": {
+				try {
+					const agent = await saveRpcAgentPrompt(
+						{
+							cwd: session.sessionManager.getCwd(),
+							extensionRoots: session.effectiveExtensionRoots,
+						},
+						command,
+					);
+					return success(id, "save_agent_prompt", { agent });
+				} catch (err) {
+					return error(
+						id,
+						"save_agent_prompt",
+						err instanceof Error ? err.message : String(err),
+						err instanceof AgentPromptConflictError ? err.code : undefined,
+					);
+				}
+			}
+
+			case "reset_agent_prompt": {
+				try {
+					const agent = await resetRpcAgentPrompt(
+						{
+							cwd: session.sessionManager.getCwd(),
+							extensionRoots: session.effectiveExtensionRoots,
+						},
+						command,
+					);
+					return success(id, "reset_agent_prompt", { agent });
+				} catch (err) {
+					return error(
+						id,
+						"reset_agent_prompt",
+						err instanceof Error ? err.message : String(err),
+						err instanceof AgentPromptConflictError ? err.code : undefined,
+					);
+				}
+			}
+
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}
 
 			case "set_todos": {
-				session.setTodoPhases(command.phases);
-				return success(id, "set_todos", { todoPhases: session.getTodoPhases() });
+				try {
+					if (typeof command.action !== "string" || !command.action.trim() || command.action.length > 256) {
+						return error(id, "set_todos", "Todo edit action is invalid", "invalid_params");
+					}
+					const previousIds = new Set(session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.id)));
+					const nextIds = new Set(command.phases.flatMap(phase => phase.tasks.map(task => task.id)));
+					const removed = [...previousIds].some(taskId => !nextIds.has(taskId));
+					const todoState = session.commitUserTodoEdit(command.phases, command.expectedRevision, command.action, {
+						removed,
+					});
+					return success(id, "set_todos", { todoState });
+				} catch (err) {
+					return error(
+						id,
+						"set_todos",
+						err instanceof Error ? err.message : String(err),
+						err instanceof TodoConflictError ? err.code : undefined,
+					);
+				}
 			}
 
 			case "set_host_tools": {
@@ -1330,6 +1601,26 @@ export async function runRpcMode(
 				const rpcTools = hostToolBridge.setTools(tools);
 				await session.refreshRpcHostTools(rpcTools);
 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
+			}
+
+			case "close_browser_tab": {
+				const name = command.name.trim();
+				if (!name || name.length > 100) return error(id, "close_browser_tab", "Invalid browser tab name");
+				const tab = getTabsInventory().find(candidate => candidate.name === name);
+				if (!tab) {
+					return success(id, "close_browser_tab", { closed: false, inventory: getTabsInventory() });
+				}
+				const busy = tab.owners.length > 0 || tab.activeRunCount > 0 || tab.queuedRunCount > 0;
+				if (busy && command.confirm !== true) {
+					return success(id, "close_browser_tab", {
+						closed: false,
+						requiresConfirmation: true,
+						tab,
+						inventory: getTabsInventory(),
+					});
+				}
+				await releaseTab(name);
+				return success(id, "close_browser_tab", { closed: true, inventory: getTabsInventory() });
 			}
 
 			case "set_host_uri_schemes": {
@@ -1812,6 +2103,7 @@ export async function runRpcMode(
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
+			unsubscribeBrowserInventory();
 			await session.dispose();
 			await grpcOutput.drain();
 			await connection.close();
@@ -1841,10 +2133,14 @@ export async function runRpcMode(
 			agentHub.dispose();
 		},
 	});
+	while (planReviewTasks.size > 0) {
+		await Promise.allSettled(Array.from(planReviewTasks));
+	}
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the Connect-stream close path too (#5643).
+	unsubscribeBrowserInventory();
 	await session.dispose();
 	await grpcOutput.drain();
 	await connection.close();

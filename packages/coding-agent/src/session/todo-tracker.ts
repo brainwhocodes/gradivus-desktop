@@ -5,7 +5,15 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import {
+	allTodoLeaves,
+	getLatestTodoPhasesFromEntries,
+	isTodoPhase,
+	normalizeTodoPhases,
+	type TodoItem,
+	type TodoPhase,
+	todoLeafTasks,
+} from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
@@ -50,10 +58,11 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
+	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
@@ -63,6 +72,8 @@ export interface TodoTrackerHost {
 export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
+	#revision = 0;
+	#subscribers = new Set<(phases: TodoPhase[], revision: number) => void>();
 	#reminderCount = 0;
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
@@ -77,9 +88,20 @@ export class TodoTracker {
 		return this.#clonePhases(this.#phases);
 	}
 
+	get revision(): number {
+		return this.#revision;
+	}
+
+	subscribe(callback: (phases: TodoPhase[], revision: number) => void): () => void {
+		this.#subscribers.add(callback);
+		return () => this.#subscribers.delete(callback);
+	}
+
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
-		this.#phases = this.#clonePhases(phases);
+		this.#phases = normalizeTodoPhases(phases);
+		this.#revision++;
+		for (const subscriber of this.#subscribers) subscriber(this.phases, this.#revision);
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -132,7 +154,7 @@ export class TodoTracker {
 	): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
 		const mode = this.#host.settings.get("todo.eager");
 		if (mode === "default" || !this.#host.settings.get("todo.enabled")) return undefined;
-		if (this.#host.planModeEnabled() || this.#phases.length > 0) return undefined;
+		if (this.#host.planModeEnabled() || allTodoLeaves(this.#phases).length > 0) return undefined;
 		if (promptText !== undefined) {
 			if (this.#host.agent.state.messages.some(message => message.role === "user")) return undefined;
 			const trimmedPromptText = promptText.trimEnd();
@@ -173,7 +195,7 @@ export class TodoTracker {
 			const trimmed = promptText.trimEnd();
 			if (trimmed.endsWith("?") || trimmed.endsWith("!")) return undefined;
 		}
-		if (!this.#host.getActiveToolNames().includes("task")) return undefined;
+		if (!this.#host.getEnabledToolNames().includes("task")) return undefined;
 		return {
 			role: "custom",
 			customType: "eager-task-prelude",
@@ -223,12 +245,12 @@ export class TodoTracker {
 		const incompleteByPhase = phases
 			.map(phase => ({
 				name: phase.name,
-				tasks: phase.tasks
+				tasks: todoLeafTasks(phase)
 					.filter(
 						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
 							task.status === "pending" || task.status === "in_progress",
 					)
-					.map(task => ({ content: task.content, status: task.status })),
+					.map(task => ({ id: task.id, content: task.content, status: task.status })),
 			}))
 			.filter(phase => phase.tasks.length > 0);
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
@@ -279,7 +301,10 @@ export class TodoTracker {
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "todo-reminder",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 
@@ -289,9 +314,9 @@ export class TodoTracker {
 		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
 		if (!this.#host.settings.get("todo.enabled") || !this.#host.settings.get("todo.reminders")) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
-		const incomplete = this.#phases
-			.flatMap(phase => phase.tasks)
-			.filter(task => task.status === "pending" || task.status === "in_progress");
+		const incomplete = allTodoLeaves(this.#phases).filter(
+			task => task.status === "pending" || task.status === "in_progress",
+		);
 		if (incomplete.length === 0) return null;
 		this.#mutationsSinceLastTouch = 0;
 		this.#midRunNudgeCount++;
@@ -328,12 +353,15 @@ export class TodoTracker {
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
+			id: phase.id,
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => ({
+				id: task.id,
+				content: task.content,
+				status: task.status,
+				...(task.blocker === undefined ? {} : { blocker: task.blocker }),
+				...(task.parentId === undefined ? {} : { parentId: task.parentId }),
+			})),
 		}));
 	}
 }

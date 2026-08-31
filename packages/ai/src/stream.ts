@@ -7,9 +7,9 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
+	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
-	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -20,7 +20,6 @@ import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
-import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -40,7 +39,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
-// AWS SDK, google-auth-library, @google/genai, @bufbuild/protobuf, and
+// AWS SDK, google-auth-library, @google/genai, and
 // other provider SDKs out of the CLI startup parse graph. The
 // gitlab-duo / kimi / synthetic providers stay eager because their modules
 // export routing predicates (isGitLabDuoModel, isKimiModel, isSyntheticModel)
@@ -79,6 +78,7 @@ import type {
 import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
+import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { wrapFetchForProxy } from "./utils/proxy";
 import { withRequestDebugFetch } from "./utils/request-debug";
@@ -873,8 +873,19 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	return withThinkingLoopGuard(model, options, opts =>
-		withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+	if (!model.requiresGlyphTokenization) {
+		return withThinkingLoopGuard(model, options, opts =>
+			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+		);
+	}
+	const codec = applyGlyphCodec(context);
+	const execHandlers = options?.execHandlers;
+	const wireOptions: OptionsForApi<TApi> | undefined =
+		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
+	return codec.wrap(
+		withThinkingLoopGuard(model, wireOptions, opts =>
+			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+		),
 	);
 }
 
@@ -928,9 +939,10 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
-	const prepareRequest = getProviderDefinition(model.provider)?.prepareRequest;
-	const prepared = prepareRequest?.(model as Model<Api>, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? (model as Model<Api>);
+	const providerDefinition = getProviderDefinition(model.provider);
+	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
+	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
+	const providerModel = prepared?.model ?? requestModel;
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
@@ -1085,12 +1097,19 @@ function extractStatusFromAssistantError(message: AssistantMessage): number | un
 	return AIError.status({ message: message.errorMessage });
 }
 
-function isRetryableUpstreamError(error: unknown, status: number | undefined, message: string | undefined): boolean {
+function isRetryableUpstreamError(
+	model: Model<Api>,
+	error: unknown,
+	status: number | undefined,
+	message: string | undefined,
+): boolean {
+	if (AIError.isAuthRetryableError(error)) return true;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
-	// `cyber_policy` are likewise rotatable: another account may carry the
-	// required approval. Usage-limit phrasing (Codex's
+	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
+	// denial is rotatable only when its provider and requested model match.
+	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
 	// without transient rate-limit wording mean this account is parked but a
@@ -1100,9 +1119,7 @@ function isRetryableUpstreamError(error: unknown, status: number | undefined, me
 	// credential block. Transient 429s ("Too many requests", per-minute caps)
 	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
 	// provider's own backoff layer instead of burning siblings.
-	if (AIError.isAccountPolicyError(error)) return true;
-	if (AIError.isUsageLimit(error)) return true;
-	if (isInvalidatedOAuthTokenError(error)) return true;
+	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1115,6 +1132,17 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 			? new AIError.ProviderResponseError(text, { kind: "runtime" })
 			: new ProviderHttpError(text, status);
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
+}
+
+function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
+	if (
+		!error ||
+		typeof error !== "object" ||
+		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
+	) {
+		return error;
+	}
+	return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {
@@ -1406,7 +1434,21 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	return streamSimpleWithAnthropicCacheRefresh(model, context, options);
+	if (!model.requiresGlyphTokenization) {
+		return streamSimpleWithAnthropicCacheRefresh(model, context, options);
+	}
+	const codec = applyGlyphCodec(context);
+	const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
+	const wrappedExecHandlers = execHandlers === undefined ? undefined : codec.wrapCursorExecHandlers(execHandlers);
+	const wireOptions =
+		wrappedExecHandlers === undefined
+			? options
+			: {
+					...options,
+					execHandlers: wrappedExecHandlers,
+					cursorExecHandlers: wrappedExecHandlers,
+				};
+	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
 }
 
 function streamSimpleRequest<TApi extends Api>(
@@ -1438,7 +1480,8 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimpleRequest(model, context, { ...requestOptions, apiKey });
+				const attemptOptions = { ...requestOptions, apiKey };
+				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1448,12 +1491,17 @@ function streamSimpleRequest<TApi extends Api>(
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
 						isRetryableUpstreamError(
+							model,
 							event.error,
 							extractStatusFromAssistantError(event.error),
 							event.error.errorMessage,
 						)
 					) {
-						return { error: createAssistantAuthError(event.error), bufferedEvents, terminalEvent: event };
+						return {
+							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
+							bufferedEvents,
+							terminalEvent: event,
+						};
 					}
 					flushBuffered();
 					emittedReplayUnsafeEvent = true;
@@ -1466,12 +1514,13 @@ function streamSimpleRequest<TApi extends Api>(
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
+						model,
 						error,
 						AIError.status(error),
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					return { error, bufferedEvents };
+					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();
 				outer.fail(error);
@@ -1541,7 +1590,18 @@ function streamSimpleRequest<TApi extends Api>(
 	// pi-native transport.
 	if (model.transport === "pi-native") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamPiNative(model, context, opts)),
+			withProviderInFlightLimit(model, opts, () => {
+				const nativeOptions =
+					model.api === "bedrock-converse-stream"
+						? {
+								...(opts ?? {}),
+								guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
+								guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
+								guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
+							}
+						: opts;
+				return streamPiNative(model, context, nativeOptions);
+			}),
 		);
 	}
 
@@ -1636,8 +1696,9 @@ function streamSimpleRequest<TApi extends Api>(
 			),
 		);
 	}
-	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
-	return stream(model, context, providerOptions);
+	const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+	const providerOptions = mapOptionsForApi(providerModel, requestOptions, apiKey);
+	return stream(providerModel, context, providerOptions);
 }
 
 export async function completeSimple<TApi extends Api>(
@@ -1835,7 +1896,7 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	) {
 		return options;
 	}
-	const floor = minimumSupportedEffort(model);
+	const floor = defaultSupportedEffort(model);
 	if (floor === undefined) return options;
 	return { ...options, reasoning: floor, disableReasoning: undefined, forceReasoningOff: undefined };
 }
@@ -1905,6 +1966,7 @@ function mapOptionsForApi<TApi extends Api>(
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
@@ -2020,9 +2082,12 @@ function mapOptionsForApi<TApi extends Api>(
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+				guardrailIdentifier: model.guardrailIdentifier ?? options?.guardrailIdentifier,
+				guardrailVersion: model.guardrailVersion ?? options?.guardrailVersion,
+				guardrailTrace: model.guardrailTrace ?? options?.guardrailTrace,
 			};
-			// Adaptive mode sends effort directly, no budget_tokens — skip budget inflation.
-			if (model.thinking?.mode === "anthropic-adaptive") {
+			// Effort modes send effort directly, no budget_tokens — skip budget inflation.
+			if (model.thinking?.mode === "effort" || model.thinking?.mode === "anthropic-adaptive") {
 				return castApi<"bedrock-converse-stream">(bedrockBase);
 			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
@@ -2157,7 +2222,7 @@ function mapOptionsForApi<TApi extends Api>(
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
-						level: mapEffortToGoogleThinkingLevel(effort),
+						level: mapEffortToGoogleThinkingLevel(effort, googleModel),
 					},
 					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2190,7 +2255,7 @@ function mapOptionsForApi<TApi extends Api>(
 						requestModelId: resolveWireModelId(model, effort),
 						thinking: {
 							enabled: true,
-							level: mapEffortToGoogleThinkingLevel(effort),
+							level: mapEffortToGoogleThinkingLevel(effort, model),
 						},
 						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
@@ -2262,7 +2327,7 @@ function mapOptionsForApi<TApi extends Api>(
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
-						level: mapEffortToGoogleThinkingLevel(effort),
+						level: mapEffortToGoogleThinkingLevel(effort, model),
 					},
 					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2294,10 +2359,16 @@ function mapOptionsForApi<TApi extends Api>(
 		case "cursor-agent": {
 			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
 			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
+			const cursorModel = model as Model<"cursor-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && cursorModel.reasoning
+					? requireSupportedEffort(cursorModel, options.reasoning)
+					: undefined;
 			return castApi<"cursor-agent">({
 				...base,
 				execHandlers,
 				onToolResult,
+				wireModelId: resolveWireModelId(cursorModel, effort),
 			});
 		}
 

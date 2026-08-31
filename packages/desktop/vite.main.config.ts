@@ -2,16 +2,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { defineConfig, type Plugin } from "vite";
 
-function rawTextPlugin() {
+function rawTextPlugin(): Plugin {
 	return {
 		name: "raw-text-loader",
-		transform(code: string, id: string) {
-			if (id.endsWith(".md")) {
-				return {
-					code: `export default ${JSON.stringify(code)};`,
-					map: { mappings: "" },
-				};
-			}
+		enforce: "pre",
+		load(id) {
+			if (!id.endsWith(".md") && !id.endsWith(".txt") && !id.includes(".md?") && !id.includes(".txt?")) return;
+			const filePath = id.split("?")[0]!;
+			const code = fs.readFileSync(filePath, "utf8");
+			return {
+				code: `export default ${JSON.stringify(code)};`,
+				map: { mappings: "" },
+			};
 		},
 	};
 }

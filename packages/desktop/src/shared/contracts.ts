@@ -1,3 +1,5 @@
+import type { PlanReviewAnnotationState } from "@oh-my-pi/pi-utils/plan-review";
+
 export type SessionSurface = "chat" | "browser-selection";
 export type SessionKind = "work" | "code";
 export type ProcessState = "stopped" | "starting" | "ready" | "running" | "stopping" | "error";
@@ -40,6 +42,52 @@ export interface PromptImageContent {
 }
 
 export type PromptAttachmentStageResult = PromptAttachmentView[];
+export interface PlanReviewExecutionModelView {
+	role: string;
+	provider: string;
+	modelId: string;
+	label: string;
+	thinkingLevel?: string;
+}
+
+export interface PlanReviewView {
+	id: string;
+	title: string;
+	planFilePath: string;
+	revision: string;
+	status: "ready" | "awaiting_refinement" | "applying" | "failed";
+	phase:
+		| "ready"
+		| "awaiting_refinement"
+		| "accepted"
+		| "mode_exited"
+		| "session_reset"
+		| "compaction_finished"
+		| "prompt_admitted"
+		| "failed";
+	content: string;
+	annotationState: PlanReviewAnnotationState;
+	suggestedSaveName: string;
+	contextUsage?: { tokens: number; contextWindow: number; percent: number };
+	keepContextDisabled: boolean;
+	executionModels: PlanReviewExecutionModelView[];
+	defaultExecutionRole?: string;
+	error?: string;
+}
+
+export type PlanReviewDecisionInput =
+	| { kind: "approve"; context: "fresh" | "compact" | "keep"; executionRole?: string }
+	| { kind: "refine"; feedback: string; composition?: PromptComposition }
+	| { kind: "save" };
+
+export type PlanReviewResolutionResult =
+	| {
+			accepted: true;
+			awaitingRefinement?: true;
+			savedPath?: string;
+			createdSession?: SessionSnapshot;
+	  }
+	| { accepted: false; cancelled: true };
 
 export interface SlashCommand {
 	name: string;
@@ -70,7 +118,7 @@ export interface OpenRouterModelRouting {
 	providers: OpenRouterProviderOption[];
 }
 
-export type AgentSettingValue = boolean | string | number;
+export type AgentSettingValue = boolean | string | number | string[];
 export type AgentSettingTab =
 	| "appearance"
 	| "model"
@@ -93,10 +141,28 @@ export interface AgentSettingView {
 	group?: string;
 	label: string;
 	description: string;
-	control: "toggle" | "select";
+	control: "toggle" | "select" | "multiselect";
 	value: AgentSettingValue;
 	options?: AgentSettingOption[];
+	ordered?: boolean;
 	apply: "immediate" | "next-session";
+}
+
+export type AgentPromptScope = "project" | "user";
+
+export interface AgentPromptOverrideView {
+	systemPrompt: string;
+	revision: string;
+}
+
+export interface AgentPromptView {
+	name: string;
+	description: string;
+	effectiveSource: "project" | "user" | "bundled";
+	systemPrompt: string;
+	project?: AgentPromptOverrideView;
+	user?: AgentPromptOverrideView;
+	apply: "next-spawn";
 }
 
 export interface GradivusSettings {
@@ -175,6 +241,20 @@ export interface TimelineFileChange {
 	operation: FileChangeOperation;
 	disposition?: FileChangeDisposition;
 }
+export interface TimelineEvalCellDetail {
+	index: number;
+	title?: string;
+	language?: string;
+	status: "pending" | "running" | "complete" | "error";
+	durationMs?: number;
+	exitCode?: number;
+	code: string;
+	output: string;
+	omittedCodeLineCount?: number;
+	omittedOutputLineCount?: number;
+	statusEvents?: string[];
+}
+
 export type TimelineToolActivity =
 	| {
 			operation: "read";
@@ -198,6 +278,22 @@ export type TimelineToolActivity =
 			operation: "hub";
 			operationName: string;
 			target?: string;
+	  }
+	| {
+			operation: "eval";
+			languages: string[];
+			title?: string;
+			cellCount: number;
+			durationMs: number;
+			codePreview: string[];
+			outputPreview: string[];
+			omittedLineCount: number;
+			omittedImageCount: number;
+			detailsLoaded: boolean;
+			cells?: TimelineEvalCellDetail[];
+			jsonOutputs?: string[];
+			images?: TimelineImage[];
+			statusEvents?: string[];
 	  };
 export type FileDiffStatus = "modified" | "added" | "deleted" | "renamed" | "clean" | "binary" | "unavailable";
 
@@ -415,6 +511,59 @@ export interface RuntimeReportView {
 	error?: string;
 }
 
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+export interface TodoItem {
+	id: string;
+	content: string;
+	status: TodoStatus;
+	blocker?: string;
+	parentId?: string;
+}
+export interface TodoPhase {
+	id: string;
+	name: string;
+	tasks: TodoItem[];
+}
+export interface TodoState {
+	phases: TodoPhase[];
+	revision: number;
+}
+export interface SessionRetryState {
+	attempt: number;
+	maxAttempts: number;
+	delayMs: number;
+}
+export interface SessionStatsView {
+	sessionFile?: string;
+	sessionId: string;
+	userMessages: number;
+	assistantMessages: number;
+	toolCalls: number;
+	toolResults: number;
+	totalMessages: number;
+	tokens: {
+		input: number;
+		output: number;
+		reasoning: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
+	premiumRequests: number;
+	cost: number;
+	contextUsage?: { tokens: number; contextWindow: number; percentage?: number };
+}
+export interface ContextMutationResult {
+	beforeTokens: number;
+	afterTokens: number;
+	changed: boolean;
+	savedPath?: string;
+}
+export interface ExportHtmlResult {
+	cancelled: boolean;
+	path?: string;
+}
+
 export interface SessionSnapshot extends SessionRuntimeConfig {
 	record: SessionRecordV1;
 	state: ProcessState;
@@ -428,10 +577,16 @@ export interface SessionSnapshot extends SessionRuntimeConfig {
 	contextWindow?: number;
 	tokensPerSecond?: number | null;
 	queuedMessageCount?: number;
-	todoPhases?: Array<{ title?: string; items: Array<{ text: string; completed: boolean }> }>;
+	browserInventory?: BrowserTabInventoryView[];
+	todoState: TodoState;
+	isStreaming?: boolean;
+	isCompacting?: boolean;
+	retryState?: SessionRetryState;
 	pendingExtension?: ExtensionView;
 	warning?: string;
 	runtime?: RuntimeReportView;
+	planReviewSupported: boolean;
+	planReview?: PlanReviewView;
 }
 
 export interface AuthAccountView {
@@ -537,6 +692,7 @@ export interface CreateTerminalInput {
 	id: string;
 	tabId: string;
 	workspaceId: string;
+	name: string;
 	cols: number;
 	rows: number;
 	layout?: "columns" | "rows" | "grid";
@@ -544,14 +700,6 @@ export interface CreateTerminalInput {
 export interface TerminalViewState {
 	id: string;
 	cwd: string;
-}
-
-export interface OpenChatTerminalInput {
-	id: string;
-	sessionId: string;
-	cols: number;
-	rows: number;
-	fromOffset: number;
 }
 
 export interface UpdateTabInput {
@@ -579,9 +727,61 @@ export interface CommitSelectionPayload {
 	domSnapshot?: ElementDomSnapshot;
 	screenshot?: ElementScreenshot;
 }
+export type PaneAutomationAccess = "observe" | "control";
+export interface PaneAutomationLeaseView {
+	paneId: string;
+	access: PaneAutomationAccess;
+	documentEpoch: number;
+	url: string;
+	title: string;
+	healthy: boolean;
+}
+export interface PaneAutomationState {
+	available: boolean;
+	reason?: string;
+	lease?: PaneAutomationLeaseView;
+	tabs?: BrowserTabInventoryView[];
+}
+export interface BrowserTabInventoryView {
+	name: string;
+	state: "alive" | "dead";
+	browser: "headless" | "connected" | "relay" | "spawned" | "cmux";
+	url: string;
+	title: string;
+	owners: string[];
+	activeRunCount: number;
+	queuedRunCount: number;
+}
+export interface BrowserTabCloseResult {
+	closed: boolean;
+	cancelled?: boolean;
+	inventory: BrowserTabInventoryView[];
+}
 
 export type WorkspacePaneKind = "browser" | "terminal";
-export type BrowserNavigationAction = "back" | "forward" | "reload" | "stop";
+export type BrowserNavigationAction =
+	| "back"
+	| "forward"
+	| "reload"
+	| "hard-reload"
+	| "zoom-in"
+	| "zoom-out"
+	| "zoom-reset"
+	| "stop";
+export type BrowserShortcut =
+	| "new-tab"
+	| "reopen-tab"
+	| "close-tab"
+	| "next-tab"
+	| "previous-tab"
+	| "focus-address"
+	| "find"
+	| "back"
+	| "forward"
+	| "hard-reload"
+	| "zoom-in"
+	| "zoom-out"
+	| "zoom-reset";
 export const MAX_WORKSPACE_PANES = 4;
 export type PaneContextMenuAction = "split-columns" | "split-rows" | "close";
 
@@ -596,20 +796,30 @@ export interface BrowserViewState {
 	id: string;
 	url: string;
 	title: string;
+	faviconUrl?: string;
 	canGoBack: boolean;
 	canGoForward: boolean;
 	loading: boolean;
 	error?: string;
 }
+export interface BrowserFindState {
+	query: string;
+	activeMatchOrdinal: number;
+	matches: number;
+	finalUpdate: boolean;
+}
 export type ChatTerminalStatus = "starting" | "running" | "exited" | "failed";
-
-export interface ChatTerminalViewState {
-	id: string;
-	workspace: string;
-	cwd: string;
-	status: ChatTerminalStatus;
+export interface TerminalOutputChunkView {
 	offset: number;
-	truncated?: boolean;
+	data: string;
+}
+export interface TerminalAttachmentState {
+	id: string;
+	status: ChatTerminalStatus;
+	cwd: string;
+	chunks: TerminalOutputChunkView[];
+	firstAvailableOffset: number;
+	totalBytesProduced: number;
 	error?: string;
 }
 
@@ -617,6 +827,9 @@ export type WorkspaceEvent =
 	| { type: "browser-state"; paneId: string; state: BrowserViewState }
 	| { type: "browser-focus"; paneId: string }
 	| { type: "browser-new-window"; paneId: string; url: string }
+	| { type: "browser-find"; paneId: string; state: BrowserFindState }
+	| { type: "browser-warning"; paneId: string; message: string }
+	| { type: "browser-shortcut"; paneId: string; shortcut: BrowserShortcut }
 	| { type: "terminal-data"; paneId: string; data: string; offset: number }
 	| { type: "terminal-exit"; paneId: string; exitCode: number }
 	| { type: "terminal-error"; paneId: string; message: string }
@@ -651,18 +864,29 @@ export interface GradivusEvent {
 		| "agent_hub_update"
 		| "extension"
 		| "commands"
+		| "browser_inventory"
 		| "config"
 		| "prompt_result"
-		| "warning";
+		| "todo_update"
+		| "warning"
+		| "plan_review"
+		| "session_reset";
 	state?: ProcessState;
 	record?: SessionRecordV1;
 	item?: TimelineItem;
 	subagents?: SubagentView[];
 	agentHub?: AgentHubSnapshot;
 	commands?: SlashCommand[];
+	browserInventory?: BrowserTabInventoryView[];
 	config?: SessionRuntimeConfig;
+	todoState?: TodoState;
+	planReview?: PlanReviewView;
+	snapshot?: SessionSnapshot;
 	extension?: ExtensionView;
 	runtime?: RuntimeReportView;
+	isStreaming?: boolean;
+	isCompacting?: boolean;
+	retryState?: SessionRetryState;
 	requestId?: string;
 	agentInvoked?: boolean;
 	error?: { message: string; code?: string };
@@ -713,6 +937,20 @@ export interface GradivusApi {
 	respondAuthPrompt(value: string): Promise<void>;
 	getAgentSettings(id?: string): Promise<AgentSettingView[]>;
 	setAgentSetting(id: string | undefined, path: string, value: AgentSettingValue): Promise<AgentSettingView>;
+	getAgentPrompts(id?: string): Promise<AgentPromptView[]>;
+	saveAgentPrompt(
+		id: string | undefined,
+		name: string,
+		scope: AgentPromptScope,
+		systemPrompt: string,
+		expectedRevision: string | null,
+	): Promise<AgentPromptView>;
+	resetAgentPrompt(
+		id: string | undefined,
+		name: string,
+		scope: AgentPromptScope,
+		expectedRevision: string,
+	): Promise<AgentPromptView>;
 	bootstrap(): Promise<BootstrapSnapshot>;
 	reconnectRuntime(): Promise<void>;
 	chooseAndCreate(kind: SessionKind, cwd?: string): Promise<SessionSnapshot | null>;
@@ -726,6 +964,7 @@ export interface GradivusApi {
 	agentHubClear(id: string, agentId: string): Promise<void>;
 	agentHubRevive(id: string, agentId: string): Promise<void>;
 	loadTimelineItem(id: string, itemId: string): Promise<TimelineItem>;
+	loadTimelineToolDetail(id: string, itemId: string): Promise<TimelineToolActivity>;
 	getAvailableCommands(id: string): Promise<SlashCommand[]>;
 	getAvailableModels(id: string): Promise<ModelOption[]>;
 	getOpenRouterModelRouting(id: string, modelId: string): Promise<OpenRouterModelRouting>;
@@ -735,6 +974,13 @@ export interface GradivusApi {
 		providerId: string,
 		enabled: boolean,
 	): Promise<OpenRouterModelRouting>;
+	compact(id: string, instructions?: string): Promise<ContextMutationResult>;
+	handoff(id: string, instructions?: string): Promise<ContextMutationResult>;
+	retry(id: string): Promise<{ started: boolean }>;
+	abortRetry(id: string): Promise<void>;
+	restart(id: string): Promise<SessionSnapshot>;
+	getSessionStats(id: string): Promise<SessionStatsView>;
+	exportHtml(id: string, outputPath?: string): Promise<ExportHtmlResult>;
 	stop(id: string): Promise<SessionSnapshot>;
 	rename(id: string, title: string): Promise<SessionSnapshot>;
 	deleteSession(id: string): Promise<BootstrapSnapshot>;
@@ -747,6 +993,21 @@ export interface GradivusApi {
 	steer(id: string, composition: PromptComposition): Promise<void>;
 	steerQueued(id: string, composition: PromptComposition): Promise<void>;
 	queueFollowUp(id: string, composition: PromptComposition): Promise<void>;
+	requestPlanReview(id: string): Promise<PlanReviewView>;
+	updatePlanReview(
+		id: string,
+		reviewId: string,
+		content: string,
+		expectedRevision: string,
+		annotationState: PlanReviewAnnotationState,
+	): Promise<PlanReviewView>;
+	resolvePlanReview(
+		id: string,
+		reviewId: string,
+		expectedRevision: string,
+		decision: PlanReviewDecisionInput,
+	): Promise<PlanReviewResolutionResult>;
+	setTodos(id: string, phases: TodoPhase[], expectedRevision: number, action: string): Promise<TodoState>;
 	setModel(id: string, provider: string, modelId: string): Promise<void>;
 	setThinking(id: string, level: ThinkingLevel): Promise<void>;
 	setFastMode(id: string, enabled: boolean): Promise<void>;
@@ -766,16 +1027,20 @@ export interface GradivusApi {
 	createBrowser(options: CreateBrowserInput): Promise<BrowserViewState>;
 	navigateBrowser(id: string, url: string): Promise<BrowserViewState>;
 	controlBrowser(id: string, action: BrowserNavigationAction): Promise<void>;
+	findBrowser(id: string, query: string, forward: boolean): Promise<void>;
+	stopBrowserFind(id: string): Promise<void>;
 	setBrowserBounds(id: string, bounds: BrowserBounds): Promise<void>;
-	setVisibleBrowsers(ids: string[]): Promise<void>;
+	setVisibleBrowsers(ids: string[], activePaneId?: string): Promise<void>;
 	closeBrowser(id: string): Promise<void>;
 	showPaneContextMenu(id: string, canSplit: boolean): void;
 	createTerminal(options: CreateTerminalInput): Promise<TerminalViewState>;
-	openChatTerminal(input: OpenChatTerminalInput): Promise<ChatTerminalViewState>;
+	attachTerminal(id: string, fromOffset: number): Promise<TerminalAttachmentState>;
+	restartTerminal(id: string): Promise<TerminalAttachmentState>;
 	writeTerminal(id: string, data: string): Promise<void>;
 	resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
 	closeTerminal(id: string): Promise<void>;
 	updateTab(tabId: string, updates: UpdateTabInput): Promise<void>;
+	reorderTab(tabId: string, beforeTabId?: string): Promise<void>;
 	closeTab(tabId: string): Promise<void>;
 	closePane(paneId: string): Promise<void>;
 	minimizeWindow(): Promise<void>;
@@ -795,6 +1060,14 @@ export interface GradivusApi {
 	getAppSettings(): Promise<GradivusSettings>;
 	updateAppSettings(updates: UpdateGradivusSettingsInput): Promise<GradivusSettings>;
 	resetAppSettings(): Promise<GradivusSettings>;
+	getPaneAutomation(sessionId: string, paneId: string): Promise<PaneAutomationState>;
+	requestPaneAuthorization(
+		sessionId: string,
+		paneId: string,
+		access: PaneAutomationAccess,
+	): Promise<PaneAutomationState>;
+	revokePane(sessionId: string, paneId: string): Promise<PaneAutomationState>;
+	closeBrowserTabForSession(sessionId: string, name: string): Promise<BrowserTabCloseResult>;
 }
 
 declare global {

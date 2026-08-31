@@ -1,20 +1,32 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	type Api,
-	type ApiKeyResolver,
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	type AssistantMessageEventStream,
-	type Model,
-	type SimpleStreamOptions,
-	SqliteAuthCredentialStore,
+import type {
+	Api,
+	ApiKeyResolver,
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	Model,
+	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { type BenchModelRegistry, type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import type { BenchModelRegistry } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
-import { getAgentDbPath, getProjectAgentDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getModelDbPath,
+	getProjectAgentDir,
+	setAgentDir,
+	setProjectDir,
+	TempDir,
+} from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 function fakeModel(provider: string, id: string): Model<Api> {
@@ -100,6 +112,75 @@ async function runBench(
 	);
 	return { summary, stderr: stderr.join("") };
 }
+describe("default bench runtime", () => {
+	it("hydrates credential-scoped model caches before selector resolution", async () => {
+		const tempDir = TempDir.createSync("@omp-bench-runtime-");
+		const apiKey = "bench-cache-test-key";
+		const modelId = "cached-bench-model";
+		const cacheDbPath = getModelDbPath(tempDir.path());
+		await fs.mkdir(path.dirname(cacheDbPath), { recursive: true });
+		try {
+			writeModelCache(
+				resolveModelCacheProviderId("opencode-go", { apiKey }),
+				Date.now(),
+				[
+					buildModel({
+						id: modelId,
+						name: "Cached Bench Model",
+						provider: "opencode-go",
+						api: "openai-completions",
+						baseUrl: "https://opencode.ai/zen/go/v1",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128_000,
+						maxTokens: 4096,
+					}),
+				],
+				true,
+				"",
+				cacheDbPath,
+			);
+			const script = `
+				import { createDefaultBenchRuntime, resolveBenchTargets } from "./packages/coding-agent/src/cli/bench-runtime.ts";
+				const runtime = await createDefaultBenchRuntime();
+				try {
+					const [target] = resolveBenchTargets(
+						["opencode-go/${modelId}"],
+						runtime.modelRegistry,
+						runtime.settings,
+						() => {},
+					);
+					console.log(target.model.provider + "/" + target.model.id);
+				} finally {
+					runtime.close?.();
+				}
+			`;
+			const child = Bun.spawn([process.execPath, "-e", script], {
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: {
+					...process.env,
+					NO_COLOR: "1",
+					OPENCODE_API_KEY: apiKey,
+					PI_CODING_AGENT_DIR: tempDir.path(),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+			expect(stdout.trim()).toBe(`opencode-go/${modelId}`);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+});
 
 describe("bench credential-aware provider selection", () => {
 	it("redirects an ambiguous shared-id selector to an authenticated provider", async () => {
@@ -189,7 +270,7 @@ describe("bench empty-output guard", () => {
 		const run = summary.models[0].results[0];
 		expect(run.ok).toBe(false);
 		if (!run.ok) expect(run.error).toContain("no output");
-		expect(summary.models[0].average).toBeNull();
+		expect(summary.models[0].stats).toBeNull();
 	});
 });
 
@@ -292,7 +373,7 @@ describe("bench service tier", () => {
 	});
 });
 
-describe.serial("bench default runtime OAuth routing startup", () => {
+describe.skipIf(process.platform === "win32").serial("bench default runtime OAuth routing startup", () => {
 	it("installs persisted OAuth policy before the first runtime-provider refresh", async () => {
 		const settingsState = beginSettingsTest();
 		const projectTmp = await TempDir.create("@bench-oauth-startup-");

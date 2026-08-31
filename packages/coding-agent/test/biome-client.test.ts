@@ -75,18 +75,21 @@ function biomeConfig(command: string): ServerConfig {
 }
 
 describe("BiomeClient format", () => {
-	test("formats the supplied content instead of stale on-disk content", async () => {
-		const tempDir = await makeTempDir();
-		const targetFile = path.join(tempDir, "example.ts");
-		const unformatted = "export const value:number=1\n";
-		const formatted = "export const value: number = 1;\n";
-		await Bun.write(targetFile, "export const stale = true;\n");
-		const command = await createFakeBiomeCommand(tempDir, unformatted, formatted);
-		const result = await new BiomeClient(biomeConfig(command), tempDir).format(targetFile, unformatted);
+	test.skipIf(process.platform === "win32")(
+		"formats the supplied content instead of stale on-disk content",
+		async () => {
+			const tempDir = await makeTempDir();
+			const targetFile = path.join(tempDir, "example.ts");
+			const unformatted = "export const value:number=1\n";
+			const formatted = "export const value: number = 1;\n";
+			await Bun.write(targetFile, "export const stale = true;\n");
+			const command = await createFakeBiomeCommand(tempDir, unformatted, formatted);
+			const result = await new BiomeClient(biomeConfig(command), tempDir).format(targetFile, unformatted);
 
-		expect(result).toBe(formatted);
-		expect(await Bun.file(targetFile).text()).toBe(formatted);
-	});
+			expect(result).toBe(formatted);
+			expect(await Bun.file(targetFile).text()).toBe(formatted);
+		},
+	);
 
 	test("formats configured TypeScript with the repository Biome", async () => {
 		const scratchDir = await fs.mkdtemp(
@@ -132,6 +135,29 @@ describe("BiomeClient format", () => {
 });
 
 describe("BiomeClient lint", () => {
+	test.skipIf(process.platform === "win32")(
+		"cancels a hung Biome process when diagnostics are aborted",
+		async () => {
+			const tempDir = await makeTempDir();
+			const command = path.join(tempDir, "biome-hang");
+			await Bun.write(command, "#!/bin/sh\nwhile :; do :; done\n");
+			await fs.chmod(command, 0o755);
+			const targetFile = path.join(tempDir, "example.ts");
+			const started = Date.now();
+
+			let rejected = false;
+			try {
+				await new BiomeClient(biomeConfig(command), tempDir).lint(targetFile, AbortSignal.timeout(50));
+			} catch {
+				rejected = true;
+			}
+
+			expect(rejected).toBe(true);
+			expect(Date.now() - started).toBeLessThan(2_000);
+		},
+		5_000,
+	);
+
 	test("surfaces Biome 2.x --reporter=json diagnostics", async () => {
 		const tempDir = await makeTempDir();
 		await Bun.write(

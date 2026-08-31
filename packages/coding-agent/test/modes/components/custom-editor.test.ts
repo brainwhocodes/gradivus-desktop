@@ -134,7 +134,9 @@ describe("CustomEditor queue shorthand decoration", () => {
 			const editor = new CustomEditor(getEditorTheme());
 			editor.setText(`${prefix}\nqueue this`);
 
-			expect(editor.decorateText(prefix)).toBe(theme.fg("dim", `Queueing ${theme.nav.selected}`));
+			expect(editor.decorateText(prefix, { line: 0, startCol: 0, endCol: prefix.length })).toBe(
+				theme.fg("dim", `Queueing ${theme.nav.selected}`),
+			);
 			editor.focused = true;
 			const rendered = editor.render(40).map(line => Bun.stripANSI(line.replace(CURSOR_MARKER, "")));
 			expect(rendered.some(line => line.includes(`Queueing ${theme.nav.selected}`))).toBe(true);
@@ -150,17 +152,26 @@ describe("CustomEditor queue shorthand decoration", () => {
 		]) {
 			const editor = new CustomEditor(getEditorTheme());
 			editor.setText(input);
-			expect(editor.decorateText(`${marker} first`).startsWith(theme.fg("accent", marker))).toBe(true);
+			const text = `${marker} first`;
+			expect(
+				editor
+					.decorateText(text, { line: 1, startCol: 0, endCol: text.length })
+					.startsWith(theme.fg("accent", marker)),
+			).toBe(true);
 		}
 
 		const unfinished = new CustomEditor(getEditorTheme());
 		unfinished.setText("=>\n1. first\n2. second\n3. third\n4.");
-		expect(unfinished.decorateText("1. first").startsWith(theme.fg("accent", "1."))).toBe(true);
-		expect(unfinished.decorateText("4.").startsWith(theme.fg("accent", "4."))).toBe(true);
+		expect(
+			unfinished.decorateText("1. first", { line: 1, startCol: 0, endCol: 8 }).startsWith(theme.fg("accent", "1.")),
+		).toBe(true);
+		expect(
+			unfinished.decorateText("4.", { line: 4, startCol: 0, endCol: 2 }).startsWith(theme.fg("accent", "4.")),
+		).toBe(true);
 
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setText("=>\n1. first\n3. third");
-		expect(editor.decorateText("1. first")).toBe("1. first");
+		expect(editor.decorateText("1. first", { line: 1, startCol: 0, endCol: 8 })).toBe("1. first");
 	});
 });
 
@@ -178,17 +189,20 @@ describe("CustomEditor bracketed path paste", () => {
 		]);
 	});
 
-	it("strips `file://` URLs to the local filesystem path before loading the image", () => {
-		// macOS / Ghostty / iTerm2 sometimes forward the pasteboard's
-		// `public.file-url` representation when the user does Finder→Copy
-		// then Cmd+V. Without decoding, `loadImageInput` would try to read a
-		// literal `file:///…` path and fail.
-		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/Pictures/photo.png"))).toEqual([
-			"/Users/me/Pictures/photo.png",
-		]);
-	});
+	it.skipIf(process.platform === "win32")(
+		"strips `file://` URLs to the local filesystem path before loading the image",
+		() => {
+			// macOS / Ghostty / iTerm2 sometimes forward the pasteboard's
+			// `public.file-url` representation when the user does Finder→Copy
+			// then Cmd+V. Without decoding, `loadImageInput` would try to read a
+			// literal `file:///…` path and fail.
+			expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/Pictures/photo.png"))).toEqual([
+				"/Users/me/Pictures/photo.png",
+			]);
+		},
+	);
 
-	it("percent-decodes spaces inside `file://` URLs", () => {
+	it.skipIf(process.platform === "win32")("percent-decodes spaces inside `file://` URLs", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/My%20Pictures/photo.png"))).toEqual([
 			"/Users/me/My Pictures/photo.png",
 		]);
@@ -301,7 +315,7 @@ describe("extractImagePathFromText (issue #3506)", () => {
 		expect(extractImagePathFromText("   ")).toBeUndefined();
 	});
 
-	it("decodes a `file://` URL to its filesystem path", () => {
+	it.skipIf(process.platform === "win32")("decodes a `file://` URL to its filesystem path", () => {
 		expect(extractImagePathFromText("file:///Users/me/Pictures/photo.png")).toBe("/Users/me/Pictures/photo.png");
 	});
 

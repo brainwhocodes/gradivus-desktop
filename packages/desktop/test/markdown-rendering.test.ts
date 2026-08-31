@@ -72,6 +72,18 @@ describe("Markdown syntax rendering", () => {
 		expect(html).not.toContain("javascript:");
 		expect(html).toContain('<a href="https://example.com/docs" target="_blank" rel="noopener">safe</a>');
 	});
+	it("renders source anchors beyond the transcript fallback limit with absolute line offsets", () => {
+		const prefix = "paragraph\n\n".repeat(8_000);
+		const result = renderMarkdownDocument(`${prefix}## Late section\n\nLate instruction.\n`, {
+			sourceAnchors: { lineOffset: 10 },
+		});
+
+		expect(prefix.length).toBeGreaterThan(64 * 1024);
+		expect(result.html).not.toContain("large-markdown");
+		expect(result.html).toContain('data-source-row="16011"');
+		expect(result.html).toContain('data-markdown-annotate-line="16011"');
+		expect(result.html).toContain("Late section");
+	});
 });
 
 describe("Markdown copy behavior", () => {

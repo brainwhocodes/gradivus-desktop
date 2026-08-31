@@ -1102,8 +1102,11 @@ export class WorkerCore {
 			const context = this.#browser.contexts()[0];
 			if (!context) throw new ToolError("Connected browser has no default context");
 			this.#context = context;
+			this.#transport.send({ type: "setup" });
 			if (payload.mode === "headless") {
 				this.#page = await context.newPage();
+				const createdTargetId = await targetIdForPage(context, this.#page);
+				this.#transport.send({ type: "page-created", targetId: createdTargetId });
 				this.#observeDialogs();
 				await applyStealthPatches(this.#browser, this.#page);
 				await applyViewport(this.#page, payload.viewport);
@@ -1122,6 +1125,13 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#context, this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
+			// A failed headless init leaves the worker's page orphaned in the shared
+			// browser (the supervisor retries with a fresh worker), so close it before
+			// reporting. Attach mode adopts an existing target — never close it.
+			const page = this.#page;
+			if (payload.mode === "headless" && page && !page.isClosed()) {
+				await page.close().catch(() => undefined);
+			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
 		}
 	}
