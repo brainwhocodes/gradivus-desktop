@@ -7,10 +7,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { YAML } from "bun";
 import { theme } from "../modes/theme/theme";
+import { serializeAgentDefinition } from "../task/agent-serialization";
 import { loadBundledAgents } from "../task/agents";
-import type { AgentDefinition } from "../task/types";
 
 export type AgentsAction = "unpack";
 
@@ -52,28 +51,6 @@ function resolveTargetDir(flags: AgentsCommandArgs["flags"]): string {
 	return path.join(getAgentDir(), "agents");
 }
 
-function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
-	const frontmatter: Record<string, unknown> = {
-		name: agent.name,
-		description: agent.description,
-	};
-
-	if (agent.tools && agent.tools.length > 0) frontmatter.tools = agent.tools;
-	if (agent.spawns !== undefined) frontmatter.spawns = agent.spawns;
-	if (agent.model && agent.model.length > 0) frontmatter.model = agent.model;
-	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
-	if (agent.output !== undefined) frontmatter.output = agent.output;
-	if (agent.blocking) frontmatter.blocking = true;
-
-	return frontmatter;
-}
-
-function serializeAgent(agent: AgentDefinition): string {
-	const frontmatter = YAML.stringify(toFrontmatter(agent), null, 2).trimEnd();
-	const body = agent.systemPrompt.trim();
-	return `---\n${frontmatter}\n---\n\n${body}\n`;
-}
-
 async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<UnpackResult> {
 	const targetDir = resolveTargetDir(flags);
 	await fs.mkdir(targetDir, { recursive: true });
@@ -94,7 +71,7 @@ async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<U
 			}
 		}
 
-		await Bun.write(filePath, serializeAgent(agent));
+		await Bun.write(filePath, serializeAgentDefinition(agent));
 		written.push(filePath);
 	}
 

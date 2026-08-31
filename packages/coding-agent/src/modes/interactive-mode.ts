@@ -47,6 +47,7 @@ import {
 	hsvToRgb,
 	isEnoent,
 	logger,
+	type PlanReviewAnnotationState,
 	postmortem,
 	prompt,
 	sanitizeText,
@@ -95,6 +96,7 @@ import {
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
+import { planSaveFileName, planSaveTitleExcerpt } from "../plan-mode/plan-save";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
@@ -131,12 +133,15 @@ import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
+	allTodoLeaves,
 	formatPhaseDisplayName,
 	isClosedTodo,
 	nextActionableTask,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
+	todoLeafTasks,
 	todoMatchesAnyDescription,
+	todoTaskDepth,
 } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { renderTreeList } from "../tui/tree-list";
@@ -173,7 +178,7 @@ import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
-import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
+import { PlanReviewOverlay } from "./components/plan-review-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
@@ -321,36 +326,7 @@ const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resum
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
-const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
-
-const PLAN_SAVE_STEM_MAX_LENGTH = 32;
 const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
-/** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
- *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
- *  when a verbose fallback title sneaks through. */
-export function planSaveFileName(title: string): string {
-	let stem = title
-		.normalize("NFC")
-		.replace(/[^\p{L}\p{N}]+/gu, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "")
-		.toUpperCase();
-	if (stem.length > PLAN_SAVE_STEM_MAX_LENGTH) {
-		const cut = stem.lastIndexOf("_", PLAN_SAVE_STEM_MAX_LENGTH);
-		stem = cut > 0 ? stem.slice(0, cut) : stem.slice(0, PLAN_SAVE_STEM_MAX_LENGTH);
-	}
-	if (!stem || stem === "PLAN") return "PLAN.md";
-	return `${stem.endsWith("_PLAN") ? stem : `${stem}_PLAN`}.md`;
-}
-
-function planSaveTitleExcerpt(planContent: string): string {
-	return planContent
-		.split(/\r?\n/)
-		.map(line => line.trim())
-		.filter(Boolean)
-		.slice(0, PLAN_SAVE_TITLE_LINE_LIMIT)
-		.join("\n");
-}
 
 function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
 	const trimmed = args.trim();
@@ -2389,19 +2365,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (completedDescs.length === 0) return;
 
 		let mutated = false;
-		const next: TodoPhase[] = this.todoPhases.map(phase => ({
-			name: phase.name,
-			tasks: phase.tasks.map(task => {
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
-					return task;
-				}
-				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
-				mutated = true;
-				// Drop any blocker note along with the blocked status — the wait the
-				// note described is over.
-				return { content: task.content, status: "completed" as const };
-			}),
-		}));
+		const next: TodoPhase[] = this.todoPhases.map(phase => {
+			const leafIds = new Set(todoLeafTasks(phase).map(task => task.id));
+			return {
+				id: phase.id,
+				name: phase.name,
+				tasks: phase.tasks.map(task => {
+					if (!leafIds.has(task.id)) return task;
+					if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
+						return task;
+					}
+					if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
+					mutated = true;
+					const updated = { ...task, status: "completed" as const };
+					delete updated.blocker;
+					return updated;
+				}),
+			};
+		});
 		if (!mutated) return;
 		// Persist into the session that owns the snapshot we derived `next` from,
 		// not `viewSession`: the two diverge mid focus-attach, and writing to the
@@ -2410,7 +2391,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
 		owner.setTodoPhases(next);
-		this.todoPhases = next;
+		this.todoPhases = owner.getTodoPhases();
 		this.#syncTodoAutoClearTimer();
 		this.#renderTodoList();
 		this.ui.requestRender();
@@ -2434,14 +2415,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * restored the real snapshot.
 	 */
 	#isTodoListSettled(phases: TodoPhase[]): boolean {
-		let seenTask = false;
-		for (const phase of phases) {
-			for (const task of phase.tasks) {
-				if (!isClosedTodo(task)) return false;
-				seenTask = true;
-			}
-		}
-		return seenTask;
+		const leaves = allTodoLeaves(phases);
+		return leaves.length > 0 && leaves.every(isClosedTodo);
 	}
 
 	#syncTodoAutoClearTimer(): void {
@@ -2498,11 +2473,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#getActivePhase(phases: TodoPhase[]): TodoPhase | undefined {
-		const nonEmpty = phases.filter(phase => phase.tasks.length > 0);
+		const nonEmpty = phases.filter(phase => todoLeafTasks(phase).length > 0);
 		const active = nonEmpty.find(phase =>
-			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+			todoLeafTasks(phase).some(task => task.status === "pending" || task.status === "in_progress"),
 		);
-		return active ?? nonEmpty[nonEmpty.length - 1];
+		return active ?? nonEmpty.at(-1);
 	}
 
 	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
@@ -2564,18 +2539,19 @@ export class InteractiveMode implements InteractiveModeContext {
 					{
 						items: phase.tasks,
 						expanded: true,
-						renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
+						renderItem: todo =>
+							this.#formatTodoLine(todo, "  ".repeat(todoTaskDepth(phase, todo)), isMatched(todo)),
 					},
 					theme,
 				);
 			}
-			const selection = selectCollapsedTodos(phase.tasks, isMatched, activeTaskCap);
+			const selection = selectCollapsedTodos(todoLeafTasks(phase), isMatched, activeTaskCap);
 			return renderTreeList(
 				{
 					items: selection.items,
 					itemType: "task",
 					trailingSummary: selection.summary,
-					renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
+					renderItem: todo => this.#formatTodoLine(todo, "  ".repeat(todoTaskDepth(phase, todo)), isMatched(todo)),
 				},
 				theme,
 			);
@@ -2588,8 +2564,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
 			// Closed, not just completed: the collapsed task window hides abandoned
 			// tasks too, so counting only completions leaves the phase reading stuck.
-			const done = phase.tasks.filter(isClosedTodo).length;
-			const progress = ` · ${done}/${phase.tasks.length}`;
+			const leaves = todoLeafTasks(phase);
+			const done = leaves.filter(isClosedTodo).length;
+			const progress = ` · ${done}/${leaves.length}`;
 			if (!isActive) {
 				const header = theme.fg("muted", label) + theme.fg("dim", progress);
 				return expanded ? [header, ...renderTasks(phase)] : header;
@@ -2637,8 +2614,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// order: down the spine, around the bend, out along the tail.
 		// Clamp so partial progress lights at least one cell; a closed plan fills
 		// the entire path until the configured auto-clear removes the HUD.
-		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const leaves = phases.flatMap(phase => todoLeafTasks(phase));
+		const totalTasks = leaves.length;
+		const closedTasks = leaves.filter(isClosedTodo).length;
 		const pathLen = contentLines.length + tailLen;
 		let filled = Math.round((closedTasks / totalTasks) * pathLen);
 		if (closedTasks > 0) filled = Math.max(filled, 1);
@@ -2666,8 +2644,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const isMatched = (todo: TodoItem): boolean =>
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
-		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const leaves = phases.flatMap(phase => todoLeafTasks(phase));
+		const totalTasks = leaves.length;
+		const closedTasks = leaves.filter(isClosedTodo).length;
 		const activeTask = nextActionableTask(phases);
 
 		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;
@@ -5816,6 +5795,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else {
 			this.todoPhases = [
 				{
+					id: `phase-${crypto.randomUUID()}`,
 					name: "Todos",
 					tasks: todos as TodoItem[],
 				},

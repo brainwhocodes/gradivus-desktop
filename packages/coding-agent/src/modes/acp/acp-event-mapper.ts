@@ -9,7 +9,7 @@ import type {
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
+import { isTodoPhase, normalizeTodoPhases, type TodoStatus, todoLeafTasks } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
 interface MessageProgress {
@@ -442,39 +442,16 @@ function extractTodoPhases(result: unknown): unknown {
 }
 
 function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus }> {
-	const entries: Array<{ content: string; status: TodoStatus }> = [];
-	for (const phase of phases) {
-		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {
-			continue;
-		}
-		const tasks = (phase as { tasks?: unknown }).tasks;
-		if (!Array.isArray(tasks)) {
-			continue;
-		}
-		for (const task of tasks) {
-			if (typeof task !== "object" || task === null || !("content" in task)) {
-				continue;
-			}
-			const content = (task as { content?: unknown }).content;
-			if (typeof content !== "string" || content.length === 0) {
-				continue;
-			}
-			const status = (task as { status?: TodoStatus }).status;
-			entries.push({ content, status: isTodoStatus(status) ? status : "pending" });
-		}
+	if (!phases.every(isTodoPhase)) return [];
+	try {
+		return normalizeTodoPhases(phases).flatMap(phase =>
+			todoLeafTasks(phase).map(task => ({ content: task.content, status: task.status })),
+		);
+	} catch {
+		return [];
 	}
-	return entries;
 }
 
-function isTodoStatus(status: unknown): status is TodoStatus {
-	return (
-		status === "pending" ||
-		status === "in_progress" ||
-		status === "completed" ||
-		status === "abandoned" ||
-		status === "blocked"
-	);
-}
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
 	toolName: string;

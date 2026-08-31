@@ -33,7 +33,7 @@ import type { MCPResourceReadResult } from "./mcp/types";
 import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
-import type { TodoPhase, TodoStatus } from "./tools/todo";
+import { allTodoLeaves, normalizeTodoPhases, type TodoPhase, type TodoStatus } from "./tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -398,7 +398,7 @@ function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): 
  * text content alongside the phases the UI renders.
  */
 function formatTodoSyncSummary(phases: TodoPhase[]): string {
-	const tasks = phases.flatMap(phase => phase.tasks);
+	const tasks = allTodoLeaves(phases);
 	if (tasks.length === 0) return "No todos";
 	const done = tasks.filter(task => task.status === "completed").length;
 	return `${done}/${tasks.length} tasks completed`;
@@ -877,6 +877,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		let phases: TodoPhase[] | undefined;
 		if (snapshot && setPhases) {
 			const phaseByContent = new Map<string, string>();
+			const taskByContent = new Map(
+				existing.flatMap(phase => phase.tasks.map(task => [task.content, task] as const)),
+			);
 			for (const phase of existing) {
 				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
 			}
@@ -889,7 +892,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 					tasks = [];
 					grouped.set(name, tasks);
 				}
-				tasks.push({ content: todo.content, status: todo.status as TodoStatus });
+				const prior = taskByContent.get(todo.content);
+				tasks.push({
+					id: prior?.id ?? `todo-${crypto.randomUUID()}`,
+					content: todo.content,
+					status: todo.status as TodoStatus,
+					...(prior?.parentId ? { parentId: prior.parentId } : {}),
+				});
 			}
 
 			// Preserve the local phase order; phases new to this snapshot append.
@@ -897,13 +906,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			for (const phase of existing) {
 				const tasks = grouped.get(phase.name);
 				if (!tasks) continue;
-				next.push({ name: phase.name, tasks });
+				next.push({ id: phase.id, name: phase.name, tasks });
 				grouped.delete(phase.name);
 			}
-			for (const [name, tasks] of grouped) next.push({ name, tasks });
-			setPhases(next);
-			this.options.persistTodoPhases?.(next);
-			phases = next;
+			for (const [name, tasks] of grouped) next.push({ id: `phase-${crypto.randomUUID()}`, name, tasks });
+			const normalized = normalizeTodoPhases(next);
+			setPhases(normalized);
+			this.options.persistTodoPhases?.(normalized);
+			phases = normalized;
 		}
 
 		const result = buildTodoSyncResult(toolCallId, phases, error);

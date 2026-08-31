@@ -7,7 +7,6 @@ import {
 	resolveTodoMarkdownPath,
 	type TodoItem,
 	type TodoPhase,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -112,24 +111,6 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): { task: TodoItem; ph
 	const active = matches.filter(m => m.task.status === "in_progress" || m.task.status === "pending");
 	if (active.length === 1) return active[0];
 	return undefined;
-}
-
-// =============================================================================
-// Build system reminder
-// =============================================================================
-
-function buildSystemReminder(action: string, phases: TodoPhase[], removed = false): string {
-	const md = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
-	const lines = ["<system-reminder>", `The user manually modified the todo list (${action}).`];
-	if (removed) {
-		lines.push(
-			phases.length === 0
-				? "The user intentionally cleared the todo list. Do NOT recreate or re-populate it unless the user explicitly asks; continue the current request without a todo list."
-				: "The user intentionally removed the entries no longer shown below. Do NOT re-add them unless the user explicitly asks.",
-		);
-	}
-	lines.push("Current todo list:", "", md, "</system-reminder>");
-	return lines.join("\n");
 }
 
 export class TodoCommandController {
@@ -281,30 +262,19 @@ export class TodoCommandController {
 			content = tokens.slice(1).join(" ");
 		}
 
-		const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
-		let targetPhase: TodoPhase | undefined;
-
-		if (phaseName) {
-			targetPhase = findPhaseFuzzy(next, phaseName);
-			if (!targetPhase) {
-				targetPhase = { name: titleCase(phaseName), tasks: [] };
-				next.push(targetPhase);
-			}
-		} else if (next.length > 0) {
-			targetPhase = next[next.length - 1];
-		} else {
-			targetPhase = { name: "Todos", tasks: [] };
-			next.push(targetPhase);
-		}
-
+		const targetPhaseName = phaseName
+			? (findPhaseFuzzy(current, phaseName)?.name ?? titleCase(phaseName))
+			: (current.at(-1)?.name ?? "Todos");
 		const finalContent = titleCaseSentence(content);
-		targetPhase.tasks.push({
-			content: finalContent,
-			status: "pending",
-		});
-
-		this.#commit(next, `/todo append → ${targetPhase.name}`);
-		this.ctx.showStatus(`Appended to ${targetPhase.name}: ${finalContent}`);
+		const { phases, errors } = applyOpsToPhases(current, [
+			{ op: "append", phase: targetPhaseName, items: [finalContent] },
+		]);
+		if (errors.length > 0) {
+			this.ctx.showError(errors.join("; "));
+			return;
+		}
+		this.#commit(phases, `/todo append → ${targetPhaseName}`);
+		this.ctx.showStatus(`Appended to ${targetPhaseName}: ${finalContent}`);
 	}
 
 	// ------------------------------------------------------------- start / done / drop / rm
@@ -444,25 +414,14 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
-		this.ctx.session.setTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
-
-		// 2. Persist for reload survival via custom session entry.
-		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
-
-		// 3. Inject system reminder so the agent learns about the change next turn.
-		//    Removals carry explicit intent so the agent does not rebuild the
-		//    cleared/removed items on its next turn (issue #5258).
-		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
-		const message = {
-			role: "developer" as const,
-			content: [{ type: "text" as const, text: reminderText }],
-			attribution: "user" as const,
-			timestamp: Date.now(),
-		};
-		this.ctx.agent.appendMessage(message);
-		this.ctx.sessionManager.appendMessage(message);
+		try {
+			const result = this.ctx.session.commitUserTodoEdit(nextPhases, this.ctx.session.getTodoRevision(), action, {
+				removed: opts?.removed === true,
+			});
+			this.ctx.setTodos(result.phases);
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 }
 

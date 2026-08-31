@@ -203,6 +203,8 @@ describe("WorkspaceServer terminal authority", () => {
 		});
 		expect(closed.status).toBe("accepted");
 		expect(closed.document.terminals.some(item => item.id === "term-authoritative")).toBe(false);
+		expect(closed.document.tabs).toHaveLength(0);
+		expect(closed.document.panes).toHaveLength(0);
 	});
 	it("opens detached terminals without creating tabs or panes", async () => {
 		const workspace = await client.executeCommand({
@@ -282,7 +284,11 @@ describe("WorkspaceServer terminal authority", () => {
 			},
 		});
 		expect(opened.status).toBe("accepted");
-		expect(opened.document.terminals.some(item => item.id === "term-custom-shell")).toBe(true);
+		expect(opened.document.terminals.find(item => item.id === "term-custom-shell")).toMatchObject({
+			paneId: "pane-custom-shell",
+			shell: customShell,
+			args: customArgs,
+		});
 
 		const marker = Promise.withResolvers<string>();
 		const removeOutput = client.onTerminalOutput("term-custom-shell", frame => {
@@ -293,6 +299,30 @@ describe("WorkspaceServer terminal authority", () => {
 		const output = await Promise.race([marker.promise, Bun.sleep(5000).then(() => "")]);
 		removeOutput();
 		expect(output).toContain("custom-shell-active");
+		const beforeRestart = await client.getDocument();
+		const restarted = await client.executeCommand({
+			version: 1,
+			commandId: "cmd-terminal-restart-custom",
+			workspaceId: "ws-custom-shell",
+			expectedRevision: beforeRestart.revision,
+			issuedAt: Date.now(),
+			type: "terminal.restart",
+			payload: { id: "term-custom-shell" },
+		});
+		expect(restarted.status).toBe("accepted");
+		expect(restarted.document.terminals.find(item => item.id === "term-custom-shell")).toMatchObject({
+			paneId: "pane-custom-shell",
+			shell: customShell,
+			args: customArgs,
+		});
+		const restartedMarker = Promise.withResolvers<string>();
+		const removeRestartOutput = client.onTerminalOutput("term-custom-shell", frame => {
+			if (frame.data.includes("custom-shell-active")) restartedMarker.resolve(frame.data);
+		});
+		await client.subscribeTerminal("term-custom-shell", 0);
+		const restartedOutput = await Promise.race([restartedMarker.promise, Bun.sleep(5000).then(() => "")]);
+		removeRestartOutput();
+		expect(restartedOutput).toContain("custom-shell-active");
 
 		const current = await client.getDocument();
 		await client.executeCommand({
@@ -367,7 +397,7 @@ describe("WorkspaceServer terminal authority", () => {
 							shell: "/bin/sh",
 							args: [
 								"-c",
-								'printf \'FAMILY[%s][%s][%s][%s][%s][%s]\\n\' "$GRADIVUS_TERMINAL" "$GRADIVUS_TERMINAL_ID" "$GRADIVUS_PANE_ID" "$GRADIVUS_WORKSPACE_ID" "$GRADIVUS_PROFILE_ID" "${GRADIVUS_PARENT_LEAK:-unset}"',
+								`printf 'FAMILY[%s][%s][%s][%s][%s][%s]\\n' "$GRADIVUS_TERMINAL" "$GRADIVUS_TERMINAL_ID" "$GRADIVUS_PANE_ID" "$GRADIVUS_WORKSPACE_ID" "$GRADIVUS_PROFILE_ID" "\${GRADIVUS_PARENT_LEAK:-unset}"`,
 							],
 						}),
 			},
@@ -438,7 +468,7 @@ describe("WorkspaceServer terminal authority", () => {
 						}
 					: {
 							shell: "/bin/sh",
-							args: ["-c", "printf 'PROFILE[%s]\\n' \"${GRADIVUS_PROFILE_ID-unset}\""],
+							args: ["-c", `printf 'PROFILE[%s]\\n' "\${GRADIVUS_PROFILE_ID-unset}"`],
 						}),
 			},
 		});

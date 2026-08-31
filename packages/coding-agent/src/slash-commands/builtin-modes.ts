@@ -264,7 +264,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					await runtime.output("Plan mode is already off.");
 					return commandConsumed();
 				}
-				runtime.session.setPlanModeState?.(undefined);
+				if (runtime.planModeReview) await runtime.planModeReview.exit();
+				else runtime.session.setPlanModeState?.(undefined);
 				await runtime.output("Plan mode disabled.");
 				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
@@ -275,30 +276,30 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						await runtime.output("Plan mode is already on.");
 						return commandConsumed();
 					}
-					runtime.session.setPlanModeState?.(undefined);
+					if (runtime.planModeReview) await runtime.planModeReview.exit();
+					else runtime.session.setPlanModeState?.(undefined);
 					await runtime.output("Plan mode disabled.");
-					await runtime.notifyConfigChanged?.();
 					return commandConsumed();
 				}
 				if (!runtime.settings.get("plan.enabled" as SettingPath)) {
 					return usage("Plan mode is disabled in settings (plan.enabled).", runtime);
 				}
 				const planFilePath = "local://PLAN.md";
-				const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
-				const planAugmentations: string[] = [];
-				if (runtime.session.hasBuiltInTool?.("write")) {
-					planAugmentations.push("write");
+				if (runtime.planModeReview) {
+					await runtime.planModeReview.enter({ planFilePath, workflow: "parallel" });
+				} else {
+					const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
+					const planAugmentations: string[] = [];
+					if (runtime.session.hasBuiltInTool?.("write")) {
+						planAugmentations.push("write");
+					}
+					const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+					await runtime.session.setActiveToolsByName?.(uniquePlanTools);
+					runtime.session.setPlanModeState?.({ enabled: true, planFilePath, workflow: "parallel" });
+					runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
+					await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
+					await runtime.notifyConfigChanged?.();
 				}
-				const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
-				await runtime.session.setActiveToolsByName?.(uniquePlanTools);
-				runtime.session.setPlanModeState?.({
-					enabled: true,
-					planFilePath,
-					workflow: "parallel",
-				});
-				runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
-				await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
-				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (!currentState?.enabled) {
@@ -306,21 +307,21 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					return usage("Plan mode is disabled in settings (plan.enabled).", runtime);
 				}
 				const planFilePath = "local://PLAN.md";
-				const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
-				const planAugmentations: string[] = [];
-				if (runtime.session.hasBuiltInTool?.("write")) {
-					planAugmentations.push("write");
+				if (runtime.planModeReview) {
+					await runtime.planModeReview.enter({ planFilePath, workflow: "parallel" });
+				} else {
+					const previousTools = runtime.session.getEnabledToolNames?.() ?? [];
+					const planAugmentations: string[] = [];
+					if (runtime.session.hasBuiltInTool?.("write")) {
+						planAugmentations.push("write");
+					}
+					const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+					await runtime.session.setActiveToolsByName?.(uniquePlanTools);
+					runtime.session.setPlanModeState?.({ enabled: true, planFilePath, workflow: "parallel" });
+					runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
+					await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
+					await runtime.notifyConfigChanged?.();
 				}
-				const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
-				await runtime.session.setActiveToolsByName?.(uniquePlanTools);
-				runtime.session.setPlanModeState?.({
-					enabled: true,
-					planFilePath,
-					workflow: "parallel",
-				});
-				runtime.session.setPlanProposalHandler?.(title => runtime.session.preparePlanForReview(title));
-				await runtime.output(`Plan mode enabled. Plan file: ${planFilePath}`);
-				await runtime.notifyConfigChanged?.();
 			}
 			return { prompt: arg };
 		},
@@ -342,6 +343,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!state?.enabled) {
 				return usage("Plan mode is not active.", runtime);
 			}
+			await runtime.planModeReview?.requestReview();
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {

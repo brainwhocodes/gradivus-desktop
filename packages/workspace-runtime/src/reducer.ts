@@ -33,8 +33,10 @@ const EVENT_TYPE_BY_COMMAND: Record<WorkspaceCommandV1["type"], WorkspaceEventTy
 	"profile.update": "profile.changed",
 	"profile.delete": "profile.changed",
 	"tab.update": "pane.changed",
+	"tab.reorder": "pane.changed",
 	"tab.close": "pane.changed",
 	"terminal.open": "terminal.changed",
+	"terminal.restart": "terminal.changed",
 	"terminal.status": "terminal.changed",
 	"terminal.input": "terminal.changed",
 	"terminal.resize": "terminal.changed",
@@ -406,6 +408,8 @@ function addTerminal(
 			cwd: optionalString(payload, "cwd"),
 			columns: optionalNumber(payload, "columns"),
 			rows: optionalNumber(payload, "rows"),
+			shell: optionalString(payload, "shell"),
+			args: optionalStringArray(payload, "args"),
 			status: "starting",
 		};
 		document.terminals.push(terminal);
@@ -479,6 +483,8 @@ function addTerminal(
 		cwd: optionalString(payload, "cwd"),
 		columns: optionalNumber(payload, "columns"),
 		rows: optionalNumber(payload, "rows"),
+		shell: optionalString(payload, "shell"),
+		args: optionalStringArray(payload, "args"),
 		status: "starting",
 	};
 	const pane: WorkspacePaneV1 = { id: paneId, tabId, generation, kind: "terminal", entityId: id };
@@ -601,37 +607,9 @@ function closeEntityPane(
 		document.panes = document.panes.filter(item => item.id !== pane.id);
 		return;
 	}
-	if (document.tabs.length > 1) {
-		document.tabs = document.tabs.filter(item => item.id !== tab.id);
-		document.panes = document.panes.filter(item => item.id !== pane.id);
-		return;
-	}
-	const replacementId = `${command.commandId}:final-terminal`;
-	const replacementPaneId = `${command.commandId}:final-pane`;
-	assertUniqueId(document, replacementId);
-	assertUniqueId(document, replacementPaneId);
-	const location = locationOf(document, tab.locationId);
-	const replacement: WorkspaceTerminalV1 = {
-		id: replacementId,
-		locationId: tab.locationId,
-		generation: location.lifecycle.generation,
-		paneId: replacementPaneId,
-		label: "Terminal",
-		status: "starting",
-	};
-	document.terminals = document.terminals.filter(item => item.id !== entityId).concat(replacement);
-	document.panes = document.panes
-		.filter(item => item.id !== pane.id)
-		.concat({
-			id: replacementPaneId,
-			tabId: tab.id,
-			generation: tab.generation,
-			kind: "terminal",
-			entityId: replacementId,
-		});
-	tab.paneKind = "terminal";
-	tab.paneIds = [replacementPaneId];
-	tab.activePaneId = replacementPaneId;
+	document.tabs = document.tabs.filter(item => item.id !== tab.id);
+	document.panes = document.panes.filter(item => item.id !== pane.id);
+	void command;
 	void payload;
 }
 
@@ -975,6 +953,35 @@ export function reduceWorkspace(
 				}
 				break;
 			}
+			case "tab.reorder": {
+				objectPayload(command, ["id", "beforeId"]);
+				const tabId = requiredString(p, "id");
+				const tabIndex = document.tabs.findIndex(item => item.id === tabId);
+				if (tabIndex < 0) throw rejection("not_found", `tab ${tabId} does not exist`);
+				const tab = document.tabs[tabIndex];
+				if (tab.workspaceId !== command.workspaceId)
+					throw rejection("conflict", "tab does not belong to workspace");
+				const beforeId = optionalString(p, "beforeId");
+				if (beforeId === tabId) break;
+				const before = beforeId ? document.tabs.find(item => item.id === beforeId) : undefined;
+				if (beforeId && !before) throw rejection("not_found", `tab ${beforeId} does not exist`);
+				if (before && before.workspaceId !== command.workspaceId)
+					throw rejection("conflict", "target tab does not belong to workspace");
+				const [moved] = document.tabs.splice(tabIndex, 1);
+				if (before) {
+					const beforeIndex = document.tabs.findIndex(item => item.id === before.id);
+					document.tabs.splice(beforeIndex, 0, moved);
+				} else {
+					let insertAt = document.tabs.length;
+					for (let index = document.tabs.length - 1; index >= 0; index--) {
+						if (document.tabs[index].workspaceId !== command.workspaceId) continue;
+						insertAt = index + 1;
+						break;
+					}
+					document.tabs.splice(insertAt, 0, moved);
+				}
+				break;
+			}
 			case "tab.close": {
 				objectPayload(command, ["id"]);
 				const tabId = requiredString(p, "id");
@@ -1062,6 +1069,28 @@ export function reduceWorkspace(
 				optionalStringArray(p, "args");
 				const terminalId = addTerminal(document, command, p, locationId, location.lifecycle.generation);
 				effects = [effectFor(command, { ...p, id: terminalId }, "terminal")];
+				break;
+			}
+			case "terminal.restart": {
+				objectPayload(command, ["id"]);
+				const terminal = document.terminals.find(item => item.id === requiredString(p, "id"));
+				if (!terminal) throw rejection("not_found", "terminal does not exist");
+				terminal.status = "starting";
+				delete terminal.error;
+				effects = [
+					effectFor(
+						command,
+						{
+							id: terminal.id,
+							cwd: terminal.cwd,
+							shell: terminal.shell,
+							args: terminal.args,
+							columns: terminal.columns,
+							rows: terminal.rows,
+						},
+						"terminal",
+					),
+				];
 				break;
 			}
 			case "terminal.status": {

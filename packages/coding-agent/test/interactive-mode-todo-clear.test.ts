@@ -96,7 +96,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 
 		expect(renderTodos(mode)).not.toContain("done task");
 		expect(renderTodos(mode)).not.toContain("abandoned task");
-		expect(session.getTodoPhases()).toEqual(phases);
+		expect(session.getTodoPhases()).toMatchObject(phases);
 	});
 
 	/**
@@ -286,7 +286,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			vi.advanceTimersByTime(100);
 
 			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-			expect(session.getTodoPhases()).toEqual(mainPhases);
+			expect(session.getTodoPhases()).toMatchObject(mainPhases);
 			expect(renderTodos(mode)).toContain("1/2");
 
 			await mode.unfocusSession();
@@ -347,7 +347,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			vi.advanceTimersByTime(100);
 
 			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-			expect(session.getTodoPhases()).toEqual(mainPhases);
+			expect(session.getTodoPhases()).toMatchObject(mainPhases);
 			expect(renderTodos(mode)).toContain("1/1");
 		} finally {
 			vi.useRealTimers();

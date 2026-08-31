@@ -2,6 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE } from "../session/credential-pin";
+import { allTodoLeaves } from "../tools/todo";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -167,7 +168,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			const tasks = runtime.ctx.todoPhases.flatMap(phase => phase.tasks);
+			const tasks = allTodoLeaves(runtime.ctx.todoPhases);
 			if (tasks.length === 0) return "Todos: none";
 			const pending = tasks.filter(task => task.status === "pending").length;
 			const inProgress = tasks.filter(task => task.status === "in_progress").length;

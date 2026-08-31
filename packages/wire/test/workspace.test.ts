@@ -219,7 +219,13 @@ describe("Workspace V1 wire acceptance boundary", () => {
 		expect(
 			parseWorkspaceCommandV1({ ...attach, type: "tab.update", payload: { id: "tab", name: "New Tab" } }).type,
 		).toBe("tab.update");
+		expect(
+			parseWorkspaceCommandV1({ ...attach, type: "tab.reorder", payload: { id: "tab", beforeId: "other" } }).type,
+		).toBe("tab.reorder");
 		expect(parseWorkspaceCommandV1({ ...attach, type: "tab.close", payload: { id: "tab" } }).type).toBe("tab.close");
+		expect(parseWorkspaceCommandV1({ ...attach, type: "terminal.restart", payload: { id: "term" } }).type).toBe(
+			"terminal.restart",
+		);
 	});
 	it("validates tab workspace ownership and topology links", () => {
 		const location = {
@@ -236,6 +242,8 @@ describe("Workspace V1 wire acceptance boundary", () => {
 			paneId: "p1",
 			generation: 1,
 			label: "Term",
+			shell: "/bin/sh",
+			args: ["-l"],
 			status: "running" as const,
 		};
 		const tab = {
@@ -260,6 +268,7 @@ describe("Workspace V1 wire acceptance boundary", () => {
 			terminals: [terminal],
 		};
 		expect(parseWorkspaceDocumentV1(doc).tabs[0]?.workspaceId).toBe("ws");
+		expect(parseWorkspaceDocumentV1(doc).terminals[0]).toMatchObject({ shell: "/bin/sh", args: ["-l"] });
 		expect(() => parseWorkspaceDocumentV1({ ...doc, tabs: [{ ...tab, workspaceId: "other-ws" }] })).toThrow(
 			WorkspaceWireValidationError,
 		);

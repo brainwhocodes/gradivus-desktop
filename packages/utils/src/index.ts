@@ -1,5 +1,6 @@
 export { once, untilAborted } from "./abortable";
 export * from "./async";
+export * from "./atomic-write";
 export * from "./binary";
 export * from "./color";
 export * from "./dirs";
@@ -23,6 +24,7 @@ export * from "./net";
 export * from "./path";
 export * from "./path-tree";
 export * from "./peek-file";
+export * from "./plan-review";
 export * as postmortem from "./postmortem";
 export * from "./process-name";
 export * as procmgr from "./procmgr";

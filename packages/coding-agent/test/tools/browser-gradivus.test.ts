@@ -7,14 +7,14 @@ const previousGradivusTerminal = process.env.GRADIVUS_TERMINAL;
 const previousBrowserRelay = process.env.PI_BROWSER_RELAY;
 const previousCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
 
-function session(options: { configured?: boolean } = {}): ToolSession {
+function session(options: { configured?: boolean; relay?: boolean } = {}): ToolSession {
 	const configured = options.configured ?? true;
 	return {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: {
 			get: (key: string) => {
-				if (key === "browser.relay") return configured;
+				if (key === "browser.relay") return options.relay ?? configured;
 				if (key === "browser.relayUrl") return "http://127.0.0.1:1";
 				if (key === "browser.cdpUrl") return configured ? "http://127.0.0.1:9223" : undefined;
 				if (key === "browser.headless") return true;
@@ -43,13 +43,17 @@ afterEach(() => {
 });
 
 describe("Gradivus browser inheritance", () => {
-	test("inherits Gradivus browser CDP endpoint when running inside terminal", () => {
+	test("ignores inherited CDP endpoints inside Gradivus terminals", () => {
 		process.env.GRADIVUS_TERMINAL = "1";
 		process.env.PI_BROWSER_CDP_URL = "http://127.0.0.1:9222/";
 
 		expect(resolveBrowserKind({ action: "open" }, session({ configured: false }))).toEqual({
+			kind: "headless",
+			headless: true,
+		});
+		expect(resolveBrowserKind({ action: "open" }, session({ relay: false }))).toEqual({
 			kind: "connected",
-			cdpUrl: "http://127.0.0.1:9222",
+			cdpUrl: "http://127.0.0.1:9223",
 		});
 	});
 

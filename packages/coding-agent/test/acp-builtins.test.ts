@@ -25,7 +25,12 @@ interface FakeAcpBuiltinSession {
 	sessionFile: string | undefined;
 	sessionId: string;
 	sessionName: string;
-	_todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
+	_todoPhases: Array<{
+		id?: string;
+		name: string;
+		tasks: Array<{ id?: string; content: string; status: string }>;
+	}>;
+	_todoRevision: number;
 	_switchedTo: string | undefined;
 	_movedFromEmptySessionFile: string | undefined;
 	toggleFastMode(): boolean;
@@ -55,6 +60,13 @@ interface FakeAcpBuiltinSession {
 	refreshSkills(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
+	getTodoRevision(): number;
+	commitUserTodoEdit(
+		phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>,
+		expectedRevision: number,
+		action: string,
+		options?: { removed?: boolean },
+	): { phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>; revision: number };
 	refreshBaseSystemPrompt(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
@@ -155,6 +167,7 @@ function createRuntime() {
 		sessionId: "fake-session-id",
 		sessionName: "Fake Session",
 		_todoPhases: [],
+		_todoRevision: 0,
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
 		dispose: async () => {},
@@ -214,6 +227,16 @@ function createRuntime() {
 		},
 		setTodoPhases(phases) {
 			this._todoPhases = phases;
+		},
+		getTodoRevision() {
+			return this._todoRevision;
+		},
+		commitUserTodoEdit(phases, expectedRevision, _action, _options) {
+			if (expectedRevision !== this._todoRevision) throw new Error("todo_conflict");
+			this._todoPhases = phases;
+			this._todoRevision += 1;
+			fakeSessionManager?.appendCustomEntry("user_todo_edit", { phases });
+			return { phases, revision: this._todoRevision };
 		},
 		async refreshBaseSystemPrompt() {},
 		getAsyncJobSnapshot: () => null,
@@ -1002,9 +1025,11 @@ describe("wave 3 commands", () => {
 
 			expect(result).toEqual({ consumed: true });
 			expect(output[0]).toBe(`Imported 1 phase(s), 1 task(s) from ${target}.`);
-			expect(session._todoPhases).toEqual([
+			expect(session._todoPhases).toMatchObject([
 				{ name: "Imported", tasks: [{ content: "Active task", status: "in_progress" }] },
 			]);
+			expect(session._todoPhases[0]?.id).toMatch(/^phase-/);
+			expect(session._todoPhases[0]?.tasks[0]?.id).toMatch(/^todo-/);
 		} finally {
 			await removeWithRetries(tempRoot);
 		}
@@ -1022,7 +1047,7 @@ describe("wave 3 commands", () => {
 
 			expect(result).toEqual({ consumed: true });
 			expect(output[0]).toBe(`Imported 1 phase(s), 1 task(s) from ${target}.`);
-			expect(session._todoPhases).toEqual([
+			expect(session._todoPhases).toMatchObject([
 				{ name: "Default", tasks: [{ content: "From cwd", status: "in_progress" }] },
 			]);
 		} finally {

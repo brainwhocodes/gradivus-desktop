@@ -52,7 +52,7 @@ interface TanSessionEvent {
 function createCloneStub(overrides?: {
 	prompt?: () => Promise<void>;
 	abort?: () => void;
-	sessionManager?: { appendSessionInit: (init: unknown) => void };
+	sessionManager?: Partial<Pick<SessionManager, "appendSessionInit" | "appendCustomEntry">>;
 	lastAssistantText?: string;
 	activeToolNames?: string[];
 	enabledToolNames?: string[];
@@ -62,7 +62,11 @@ function createCloneStub(overrides?: {
 	const clone = {
 		agent: { appendMessage },
 		sessionManager: overrides?.sessionManager,
-		setTodoPhases: vi.fn(),
+		getTodoRevision: vi.fn(() => 0),
+		commitUserTodoEdit: vi.fn((phases: unknown[]) => {
+			overrides?.sessionManager?.appendCustomEntry?.("user_todo_edit", { phases });
+			return { phases, revision: 1 };
+		}),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
@@ -422,6 +426,7 @@ describe("TanCommandController", () => {
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const compacted = Promise.withResolvers<void>();
 		const stub = createCloneStub({
+			sessionManager: harness.cloneManager,
 			prompt: async () => {
 				// Simulate the clone's history compacting mid-run: the summarizer
 				// erases the fork notice, so the controller must append it again.
@@ -443,7 +448,7 @@ describe("TanCommandController", () => {
 		// Inherited parent todos are wiped both in-memory and in the persisted
 		// session so reloads agree; otherwise todo reminders drag the tan back
 		// onto the parent's task.
-		expect(stub.clone.setTodoPhases).toHaveBeenCalledWith([]);
+		expect(stub.clone.commitUserTodoEdit).toHaveBeenCalledWith([], 0, "tangent context reset", { removed: true });
 		expect(harness.cloneManager.appendCustomEntry).toHaveBeenCalledWith("user_todo_edit", { phases: [] });
 		// Fork notice injected before the prompt and again after compaction.
 		expect(stub.appendMessage).toHaveBeenCalledTimes(2);

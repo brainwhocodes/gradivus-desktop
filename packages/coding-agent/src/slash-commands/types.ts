@@ -1,6 +1,7 @@
 import type { Settings } from "../config/settings";
 import type { SlashCommandIconName } from "../modes/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
+import type { PlanModeReviewController } from "../plan-mode/review-controller";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
 
@@ -97,6 +98,7 @@ export interface SlashCommandRuntime {
 	runCommandInBackground?: (task: () => Promise<void>) => void;
 	notifyTitleChanged?: () => Promise<void> | void;
 	notifyConfigChanged?: () => Promise<void> | void;
+	planModeReview?: Pick<PlanModeReviewController, "enter" | "exit" | "requestReview">;
 }
 
 /**

@@ -21,6 +21,8 @@
 - Added selective queued follow-up promotion to steering through the `steer_queued` RPC command, preserving queued message companions and avoiding duplicate delivery.
 - Added a credential-safe RPC settings catalog covering expanded OMP defaults with truthful immediate and next-session apply timing.
 - Added selected image payloads to RPC branch responses so external hosts can preserve historical image prompts when branching and resending.
+- Added hierarchical revisioned todos, file-backed subagent prompt RPC controls, host-tool registration, and scoped browser inventory updates for desktop clients.
+- Added durable plan-review state, revision-checked annotation and decision RPC commands, execution-model selection, and recoverable approval, refinement, and save transactions.
 
 ### Changed
 

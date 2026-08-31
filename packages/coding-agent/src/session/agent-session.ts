@@ -177,6 +177,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
+import userTodoEditPrompt from "../prompts/system/user-todo-edit.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import {
 	deobfuscateAssistantContent,
@@ -212,7 +213,7 @@ import {
 	writeDeviceDispatch,
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "../tools/todo";
+import { phasesToMarkdown, type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
@@ -236,6 +237,8 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	PlanReviewPromptAdmission,
+	PlanReviewPromptInput,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -364,6 +367,20 @@ export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 export type SamplingParameters = Partial<
 	Record<"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty", number>
 >;
+
+export class TodoConflictError extends Error {
+	readonly code = "todo_conflict";
+
+	constructor() {
+		super("The todo list changed since it was loaded. Reload before saving again.");
+		this.name = "TodoConflictError";
+	}
+}
+
+export interface UserTodoEditResult {
+	phases: TodoPhase[];
+	revision: number;
+}
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
@@ -5715,6 +5732,108 @@ export class AgentSession {
 		}
 		return keywordNotices;
 	}
+	async dispatchPlanReviewPrompt(input: PlanReviewPromptInput): Promise<PlanReviewPromptAdmission> {
+		const startedAt = Date.now();
+		const admitted = Promise.withResolvers<string>();
+		const completed = Promise.withResolvers<void>();
+		const expectedRole = input.kind === "approved" ? "developer" : "user";
+		let matchedMessage: AgentMessage | undefined;
+		let settled = false;
+
+		const messageText = (message: AgentMessage): string => {
+			if (!("content" in message)) return "";
+			if (typeof message.content === "string") return message.content;
+			if (!Array.isArray(message.content)) return "";
+			return message.content
+				.map(part => ("text" in part && typeof part.text === "string" ? part.text : ""))
+				.join("");
+		};
+		const matches = (message: AgentMessage): boolean =>
+			message.role === expectedRole &&
+			(typeof message.timestamp !== "number" || message.timestamp >= startedAt) &&
+			messageText(message) === input.content;
+		const persistedEntryId = (message: AgentMessage): string | undefined => {
+			const branch = this.sessionManager.getBranch();
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const entry = branch[index];
+				if (
+					entry.type === "message" &&
+					entry.message.role === message.role &&
+					entry.message.timestamp === message.timestamp &&
+					sameMessageContent(entry.message, message)
+				) {
+					return entry.id;
+				}
+			}
+			return undefined;
+		};
+		const fail = (error: unknown): void => {
+			if (settled) return;
+			settled = true;
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			admitted.reject(normalized);
+			completed.reject(normalized);
+		};
+
+		const unsubscribe = this.subscribe(event => {
+			if (event.type === "message_start" && matches(event.message)) {
+				matchedMessage = event.message;
+				return;
+			}
+			if (event.type === "message_end" && matches(event.message)) {
+				matchedMessage = event.message;
+				void (async () => {
+					await this.#waitForSessionMessagePersistence(event.message);
+					const entryId = persistedEntryId(event.message);
+					if (!entryId) throw new Error("Plan review prompt was not persisted.");
+					this.sessionManager.appendCustomEntry("plan-review-prompt-admitted", {
+						reviewId: input.reviewId,
+						planFilePath: input.planFilePath,
+						admittedEntryId: entryId,
+					});
+					admitted.resolve(entryId);
+				})().catch(fail);
+				return;
+			}
+			if (event.type === "agent_end" && matchedMessage) {
+				void admitted.promise.then(
+					() => completed.resolve(),
+					error => completed.reject(error),
+				);
+			}
+		});
+
+		const wasStreaming = this.isStreaming;
+		const dispatch =
+			input.kind === "approved" && wasStreaming
+				? this.followUp(input.content, input.images, { synthetic: true, expandPromptTemplates: false }).then(
+						() => true,
+					)
+				: this.prompt(input.content, {
+						images: input.images,
+						expandPromptTemplates: false,
+						synthetic: input.kind === "approved",
+						streamingBehavior: wasStreaming ? "followUp" : undefined,
+					});
+		void dispatch.then(forwarded => {
+			if (!forwarded) {
+				fail(new Error("Plan review prompt was not admitted."));
+				return;
+			}
+			if (!wasStreaming) completed.resolve();
+		}, fail);
+
+		try {
+			const admittedEntryId = await admitted.promise;
+			return {
+				admittedEntryId,
+				completion: completed.promise.finally(unsubscribe),
+			};
+		} catch (error) {
+			unsubscribe();
+			throw error;
+		}
+	}
 
 	/**
 	 * Send a prompt to the agent.
@@ -6981,6 +7100,44 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+	}
+
+	getTodoRevision(): number {
+		return this.#todo.revision;
+	}
+
+	subscribeTodos(callback: (phases: TodoPhase[], revision: number) => void): () => void {
+		return this.#todo.subscribe(callback);
+	}
+
+	commitUserTodoEdit(
+		phases: TodoPhase[],
+		expectedRevision: number,
+		action: string,
+		options: { removed?: boolean } = {},
+	): UserTodoEditResult {
+		if (expectedRevision !== this.#todo.revision) throw new TodoConflictError();
+		this.#todo.setPhases(phases);
+		const updated = this.#todo.phases;
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: updated });
+		const message: Message = {
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(userTodoEditPrompt, {
+						action,
+						removed: options.removed === true,
+						markdown: phasesToMarkdown(updated).trimEnd() || "(empty)",
+					}),
+				},
+			],
+			attribution: "user",
+			timestamp: Date.now(),
+		};
+		this.agent.appendMessage(message);
+		this.sessionManager.appendMessage(message);
+		return { phases: updated, revision: this.#todo.revision };
 	}
 
 	#buildReplanTitleContext(): string {

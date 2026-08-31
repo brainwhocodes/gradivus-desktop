@@ -151,6 +151,26 @@ const READY_BUDGET_FLOOR_MS = 500;
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
+const inventoryListeners = new Set<(inventory: readonly BrowserTabInventory[]) => void>();
+let inventoryNotificationScheduled = false;
+
+function emitBrowserTabInventory(): void {
+	if (inventoryNotificationScheduled) return;
+	inventoryNotificationScheduled = true;
+	queueMicrotask(() => {
+		inventoryNotificationScheduled = false;
+		const inventory = getTabsInventory();
+		for (const listener of inventoryListeners) listener(inventory);
+	});
+}
+
+export function subscribeBrowserTabInventory(
+	listener: (inventory: readonly BrowserTabInventory[]) => void,
+): () => void {
+	inventoryListeners.add(listener);
+	listener(getTabsInventory());
+	return () => inventoryListeners.delete(listener);
+}
 class RecoverableWorkerError extends ToolError {}
 
 async function waitForTabCleanup<T>(
@@ -191,6 +211,7 @@ function retainLease(tab: TabSession, opts: AcquireTabOptions): void {
 	if (!opts.ownerSessionId) return;
 	tab.retainedLeases.set(opts.ownerSessionId, opts.ownerAgentLabel ?? "anonymous");
 	tab.cleanupRequested = false;
+	emitBrowserTabInventory();
 }
 
 function settleUseToken(tab: TabSession, token: string | undefined): void {
@@ -224,6 +245,7 @@ function settleQueuedRun(tab: TabSession, node: QueuedRun, error: unknown): bool
 	const index = tab.queue.indexOf(node);
 	if (index < 0) return false;
 	tab.queue.splice(index, 1);
+	emitBrowserTabInventory();
 	clearTimeout(node.timer);
 	node.opts.signal?.removeEventListener("abort", node.abort as EventListener);
 	settleUseToken(tab, node.leaseToken);
@@ -235,6 +257,7 @@ function settleDequeuedRun(tab: TabSession, node: QueuedRun, error: unknown): vo
 	clearTimeout(node.timer);
 	node.opts.signal?.removeEventListener("abort", node.abort as EventListener);
 	settleUseToken(tab, node.leaseToken);
+	emitBrowserTabInventory();
 	node.pending.reject(error);
 }
 
@@ -398,6 +421,7 @@ async function acquireTabImpl(
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	tabs.set(name, tab);
 	retainLease(tab, opts);
+	emitBrowserTabInventory();
 	return { tab, created: true };
 }
 
@@ -473,6 +497,7 @@ async function acquireCmuxTab(
 		};
 		tabs.set(name, tab);
 		retainLease(tab, opts);
+		emitBrowserTabInventory();
 		return { tab, created: true };
 	} catch (error) {
 		if (ownsSurface && surfaceId) {
@@ -551,6 +576,7 @@ async function runInTabWithSnapshot(
 		opts.timeoutMs,
 	);
 	tab.queue.push(node);
+	emitBrowserTabInventory();
 	void pumpTab(tab, name);
 	return promise;
 }
@@ -568,6 +594,7 @@ async function pumpTab(tab: TabSession, name: string): Promise<void> {
 	}
 	node.started = true;
 	tab.running = true;
+	emitBrowserTabInventory();
 	clearTimeout(node.timer);
 	node.abort && node.opts.signal?.removeEventListener("abort", node.abort);
 	try {
@@ -578,6 +605,7 @@ async function pumpTab(tab: TabSession, name: string): Promise<void> {
 	} finally {
 		settleUseToken(tab, node.leaseToken);
 		tab.running = false;
+		emitBrowserTabInventory();
 		void pumpTab(tab, name);
 		maybeReleaseUnownedTab(tab);
 	}
@@ -685,6 +713,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 	}
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
+	emitBrowserTabInventory();
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
 	for (const node of tab.queue.splice(0)) {
 		clearTimeout(node.timer as ReturnType<typeof setTimeout>);
@@ -744,6 +773,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 			closeError ??= error;
 		} finally {
 			if (tabs.get(name) === tab) tabs.delete(name);
+			emitBrowserTabInventory();
 		}
 		if (closeError) throw closeError;
 		return true;
@@ -781,6 +811,7 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		cleanupError ??= error;
 	} finally {
 		if (tabs.get(name) === tab) tabs.delete(name);
+		emitBrowserTabInventory();
 	}
 	if (cleanupError) throw cleanupError;
 	return true;
@@ -813,6 +844,7 @@ export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptio
 	for (const tab of candidates) {
 		tab.cleanupRequested = true;
 		tab.retainedLeases.delete(ownerId);
+		emitBrowserTabInventory();
 		const disposeError = new ToolAbortError("Browser session disposed");
 		for (const node of [...tab.queue]) {
 			if (node.pending.sessionKey === ownerId) settleQueuedRun(tab, node, disposeError);
@@ -881,6 +913,7 @@ function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 		const pending = tab.pending.get(msg.id);
 		if (!pending) return;
 		tab.pending.delete(msg.id);
+		emitBrowserTabInventory();
 		if (msg.ok) {
 			pending.resolve(msg.payload);
 			return;
@@ -890,6 +923,7 @@ function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 	}
 	if (msg.type === "ready") {
 		tab.info = msg.info;
+		emitBrowserTabInventory();
 		return;
 	}
 	if (msg.type === "tool-call") {
@@ -983,6 +1017,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		tab.worker = worker;
 		tab.info = info;
 		tab.state = "alive";
+		emitBrowserTabInventory();
 		worker.onMessage(msg => handleTabMessage(tab, msg));
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
@@ -995,18 +1030,21 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	if (!tab) return;
 	killedTabs.set(name, reason);
 	tab.state = "dead";
+	emitBrowserTabInventory();
 	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
 	if (tab.backend === "cmux") {
 		await releaseBrowser(tab.browser, { kill: false });
 		tabs.delete(name);
+		emitBrowserTabInventory();
 		return;
 	}
 	await tab.worker.terminate().catch(() => undefined);
 	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
+	emitBrowserTabInventory();
 }
 
 async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {

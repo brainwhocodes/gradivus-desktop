@@ -85,6 +85,10 @@ export class WorkspaceTerminalSession {
 		return this.#totalBytesProduced;
 	}
 
+	get firstAvailableOffset(): number {
+		return this.#chunks[0]?.offset ?? this.#totalBytesProduced;
+	}
+
 	get cwd(): string | undefined {
 		return this.#cwd;
 	}

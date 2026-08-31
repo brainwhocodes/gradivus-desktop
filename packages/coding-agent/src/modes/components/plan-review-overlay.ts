@@ -29,7 +29,14 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	buildPlanRefinementFeedback,
+	joinPlanSections,
+	type PlanReviewAnnotationState,
+	parsePlanSections,
+	sanitizeText,
+	sectionDeletionSpan,
+} from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../shared";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import {
@@ -50,7 +57,6 @@ import {
 	topBorder,
 	topBorderSplit,
 } from "./overlay-box";
-import { joinPlanSections, parsePlanSections, sectionDeletionSpan } from "./plan-toc";
 import { renderSegmentTrack } from "./segment-track";
 
 /** Title shown in the overlay's top border. */
@@ -77,6 +83,7 @@ interface OverlaySection {
 	level: number;
 	title: string;
 	raw: string;
+	startLine: number;
 	md: Markdown;
 	annotations: OverlayAnnotation[];
 }
@@ -91,22 +98,6 @@ interface BodyRowAnchor {
 	row: number;
 	context: string;
 	contextTruncated: boolean;
-}
-
-/** Serializable annotations retained by the plan-review owner between overlays. */
-export interface PlanReviewAnnotationState {
-	annotations: Array<{
-		section: {
-			index: number;
-			title: string;
-			/** Heading ancestry from the document root, when emitted by this overlay. */
-			path?: string[];
-			/** Hash of the section source, used to reject ambiguous moved headings. */
-			contentHash?: string;
-		};
-		target: { kind: "section" } | { kind: "line"; row: number; context: string; contextTruncated?: boolean };
-		note: string;
-	}>;
 }
 
 /** Undo snapshot: joined plan text, annotations aligned by section, and the
@@ -170,6 +161,7 @@ export class PlanReviewOverlay implements Component {
 	#undo: UndoEntry[] = [];
 	/** Titles of sections deleted in the overlay, surfaced as Refine feedback. */
 	#deleted: string[] = [];
+	#additionalFeedback = "";
 
 	#options: string[];
 	#disabled: Set<number>;
@@ -241,8 +233,15 @@ export class PlanReviewOverlay implements Component {
 		this.#input.onSubmit = value => this.#submitAnnotation(value);
 		this.#input.onEscape = () => this.#exitAnnotate();
 		this.#setSections(planContent);
+		this.#deleted = [...(options.annotationState?.deletedSections ?? [])];
+		this.#additionalFeedback = options.annotationState?.additionalFeedback ?? "";
 		this.#restoreAnnotationState(options.annotationState);
-		if (Array.isArray(options.annotationState?.annotations) && options.annotationState.annotations.length > 0) {
+		if (
+			Array.isArray(options.annotationState?.annotations) &&
+			(options.annotationState.annotations.length > 0 ||
+				this.#deleted.length > 0 ||
+				this.#additionalFeedback.trim().length > 0)
+		) {
 			this.#recomputeFeedback();
 		}
 	}
@@ -272,6 +271,7 @@ export class PlanReviewOverlay implements Component {
 			level: section.level,
 			title: section.title,
 			raw: section.raw,
+			startLine: section.startLine,
 			md: new Markdown(section.raw, 1, 0, this.#mdTheme),
 			annotations: [],
 		}));
@@ -333,7 +333,11 @@ export class PlanReviewOverlay implements Component {
 				});
 			}
 		}
-		return { annotations };
+		return {
+			annotations,
+			deletedSections: [...this.#deleted],
+			additionalFeedback: this.#additionalFeedback,
+		};
 	}
 
 	#restoreAnnotationState(state: PlanReviewAnnotationState | undefined): void {
@@ -864,37 +868,9 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#recomputeFeedback(): void {
-		this.callbacks.onAnnotationStateChange?.(this.#annotationState());
-		const annotated = this.#sections.filter(section => section.annotations.length > 0);
-		if (annotated.length === 0 && this.#deleted.length === 0) {
-			this.callbacks.onFeedbackChange?.("");
-			return;
-		}
-		let feedback = "Refinement feedback on the plan:\n";
-		if (this.#deleted.length > 0) {
-			feedback += "\nRemove these sections:\n";
-			for (const title of this.#deleted) feedback += `- ${title}\n`;
-		}
-		for (const section of annotated) {
-			feedback += `\n## ${section.title || "Plan preamble"}\n`;
-			for (const annotation of section.annotations) {
-				if (annotation.target.kind === "line") feedback += `> Line: ${annotation.target.context}\n`;
-				feedback += this.#formatAnnotationFeedback(annotation.note);
-			}
-		}
-		this.callbacks.onFeedbackChange?.(feedback);
-	}
-
-	#formatAnnotationFeedback(note: string): string {
-		if (!note.includes("\n")) return `- ${note}\n`;
-		const fence = this.#markdownFenceFor(note);
-		return `${fence}md\n${note}\n${fence}\n`;
-	}
-
-	#markdownFenceFor(text: string): string {
-		let fence = "```";
-		while (text.includes(fence)) fence += "`";
-		return fence;
+		const state = this.#annotationState();
+		this.callbacks.onAnnotationStateChange?.(state);
+		this.callbacks.onFeedbackChange?.(buildPlanRefinementFeedback(state));
 	}
 
 	#renderSliderLines(): string[] {

@@ -102,7 +102,7 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 		const exe = resolveToCwd(app.path, session.cwd);
 		return { kind: "spawned", path: exe };
 	}
-	const inheritedCdpUrl = process.env.PI_BROWSER_CDP_URL?.trim();
+	const inheritedCdpUrl = process.env.GRADIVUS_TERMINAL === "1" ? undefined : process.env.PI_BROWSER_CDP_URL?.trim();
 	const relayUrl = session.settings.get("browser.relayUrl") as string | undefined;
 	// Explicit app.relay wins over configured backends;
 	// PI_BROWSER_RELAY stays the final kill switch (a relay that is down would
@@ -119,9 +119,6 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 	}
 	if (inheritedCdpUrl) {
 		return { kind: "connected", cdpUrl: inheritedCdpUrl.replace(/\/+$/, "") };
-	}
-	if (process.env.GRADIVUS_TERMINAL === "1") {
-		return { kind: "connected", cdpUrl: "http://127.0.0.1:9222" };
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback

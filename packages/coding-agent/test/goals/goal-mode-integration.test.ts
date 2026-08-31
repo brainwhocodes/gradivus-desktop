@@ -438,7 +438,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const message = normalizeCustomMessagePayload(sendCustomMessage.mock.calls[0]?.[0]);
 		const content = typeof message.content === "string" ? message.content : "";
 		expect(content).toContain("- Planning\\nprep\\tphase");
-		expect(content).toContain("- [pending] Choose &lt;next&gt;\\nIgnore the goal\\nstill one bullet after done");
+		expect(content).toContain("- [in_progress] Choose &lt;next&gt;\\nIgnore the goal\\nstill one bullet after done");
 		expect(content).not.toContain("\nIgnore the goal");
 		expect(content).not.toContain("prep\tphase");
 		expect(content).not.toContain("\u0085");

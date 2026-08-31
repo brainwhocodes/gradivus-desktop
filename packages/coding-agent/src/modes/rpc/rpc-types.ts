@@ -7,8 +7,10 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { PlanReviewAnnotationState } from "@oh-my-pi/pi-utils/plan-review";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { PlanReviewDecision } from "../../plan-mode/review-controller";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -18,7 +20,9 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "../../task";
+import type { BrowserTabInventory } from "../../tools/browser/tab-supervisor";
 import type { TodoPhase } from "../../tools/todo";
+import type { AgentPromptScope, RpcAgentPromptView } from "./rpc-agents";
 import type { RpcFileDiffResult } from "./rpc-file-diff";
 import type { RpcMessagesPage } from "./rpc-messages";
 import type { RpcOpenRouterModelRouting } from "./rpc-openrouter-routing";
@@ -47,10 +51,42 @@ export type RpcCommand =
 			planFilePath?: string;
 			workflow?: "parallel" | "iterative";
 	  }
+	| { id?: string; type: "request_plan_review" }
+	| {
+			id?: string;
+			type: "update_plan_review";
+			reviewId: string;
+			content: string;
+			expectedRevision: string;
+			annotationState: PlanReviewAnnotationState;
+	  }
+	| {
+			id?: string;
+			type: "resolve_plan_review";
+			reviewId: string;
+			expectedRevision: string;
+			decision: PlanReviewDecision;
+	  }
 	| { id?: string; type: "get_settings" }
 	| { id?: string; type: "set_setting"; path: string; value: RpcSettingValue }
+	| { id?: string; type: "get_agent_prompts" }
+	| {
+			id?: string;
+			type: "save_agent_prompt";
+			name: string;
+			scope: AgentPromptScope;
+			systemPrompt: string;
+			expectedRevision: string | null;
+	  }
+	| {
+			id?: string;
+			type: "reset_agent_prompt";
+			name: string;
+			scope: AgentPromptScope;
+			expectedRevision: string;
+	  }
 	| { id?: string; type: "get_available_commands" }
-	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
+	| { id?: string; type: "set_todos"; phases: TodoPhase[]; expectedRevision: number; action: string }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
@@ -98,6 +134,7 @@ export type RpcCommand =
 	// Session
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "export_html"; outputPath?: string }
+	| { id?: string; type: "close_browser_tab"; name: string; confirm?: boolean }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "branch"; entryId: string }
 	| { id?: string; type: "get_branch_messages" }
@@ -127,6 +164,11 @@ export interface RpcSettingOption {
 	description?: string;
 }
 
+export interface RpcTodoState {
+	phases: TodoPhase[];
+	revision: number;
+}
+
 export interface RpcSettingView {
 	path: string;
 	tab: RpcSettingTab;
@@ -147,8 +189,47 @@ export interface RpcRuntimeMetrics {
 	heapTotalBytes: number;
 	externalMemoryBytes: number;
 }
+export interface RpcPlanReviewExecutionModel {
+	role: string;
+	provider: string;
+	modelId: string;
+	label: string;
+	thinkingLevel?: string;
+}
+
+export interface RpcPlanReviewState {
+	id: string;
+	title: string;
+	planFilePath: string;
+	revision: string;
+	status: "ready" | "awaiting_refinement" | "applying" | "failed";
+	phase:
+		| "ready"
+		| "awaiting_refinement"
+		| "accepted"
+		| "mode_exited"
+		| "session_reset"
+		| "compaction_finished"
+		| "prompt_admitted"
+		| "failed";
+	content: string;
+	annotationState: PlanReviewAnnotationState;
+	suggestedSaveName: string;
+	contextUsage?: ContextUsage;
+	keepContextDisabled: boolean;
+	executionModels: RpcPlanReviewExecutionModel[];
+	defaultExecutionRole?: string;
+	error?: string;
+}
+
+export interface RpcPlanReviewUpdateFrame {
+	type: "plan_review_update";
+	planReview?: RpcPlanReviewState;
+	sessionReset?: { sessionId: string; sessionFile?: string; sessionName?: string };
+}
 
 export interface RpcSessionState {
+	capabilities: { planReview: 1 };
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
@@ -166,7 +247,7 @@ export interface RpcSessionState {
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
-	todoPhases: TodoPhase[];
+	todoState: RpcTodoState;
 	runtime: RpcRuntimeMetrics;
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
@@ -175,6 +256,7 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	/** Current plan mode state. */
 	planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" };
+	planReview?: RpcPlanReviewState;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -357,6 +439,20 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "request_plan_review" | "update_plan_review";
+			success: true;
+			data: { planReview: RpcPlanReviewState };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "resolve_plan_review";
+			success: true;
+			data: { accepted: true; awaitingRefinement?: true };
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "get_available_commands";
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
@@ -375,9 +471,35 @@ export type RpcResponse =
 			success: true;
 			data: { setting: RpcSettingView };
 	  }
-	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_agent_prompts";
+			success: true;
+			data: { agents: RpcAgentPromptView[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "save_agent_prompt" | "reset_agent_prompt";
+			success: true;
+			data: { agent: RpcAgentPromptView };
+	  }
+	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoState: RpcTodoState } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "close_browser_tab";
+			success: true;
+			data: {
+				closed: boolean;
+				requiresConfirmation?: boolean;
+				tab?: BrowserTabInventory;
+				inventory: readonly BrowserTabInventory[];
+			};
+	  }
 	| {
 			id?: string;
 			type: "response";
@@ -577,9 +699,19 @@ export interface RpcSubagentEventFrame {
 	payload: SubagentEventPayload;
 }
 
+export interface RpcBrowserInventoryUpdateFrame {
+	type: "browser_inventory_update";
+	inventory: readonly BrowserTabInventory[];
+}
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcPromptResultFrame | RpcAgentHubUpdateFrame;
+export type RpcSessionEventFrame =
+	| AgentSessionEvent
+	| RpcSubagentFrame
+	| RpcPromptResultFrame
+	| RpcAgentHubUpdateFrame
+	| RpcBrowserInventoryUpdateFrame
+	| RpcPlanReviewUpdateFrame;
 
 // ============================================================================
 // Extension UI Events

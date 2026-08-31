@@ -422,6 +422,7 @@ describe("RpcCommandDispatcher", () => {
 					command: "get_state",
 					success: true,
 					data: {
+						capabilities: { planReview: 1 },
 						thinkingLevel: undefined,
 						isStreaming: false,
 						isCompacting: false,
@@ -436,7 +437,7 @@ describe("RpcCommandDispatcher", () => {
 						tokensPerSecond: null,
 						messageCount: 0,
 						queuedMessageCount: 0,
-						todoPhases: [],
+						todoState: { phases: [], revision: 0 },
 						runtime: {
 							pid: 1234,
 							uptimeMs: 1000,

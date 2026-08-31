@@ -344,6 +344,18 @@ export interface FollowUpOptions {
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
 }
+export interface PlanReviewPromptInput {
+	kind: "approved" | "refinement";
+	reviewId: string;
+	planFilePath: string;
+	content: string;
+	images?: ImageContent[];
+}
+
+export interface PlanReviewPromptAdmission {
+	admittedEntryId: string;
+	completion: Promise<void>;
+}
 
 /** Result from a handoff operation. */
 export interface HandoffResult {

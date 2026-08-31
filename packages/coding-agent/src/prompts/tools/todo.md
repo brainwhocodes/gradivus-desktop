@@ -6,15 +6,16 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 
 |`op`|Fields|Effect|
 |---|---|---|
-|`init`|`list: [{phase, items: string[]}]`|Initialize full list; replaces existing|
-|`init`|`items: string[]`|Flattened single-phase init|
-|`start`|`task`|Mark in progress|
-|`done`|`task` or `phase`|Mark completed|
-|`drop`|`task` or `phase`|Mark abandoned|
-|`block`|`task` or `phase`; optional `reason`|Mark blocked: awaiting external input; never auto-promotes; excluded from stop-time incomplete-todo reminder|
-|`unblock`|`task` or `phase`|Blocked task → `pending`|
-|`rm`|optional `task` or `phase`|Remove task/phase; omit both → clear|
-|`append`|`phase`; `items: string[]`|Append tasks to phase; lazily creates phase|
+|`init`|`list: [{phase, items: (string \| {content, parent?})[]}]`|Replace the list; `parent` names an earlier same-phase task|
+|`init`|`items: (string \| {content, parent?})[]`|Flattened single-phase init|
+|`start`|`task`|Start the leaf or its first pending descendant|
+|`done`|`task` or `phase`|Complete the targeted leaf subtree|
+|`drop`|`task` or `phase`|Abandon the targeted leaf subtree|
+|`block`|`task` or `phase`; optional `reason`|Block open leaves; blocked leaves NEVER auto-promote|
+|`unblock`|`task` or `phase`|Blocked leaves → `pending`|
+|`rm`|optional `task` or `phase`|Remove a task subtree/phase tasks; omit both → clear|
+|`append`|`phase`; `items: (string \| {content, parent?})[]`|Append roots/children; lazily create the phase|
+|`move`|`task`, destination `phase`; optional `parent`, `before`|Move a subtree; `before` MUST be a destination sibling|
 |`view`|—|Read-only; echo list|
 
 ## Anatomy
@@ -22,13 +23,24 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 - Task content: 5–10 words; what, not how; unique identifier.
 - Phase name: short noun phrase (e.g. `Foundation`, `Auth`, `Verification`); unique identifier. NEVER prefix `1.`, `A)`, `Phase 1:`.
 
+## Hierarchy
+
+- `parent` names task content, NEVER an internal ID.
+- Parents MUST precede descendants in the same phase.
+- Only leaves are actionable; container status derives from descendants.
+- Container actions cascade to every descendant leaf.
+- First child reopens a completed/abandoned parent.
+- `move` preserves the subtree and supports reorder/indent/outdent.
+- Task content remains globally unique across all phases.
+
 ## Rules
 
-- Mark tasks done immediately after finishing; complete phases in order.
-- NEVER make a todo call the turn's only tool call. Batch with real work: `init` with first reads/edits; each `done`/`start` with next action. Solo todo turns waste a round trip.
-- Waiting on something you can't act on—a user decision, another agent, external service: `block` task (optional `reason`); remains tracked but avoids stop reminder. Blocking the active task hands `in_progress` to the next `pending` task, never back to the blocked one. `unblock` when actionable. If blocker agent-actionable, `append` an unblocking task instead.
+- Mark leaf tasks done immediately; complete phases in order.
+- NEVER make a todo call the turn's only tool call. Batch it with real work.
+- External blocker? `block` the leaf with `reason`; `unblock` when actionable.
+- Agent-actionable blocker? `append` a child task instead.
 - Keep introduced `task`/`phase` strings stable.
-- Lost exact task text: `view` echoes list; NEVER guess from memory.
+- Lost exact task text? `view`; NEVER guess.
 
 ## Create a list
 
@@ -38,7 +50,8 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 - New instructions arrive mid-task: capture before proceeding.
 
 <critical>
-User gives multi-step plan—phased todo, numbered/bulleted checklist, or "N bugs/items/tasks":
-- MUST `init` every item as its own task before working.
-- Enumerate all; NEVER summarize into fewer tasks, sample "the important ones", drop items, or track the rest from memory.
+User gives a multi-step plan, numbered checklist, or “N bugs/items/tasks”:
+- MUST `init` every item as a leaf or explicit parent/child task.
+- NEVER summarize, sample, omit, or track items only from memory.
+- NEVER target tasks by generated IDs; use exact content.
 </critical>

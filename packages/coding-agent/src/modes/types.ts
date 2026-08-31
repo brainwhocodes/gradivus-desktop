@@ -27,6 +27,11 @@ import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import type { LspStartupServerInfo } from "../tools";
+import type {
+	TodoItem as CanonicalTodoItem,
+	TodoPhase as CanonicalTodoPhase,
+	TodoStatus as CanonicalTodoStatus,
+} from "../tools/todo";
 import type { EventBus } from "../utils/event-bus";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -74,17 +79,12 @@ export type SubmittedUserInput = {
 	started: boolean;
 };
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
-
-export type TodoItem = {
-	content: string;
-	status: TodoStatus;
+export type TodoStatus = CanonicalTodoStatus;
+export type TodoItem = CanonicalTodoItem & {
 	details?: string;
 	notes?: string[];
 };
-
-export type TodoPhase = {
-	name: string;
+export type TodoPhase = Omit<CanonicalTodoPhase, "tasks"> & {
 	tasks: TodoItem[];
 };
 

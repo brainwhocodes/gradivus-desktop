@@ -35,7 +35,7 @@ const legacyState = {
 	autoCompactionEnabled: false,
 	messageCount: 0,
 	queuedMessageCount: 0,
-	todoPhases: [],
+	todoState: { phases: [], revision: 0 },
 };
 
 const server = await listenOmpGrpc({ host, port, token });

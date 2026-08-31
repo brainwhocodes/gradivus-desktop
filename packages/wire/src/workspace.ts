@@ -97,6 +97,8 @@ export interface WorkspaceTerminalV1 {
 	cwd?: string;
 	columns?: number;
 	rows?: number;
+	shell?: string;
+	args?: string[];
 	status: "starting" | "running" | "exited" | "failed" | "closed";
 	error?: string;
 }
@@ -380,8 +382,10 @@ export type WorkspaceCommandTypeV1 =
 	| "profile.update"
 	| "profile.delete"
 	| "tab.update"
+	| "tab.reorder"
 	| "tab.close"
 	| "terminal.open"
+	| "terminal.restart"
 	| "terminal.status"
 	| "terminal.input"
 	| "terminal.resize"
@@ -808,6 +812,11 @@ function parseTerminal(value: unknown, path: string): WorkspaceTerminalV1 {
 		cwd: optionalString(v, "cwd", path),
 		columns: "columns" in v ? integer(v.columns, `${path}.columns`, 1) : undefined,
 		rows: "rows" in v ? integer(v.rows, `${path}.rows`, 1) : undefined,
+		shell: optionalString(v, "shell", path),
+		args:
+			"args" in v
+				? array(v.args, `${path}.args`).map((item, index) => string(item, `${path}.args[${index}]`))
+				: undefined,
 		status: enumValue(
 			required(v, "status", path),
 			["starting", "running", "exited", "failed", "closed"],
@@ -1307,8 +1316,10 @@ export function parseWorkspaceCommandV1(value: unknown): WorkspaceCommandV1 {
 			"profile.update",
 			"profile.delete",
 			"tab.update",
+			"tab.reorder",
 			"tab.close",
 			"terminal.open",
+			"terminal.restart",
 			"terminal.status",
 			"terminal.input",
 			"terminal.resize",

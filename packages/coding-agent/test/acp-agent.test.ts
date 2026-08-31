@@ -1709,7 +1709,7 @@ describe("ACP agent", () => {
 
 		expect(harness.updates.map(update => update.update)).toContainEqual({
 			sessionUpdate: "plan",
-			entries: [{ content: "Restore plan", priority: "medium", status: "pending" }],
+			entries: [{ content: "Restore plan", priority: "medium", status: "in_progress" }],
 		});
 		expectAcpNotifications(harness.updates);
 
