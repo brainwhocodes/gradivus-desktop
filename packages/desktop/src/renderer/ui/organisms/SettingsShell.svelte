@@ -29,6 +29,7 @@
 				{ id: "omp-files", label: "Files" },
 				{ id: "omp-shell", label: "Shell" },
 				{ id: "omp-tools", label: "Tools" },
+				{ id: "omp-agents", label: "Subagents" },
 				{ id: "omp-tasks", label: "Tasks" },
 			],
 		},
@@ -57,7 +58,7 @@
 	export let entries: readonly SettingsSearchEntry[] = [];
 	export let refreshing = false;
 	export let onQueryChange: (query: string) => void;
-	export let onCategoryChange: (category: SettingsCategoryId) => void;
+	export let onCategoryChange: (category: SettingsCategoryId) => boolean | void;
 	export let onRefresh: () => void;
 	export let onClose: () => void;
 	export let content: Snippet<[ReadonlySet<string>]>;
@@ -117,7 +118,7 @@
 	}
 
 	async function selectCategory(category: SettingsCategoryId): Promise<void> {
-		onCategoryChange(category);
+		if (onCategoryChange(category) === false) return;
 		await tick();
 		categoryHeading?.focus({ preventScroll: true });
 		categoryHeading?.scrollIntoView({ block: "start" });

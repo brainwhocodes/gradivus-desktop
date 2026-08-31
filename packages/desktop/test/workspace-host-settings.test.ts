@@ -170,7 +170,7 @@ describe("WorkspaceHost settings integration", () => {
 		});
 	});
 
-	it("uses configured workspace.defaultPath and terminal.shell when opening a terminal", async () => {
+	it("uses the selected workspace cwd and configured shell when opening a terminal", async () => {
 		await settingsStore.update({
 			workspace: {
 				defaultPath: "/workspace/projects/custom",
@@ -188,7 +188,15 @@ describe("WorkspaceHost settings integration", () => {
 			activeTabId: "tab_main",
 			revision: 1,
 			workspaces: [{ id: "ws_main", label: "Main", locationId: "loc_main" }],
-			locations: [{ id: "loc_main", kind: "local", path: "/test", lifecycle: { generation: 1 } }],
+			locations: [
+				{
+					id: "loc_main",
+					kind: "local",
+					path: "/test",
+					address: { kind: "local", path: "/test" },
+					lifecycle: { generation: 1 },
+				},
+			],
 			tabs: [
 				{
 					id: "tab_main",
@@ -228,6 +236,7 @@ describe("WorkspaceHost settings integration", () => {
 			id: "term-pane-1",
 			tabId: "tab_main",
 			workspaceId: "ws_main",
+			name: "Terminal",
 			cols: 80,
 			rows: 24,
 		});
@@ -235,7 +244,7 @@ describe("WorkspaceHost settings integration", () => {
 		expect(executedCommand).toMatchObject({
 			type: "terminal.open",
 			payload: {
-				cwd: "/workspace/projects/custom",
+				cwd: "/test",
 				shell: "/bin/fish",
 			},
 		});
@@ -308,7 +317,7 @@ describe("WorkspaceHost settings integration", () => {
 		});
 	});
 
-	it("handles delayed settings loading without falling back to stale defaults on subsequent actions", async () => {
+	it("uses delayed shell settings without replacing the selected workspace cwd", async () => {
 		const uninitializedStore = new AppSettingsStore(tempDir, "/custom/delayed/path");
 		const { host } = createHost(uninitializedStore);
 
@@ -316,7 +325,15 @@ describe("WorkspaceHost settings integration", () => {
 			version: 1,
 			revision: 1,
 			workspaces: [{ id: "ws_main", label: "Main", locationId: "loc_main" }],
-			locations: [{ id: "loc_main", kind: "local", path: "/test", lifecycle: { generation: 1 } }],
+			locations: [
+				{
+					id: "loc_main",
+					kind: "local",
+					path: "/test",
+					address: { kind: "local", path: "/test" },
+					lifecycle: { generation: 1 },
+				},
+			],
 			tabs: [
 				{
 					id: "tab_main",
@@ -363,6 +380,7 @@ describe("WorkspaceHost settings integration", () => {
 			id: "term-pane-1",
 			tabId: "tab_main",
 			workspaceId: "ws_main",
+			name: "Terminal",
 			cols: 80,
 			rows: 24,
 		});
@@ -370,7 +388,7 @@ describe("WorkspaceHost settings integration", () => {
 		expect(executedCommand).toMatchObject({
 			type: "terminal.open",
 			payload: {
-				cwd: "/custom/delayed/path",
+				cwd: "/test",
 				shell: "/bin/zsh",
 			},
 		});

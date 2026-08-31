@@ -137,7 +137,7 @@ describe("WorkspaceHost generation-safe selection lifecycle", () => {
 			},
 			contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
 		};
-		const host = new WorkspaceHost(window as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(window as never);
 		const document = createDocument();
 		host.syncWithDocument(document);
 		host.setVisibleBrowsers(["pane-0001"]);

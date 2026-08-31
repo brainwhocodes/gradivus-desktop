@@ -209,3 +209,19 @@
 		word-break: break-all;
 	}
 }
+
+.context-actions {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 6px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line-soft);
+}
+
+.context-actions .secondary-button {
+	height: 30px;
+	min-height: 30px;
+	padding-inline: 8px;
+	font-size: 11px;
+}

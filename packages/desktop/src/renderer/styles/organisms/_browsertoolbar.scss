@@ -18,7 +18,9 @@
 	gap: 4px;
 }
 
-.browser-toolbar button {
+.browser-toolbar button,
+.browser-more-actions summary,
+.browser-find-bar button {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -62,7 +64,6 @@
 		}
 	}
 
-
 	&.browser-agent-hub-button {
 		width: auto;
 		max-width: 168px;
@@ -89,4 +90,94 @@
 		font-variant-numeric: tabular-nums;
 		text-align: center;
 	}
+}
+
+.browser-more-actions {
+	position: relative;
+}
+
+.browser-more-actions summary {
+	list-style: none;
+	letter-spacing: 1px;
+}
+
+.browser-more-actions summary::-webkit-details-marker {
+	display: none;
+}
+
+.browser-more-menu {
+	position: absolute;
+	right: 0;
+	top: 32px;
+	z-index: var(--z-popover);
+	width: 150px;
+	display: grid;
+	gap: 2px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	padding: 5px;
+	background: var(--shell-raised);
+	box-shadow: 0 8px 24px var(--shadow-color);
+}
+
+.browser-more-menu button {
+	width: 100%;
+	justify-content: flex-start;
+	padding-inline: 8px;
+	font-size: 12px;
+}
+
+.browser-find-bar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 38px;
+	padding: 4px 8px;
+	border-bottom: 1px solid var(--line);
+	background: var(--shell);
+}
+
+.browser-find-bar input {
+	min-width: 120px;
+	flex: 1 1 auto;
+	height: 28px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	padding: 0 8px;
+	color: var(--foreground);
+	background: var(--shell-raised);
+	font-size: 12px;
+}
+
+.browser-find-count {
+	min-width: 58px;
+	color: var(--foreground-muted);
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+
+.browser-find-direction {
+	font-size: 13px;
+}
+
+.browser-toolbar .browser-automation-button {
+	width: auto;
+	gap: 5px;
+	padding-inline: 8px;
+	font-size: 12px;
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.browser-toolbar .browser-automation-button.is-active {
+	border-color: var(--accent-boundary);
+	color: var(--selection-foreground);
+	background: var(--selection-surface);
+}
+
+.browser-toolbar .browser-automation-button span {
+	color: var(--accent);
+	font-size: 10px;
+	text-transform: capitalize;
 }

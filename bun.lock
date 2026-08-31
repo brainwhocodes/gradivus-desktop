@@ -154,6 +154,7 @@
       "name": "@gradivus/desktop",
       "version": "0.1.0",
       "dependencies": {
+        "@oh-my-pi/pi-browser-runtime": "catalog:",
         "@oh-my-pi/pi-grpc": "catalog:",
         "@oh-my-pi/pi-workspace-runtime": "catalog:",
       },

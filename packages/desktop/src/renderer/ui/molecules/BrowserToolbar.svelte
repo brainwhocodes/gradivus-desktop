@@ -23,13 +23,17 @@
 		agentCount: number;
 		agentHubId: string;
 		agentHubOpen: boolean;
+		automationOpen: boolean;
+		automationAccess?: "observe" | "control";
 		queueCount: number;
 		queueOpen: boolean;
 		oncontrol: (action: BrowserNavigationAction) => void;
 		ontoggleselection: () => void;
 		onopenagenthub: (trigger: HTMLButtonElement) => void;
 		onopenqueue: () => void;
+		onopenautomation: (trigger: HTMLButtonElement) => void;
 		onnavigate: (address: string) => void;
+		onopenfind: () => void;
 		onsplit: (layout: WorkspaceLayout) => void;
 		onclosepane: () => void;
 	}
@@ -46,13 +50,17 @@
 		agentHubId,
 		agentHubOpen,
 		queueCount,
+		automationOpen,
+		automationAccess,
 		queueOpen,
 		oncontrol,
 		ontoggleselection,
 		onopenagenthub,
 		onopenqueue,
 		onnavigate,
+		onopenautomation,
 		onsplit,
+		onopenfind,
 		onclosepane,
 	}: Props = $props();
 
@@ -78,6 +86,16 @@
 	<div class="browser-pane-actions">
 		<button
 			type="button"
+			class="browser-automation-button"
+			class:is-active={automationOpen}
+			aria-label={`${automationOpen ? "Close" : "Open"} Agent access${automationAccess ? `, ${automationAccess}` : ""}`}
+			aria-expanded={automationOpen}
+			onclick={(event) => onopenautomation(event.currentTarget)}
+		>
+			Agent access{#if automationAccess}<span>{automationAccess === "control" ? "Control" : "Read"}</span>{/if}
+		</button>
+		<button
+			type="button"
 			class="browser-agent-hub-button"
 			class:is-active={agentHubOpen}
 			aria-label={`${agentHubOpen ? "Close" : "Open"} browser Agent Hub, ${agentCount} Page ${agentCount === 1 ? "Agent" : "Agents"}`}
@@ -101,6 +119,16 @@
 				<span>{queueCount}</span>
 			</button>
 		{/if}
+		<details class="browser-more-actions">
+			<summary aria-label="More browser actions">•••</summary>
+			<div class="browser-more-menu">
+				<button type="button" onclick={onopenfind}>Find in page</button>
+				<button type="button" onclick={() => oncontrol("hard-reload")}>Hard reload</button>
+				<button type="button" onclick={() => oncontrol("zoom-out")}>Zoom out</button>
+				<button type="button" onclick={() => oncontrol("zoom-reset")}>Actual size</button>
+				<button type="button" onclick={() => oncontrol("zoom-in")}>Zoom in</button>
+			</div>
+		</details>
 		<IconButton icon={TransferHorizontal} size={16} label="Split browser right" title="Split right" disabled={!canSplit} onclick={() => onsplit("columns")} />
 		<IconButton icon={TransferVertical} size={16} label="Split browser below" title="Split below" disabled={!canSplit} onclick={() => onsplit("rows")} />
 		<IconButton icon={CloseCircle} size={16} label="Close browser pane" title="Close pane" onclick={onclosepane} />

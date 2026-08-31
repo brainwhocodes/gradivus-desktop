@@ -194,6 +194,7 @@ describe("Sequential application shutdown and terminal teardown", () => {
 				id: "pane-term-1",
 				tabId: "tab-term-1",
 				workspaceId: "ws-shutdown",
+				name: "Terminal",
 				cols: 80,
 				rows: 24,
 			});

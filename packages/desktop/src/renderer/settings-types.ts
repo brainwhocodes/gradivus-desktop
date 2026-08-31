@@ -18,6 +18,7 @@ export type SettingsCategoryId =
 	| "omp-files"
 	| "omp-shell"
 	| "omp-tools"
+	| "omp-agents"
 	| "omp-tasks"
 	| "accounts"
 	| ApplicationSettingsCategoryId;

@@ -1,7 +1,10 @@
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { contextBridge, ipcRenderer } from "electron";
 import type {
 	AgentHubMessagePage,
 	AgentHubSnapshot,
+	AgentPromptScope,
+	AgentPromptView,
 	AgentSettingValue,
 	AgentSettingView,
 	AuthAccountView,
@@ -9,12 +12,14 @@ import type {
 	BootstrapSnapshot,
 	BrowserBounds,
 	BrowserNavigationAction,
+	BrowserTabCloseResult,
 	BrowserViewState,
-	ChatTerminalViewState,
+	ContextMutationResult,
 	CreateBrowserInput,
 	CreateTerminalInput,
 	EditMessageResult,
 	ElementEditState,
+	ExportHtmlResult,
 	FileDiffView,
 	GradivusApi,
 	GradivusEvent,
@@ -22,19 +27,27 @@ import type {
 	InterruptMode,
 	ModelOption,
 	OAuthAccountsView,
-	OpenChatTerminalInput,
 	OpenRouterModelRouting,
+	PaneAutomationState,
+	PlanReviewDecisionInput,
+	PlanReviewResolutionResult,
+	PlanReviewView,
 	PromptAttachmentUpload,
 	PromptAttachmentView,
 	PromptComposition,
 	PromptCompositionPart,
 	QueueMode,
 	SessionSnapshot,
+	SessionStatsView,
 	SlashCommand,
+	TerminalAttachmentState,
 	TerminalViewState,
 	ThinkingLevel,
 	TimelineItem,
 	TimelinePage,
+	TimelineToolActivity,
+	TodoPhase,
+	TodoState,
 	WorkspaceDocumentV1,
 	WorkspaceEvent,
 	WorkspaceImagePreview,
@@ -140,6 +153,80 @@ function promptComposition(value: unknown): PromptComposition {
 	}
 	return { parts };
 }
+function planReviewAnnotationState(value: unknown): PlanReviewView["annotationState"] {
+	if (!isRecord(value) || !Array.isArray(value.annotations) || !Array.isArray(value.deletedSections)) {
+		throw new TypeError("plan review annotations are invalid");
+	}
+	if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_INLINE_PROMPT_BYTES) {
+		throw new RangeError("plan review annotations exceed 512 KiB");
+	}
+	const annotations: PlanReviewView["annotationState"]["annotations"] = value.annotations.map(candidate => {
+		if (!isRecord(candidate) || !isRecord(candidate.section) || !isRecord(candidate.target)) {
+			throw new TypeError("plan review annotation is invalid");
+		}
+		if (!Number.isSafeInteger(candidate.section.index) || (candidate.section.index as number) < 0) {
+			throw new TypeError("plan review annotation section is invalid");
+		}
+		const section = {
+			index: candidate.section.index as number,
+			title: text(candidate.section.title, "plan review annotation title"),
+			...(Array.isArray(candidate.section.path)
+				? { path: candidate.section.path.map(segment => text(segment, "plan review annotation path")) }
+				: {}),
+			...(typeof candidate.section.contentHash === "string"
+				? { contentHash: text(candidate.section.contentHash, "plan review annotation content hash") }
+				: {}),
+		};
+		let target: PlanReviewView["annotationState"]["annotations"][number]["target"];
+		if (candidate.target.kind === "section") {
+			target = { kind: "section" };
+		} else if (
+			candidate.target.kind === "line" &&
+			Number.isSafeInteger(candidate.target.row) &&
+			(candidate.target.row as number) >= 0
+		) {
+			target = {
+				kind: "line",
+				row: candidate.target.row as number,
+				context: text(candidate.target.context, "plan review line context"),
+				...(candidate.target.contextTruncated === true ? { contextTruncated: true } : {}),
+			};
+		} else {
+			throw new TypeError("plan review annotation target is invalid");
+		}
+		return { section, target, note: text(candidate.note, "plan review annotation note") };
+	});
+	return {
+		annotations,
+		deletedSections: value.deletedSections.map(section => text(section, "deleted plan section")),
+		additionalFeedback: text(value.additionalFeedback, "additional plan feedback"),
+	};
+}
+
+function planReviewDecision(value: unknown): PlanReviewDecisionInput {
+	if (!isRecord(value)) throw new TypeError("plan review decision is invalid");
+	if (value.kind === "approve") {
+		if (value.context !== "fresh" && value.context !== "compact" && value.context !== "keep") {
+			throw new TypeError("plan approval context is invalid");
+		}
+		return {
+			kind: "approve",
+			context: value.context,
+			...(value.executionRole === undefined
+				? {}
+				: { executionRole: text(value.executionRole, "plan execution role") }),
+		};
+	}
+	if (value.kind === "refine") {
+		return {
+			kind: "refine",
+			feedback: text(value.feedback, "plan refinement feedback"),
+			...(value.composition === undefined ? {} : { composition: promptComposition(value.composition) }),
+		};
+	}
+	if (value.kind === "save") return { kind: "save" };
+	throw new TypeError("plan review decision is invalid");
+}
 
 function sessionName(value: unknown): string {
 	const name = text(value, "session name").trim();
@@ -184,31 +271,17 @@ function agentHubMessage(value: unknown): string {
 }
 
 function paneId(value: unknown): string {
-	if (typeof value !== "string" || !/^[a-z0-9-]{8,100}$/i.test(value)) throw new TypeError("invalid pane id");
+	if (typeof value !== "string" || !/^[a-z0-9-]{8,100}$/i.test(value)) {
+		throw new TypeError(`invalid pane id: ${String(value)}`);
+	}
 	return value;
 }
-
 function terminalDimension(value: unknown, label: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
 		throw new TypeError(`${label} must be a number`);
 	}
 	const rounded = Math.round(value);
 	return Math.max(2, Math.min(500, rounded));
-}
-function chatTerminalInput(value: unknown): OpenChatTerminalInput {
-	if (typeof value !== "object" || value === null) throw new TypeError("invalid chat terminal input");
-	const input = value as Partial<OpenChatTerminalInput>;
-	const id = paneId(input.id);
-	const session = sessionId(input.sessionId);
-	if (!Number.isSafeInteger(input.fromOffset) || (input.fromOffset as number) < 0)
-		throw new RangeError("invalid replay offset");
-	return {
-		id,
-		sessionId: session,
-		cols: terminalDimension(input.cols, "columns"),
-		rows: terminalDimension(input.rows, "rows"),
-		fromOffset: input.fromOffset as number,
-	};
 }
 
 function browserBounds(value: unknown): BrowserBounds {
@@ -228,7 +301,16 @@ function browserBounds(value: unknown): BrowserBounds {
 }
 
 function browserAction(value: unknown): BrowserNavigationAction {
-	if (value !== "back" && value !== "forward" && value !== "reload" && value !== "stop")
+	if (
+		value !== "back" &&
+		value !== "forward" &&
+		value !== "reload" &&
+		value !== "hard-reload" &&
+		value !== "zoom-in" &&
+		value !== "zoom-out" &&
+		value !== "zoom-reset" &&
+		value !== "stop"
+	)
 		throw new TypeError("invalid browser action");
 	return value;
 }
@@ -302,6 +384,65 @@ const optionalCaptureMode = (value: unknown): "dom" | "screenshot" | undefined =
 	if (value !== "dom" && value !== "screenshot") throw new TypeError("captureMode must be dom or screenshot");
 	return value;
 };
+const agentPromptScope = (value: unknown): AgentPromptScope => {
+	if (value !== "project" && value !== "user") throw new TypeError("invalid agent prompt scope");
+	return value;
+};
+const agentPromptRevision = (value: unknown, allowNull: boolean): string | null => {
+	if (allowNull && value === null) return null;
+	if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+		throw new TypeError("invalid agent prompt revision");
+	}
+	return value;
+};
+const todoPhaseList = (value: unknown): TodoPhase[] => {
+	if (!Array.isArray(value) || value.length > 100) throw new TypeError("invalid todo phases");
+	const phaseIds = new Set<string>();
+	const taskIds = new Set<string>();
+	const contents = new Set<string>();
+	return value.map(candidate => {
+		if (
+			!isRecord(candidate) ||
+			typeof candidate.id !== "string" ||
+			phaseIds.has(candidate.id) ||
+			typeof candidate.name !== "string" ||
+			!Array.isArray(candidate.tasks)
+		) {
+			throw new TypeError("invalid todo phase");
+		}
+		phaseIds.add(candidate.id);
+		const earlier = new Set<string>();
+		const tasks: TodoPhase["tasks"] = candidate.tasks.map(task => {
+			if (
+				!isRecord(task) ||
+				typeof task.id !== "string" ||
+				taskIds.has(task.id) ||
+				typeof task.content !== "string" ||
+				contents.has(task.content) ||
+				(task.status !== "pending" &&
+					task.status !== "in_progress" &&
+					task.status !== "completed" &&
+					task.status !== "abandoned" &&
+					task.status !== "blocked") ||
+				(task.parentId !== undefined && (typeof task.parentId !== "string" || !earlier.has(task.parentId))) ||
+				(task.blocker !== undefined && typeof task.blocker !== "string")
+			) {
+				throw new TypeError("invalid todo task");
+			}
+			earlier.add(task.id);
+			taskIds.add(task.id);
+			contents.add(task.content);
+			return {
+				id: task.id,
+				content: task.content,
+				status: task.status,
+				...(typeof task.parentId === "string" ? { parentId: task.parentId } : {}),
+				...(typeof task.blocker === "string" ? { blocker: task.blocker } : {}),
+			};
+		});
+		return { id: candidate.id, name: candidate.name, tasks };
+	});
+};
 const api: GradivusApi = {
 	platform: process.platform,
 	getAuthStatus: () => ipcRenderer.invoke("gradivus:auth-status") as Promise<AuthAccountView[]>,
@@ -345,6 +486,27 @@ const api: GradivusApi = {
 			text(path, "setting path"),
 			agentSettingValue(value),
 		) as Promise<AgentSettingView>,
+	getAgentPrompts: id =>
+		ipcRenderer.invoke("gradivus:agent-prompts", id === undefined ? undefined : sessionId(id)) as Promise<
+			AgentPromptView[]
+		>,
+	saveAgentPrompt: (id, name, scope, systemPrompt, expectedRevision) =>
+		ipcRenderer.invoke(
+			"gradivus:save-agent-prompt",
+			id === undefined ? undefined : sessionId(id),
+			text(name, "agent name"),
+			agentPromptScope(scope),
+			text(systemPrompt, "agent prompt"),
+			agentPromptRevision(expectedRevision, true),
+		) as Promise<AgentPromptView>,
+	resetAgentPrompt: (id, name, scope, expectedRevision) =>
+		ipcRenderer.invoke(
+			"gradivus:reset-agent-prompt",
+			id === undefined ? undefined : sessionId(id),
+			text(name, "agent name"),
+			agentPromptScope(scope),
+			agentPromptRevision(expectedRevision, false) as string,
+		) as Promise<AgentPromptView>,
 	bootstrap: () => ipcRenderer.invoke("gradivus:bootstrap") as Promise<BootstrapSnapshot>,
 	reconnectRuntime: () => ipcRenderer.invoke("gradivus:runtime-reconnect") as Promise<void>,
 	chooseAndCreate: (kind, cwd) =>
@@ -366,6 +528,12 @@ const api: GradivusApi = {
 			sessionId(id),
 			text(itemId, "timeline item id"),
 		) as Promise<TimelineItem>,
+	loadTimelineToolDetail: (id, itemId) =>
+		ipcRenderer.invoke(
+			"gradivus:timeline-tool-detail",
+			sessionId(id),
+			text(itemId, "timeline item id"),
+		) as Promise<TimelineToolActivity>,
 	getAvailableCommands: id =>
 		ipcRenderer.invoke("gradivus:available-commands", sessionId(id)) as Promise<SlashCommand[]>,
 	getAvailableModels: id => ipcRenderer.invoke("gradivus:available-models", sessionId(id)) as Promise<ModelOption[]>,
@@ -420,6 +588,25 @@ const api: GradivusApi = {
 		ipcRenderer.invoke("gradivus:steer-queued", sessionId(id), promptComposition(composition)) as Promise<void>,
 	queueFollowUp: (id, composition) =>
 		ipcRenderer.invoke("gradivus:queue", sessionId(id), promptComposition(composition)) as Promise<void>,
+	requestPlanReview: id =>
+		ipcRenderer.invoke("gradivus:request-plan-review", sessionId(id)) as Promise<PlanReviewView>,
+	updatePlanReview: (id, reviewId, content, expectedRevision, annotationState) =>
+		ipcRenderer.invoke(
+			"gradivus:update-plan-review",
+			sessionId(id),
+			text(reviewId, "plan review id"),
+			text(content, "plan review content"),
+			text(expectedRevision, "plan review revision"),
+			planReviewAnnotationState(annotationState),
+		) as Promise<PlanReviewView>,
+	resolvePlanReview: (id, reviewId, expectedRevision, decision) =>
+		ipcRenderer.invoke(
+			"gradivus:resolve-plan-review",
+			sessionId(id),
+			text(reviewId, "plan review id"),
+			text(expectedRevision, "plan review revision"),
+			planReviewDecision(decision),
+		) as Promise<PlanReviewResolutionResult>,
 	abort: id => ipcRenderer.invoke("gradivus:abort", sessionId(id)) as Promise<void>,
 	setModel: (id, provider, modelId) =>
 		ipcRenderer.invoke(
@@ -526,17 +713,51 @@ const api: GradivusApi = {
 		ipcRenderer.invoke("gradivus:browser-navigate", paneId(id), text(url, "URL")) as Promise<BrowserViewState>,
 	controlBrowser: (id, action) =>
 		ipcRenderer.invoke("gradivus:browser-control", paneId(id), browserAction(action)) as Promise<void>,
+	findBrowser: (id, query, forward) => {
+		if (typeof forward !== "boolean") throw new TypeError("find direction must be boolean");
+		const normalized = text(query, "find query");
+		if (normalized.length > 1_024) throw new RangeError("find query is too long");
+		return ipcRenderer.invoke("gradivus:browser-find", paneId(id), normalized, forward) as Promise<void>;
+	},
+	stopBrowserFind: id => ipcRenderer.invoke("gradivus:browser-find-stop", paneId(id)) as Promise<void>,
 	setBrowserBounds: (id, bounds) =>
 		ipcRenderer.invoke("gradivus:browser-bounds", paneId(id), browserBounds(bounds)) as Promise<void>,
-	setVisibleBrowsers: ids => {
+	setVisibleBrowsers: (ids, activePaneId) => {
 		if (!Array.isArray(ids) || ids.length > 32) throw new RangeError("invalid visible browser list");
-		return ipcRenderer.invoke("gradivus:browser-visible", ids.map(paneId)) as Promise<void>;
+		return ipcRenderer.invoke(
+			"gradivus:browser-visible",
+			ids.map(paneId),
+			activePaneId === undefined ? undefined : paneId(activePaneId),
+		) as Promise<void>;
 	},
 	closeBrowser: id => ipcRenderer.invoke("gradivus:browser-close", paneId(id)) as Promise<void>,
 	showPaneContextMenu: (id, canSplit) => {
 		if (typeof canSplit !== "boolean") throw new TypeError("pane split availability must be boolean");
 		ipcRenderer.send("gradivus:pane-context-menu", paneId(id), canSplit);
 	},
+	getPaneAutomation: (id, pane) =>
+		ipcRenderer.invoke("gradivus:pane-automation-get", sessionId(id), paneId(pane)) as Promise<PaneAutomationState>,
+	requestPaneAuthorization: (id, pane, access) => {
+		if (access !== "observe" && access !== "control") throw new TypeError("invalid pane access");
+		return ipcRenderer.invoke(
+			"gradivus:pane-automation-authorize",
+			sessionId(id),
+			paneId(pane),
+			access,
+		) as Promise<PaneAutomationState>;
+	},
+	revokePane: (id, pane) =>
+		ipcRenderer.invoke(
+			"gradivus:pane-automation-revoke",
+			sessionId(id),
+			paneId(pane),
+		) as Promise<PaneAutomationState>,
+	closeBrowserTabForSession: (id, name) =>
+		ipcRenderer.invoke(
+			"gradivus:browser-session-tab-close",
+			sessionId(id),
+			text(name, "browser tab name"),
+		) as Promise<BrowserTabCloseResult>,
 	createTerminal: options => {
 		if (typeof options !== "object" || options === null) throw new TypeError("CreateTerminalInput must be an object");
 		const o = options as CreateTerminalInput;
@@ -544,13 +765,18 @@ const api: GradivusApi = {
 			id: paneId(o.id),
 			tabId: text(o.tabId, "tab ID"),
 			workspaceId: text(o.workspaceId, "workspace ID"),
+			name: text(o.name, "terminal name"),
 			cols: terminalDimension(o.cols, "columns"),
 			rows: terminalDimension(o.rows, "rows"),
 			...(o.layout !== undefined ? { layout: optionalTabLayout(o.layout) } : {}),
 		}) as Promise<TerminalViewState>;
 	},
-	openChatTerminal: input =>
-		ipcRenderer.invoke("gradivus:chat-terminal-open", chatTerminalInput(input)) as Promise<ChatTerminalViewState>,
+	attachTerminal: (id, fromOffset) => {
+		if (!Number.isSafeInteger(fromOffset) || fromOffset < 0) throw new RangeError("invalid replay offset");
+		return ipcRenderer.invoke("gradivus:terminal-attach", paneId(id), fromOffset) as Promise<TerminalAttachmentState>;
+	},
+	restartTerminal: id =>
+		ipcRenderer.invoke("gradivus:terminal-restart", paneId(id)) as Promise<TerminalAttachmentState>,
 	writeTerminal: (id, data) =>
 		ipcRenderer.invoke("gradivus:terminal-write", paneId(id), text(data, "terminal input")) as Promise<void>,
 	resizeTerminal: (id, cols, rows) =>
@@ -565,6 +791,12 @@ const api: GradivusApi = {
 		if (typeof updates !== "object" || updates === null) throw new TypeError("UpdateTabInput must be an object");
 		return ipcRenderer.invoke("gradivus:tab-update", text(tabId, "tab ID"), updates) as Promise<void>;
 	},
+	reorderTab: (tabId, beforeTabId) =>
+		ipcRenderer.invoke(
+			"gradivus:tab-reorder",
+			text(tabId, "tab ID"),
+			beforeTabId === undefined ? undefined : text(beforeTabId, "target tab ID"),
+		) as Promise<void>,
 	closeTab: tabId => ipcRenderer.invoke("gradivus:tab-close", text(tabId, "tab ID")) as Promise<void>,
 	closePane: paneIdValue => ipcRenderer.invoke("gradivus:pane-close", paneId(paneIdValue)) as Promise<void>,
 	minimizeWindow: () => ipcRenderer.invoke("gradivus:window-minimize") as Promise<void>,
@@ -575,6 +807,38 @@ const api: GradivusApi = {
 		ipcRenderer.on("gradivus:event", handler);
 		return () => ipcRenderer.removeListener("gradivus:event", handler);
 	},
+	setTodos: (id, phases, expectedRevision, action) => {
+		if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new TypeError("invalid todo revision");
+		return ipcRenderer.invoke(
+			"gradivus:set-todos",
+			sessionId(id),
+			todoPhaseList(phases),
+			expectedRevision,
+			text(action, "todo action"),
+		) as Promise<TodoState>;
+	},
+	compact: (id, instructions) =>
+		ipcRenderer.invoke(
+			"gradivus:compact",
+			sessionId(id),
+			instructions === undefined ? undefined : text(instructions, "compaction instructions"),
+		) as Promise<ContextMutationResult>,
+	handoff: (id, instructions) =>
+		ipcRenderer.invoke(
+			"gradivus:handoff",
+			sessionId(id),
+			instructions === undefined ? undefined : text(instructions, "handoff instructions"),
+		) as Promise<ContextMutationResult>,
+	retry: id => ipcRenderer.invoke("gradivus:retry", sessionId(id)) as Promise<{ started: boolean }>,
+	abortRetry: id => ipcRenderer.invoke("gradivus:abort-retry", sessionId(id)) as Promise<void>,
+	restart: id => ipcRenderer.invoke("gradivus:restart", sessionId(id)) as Promise<SessionSnapshot>,
+	getSessionStats: id => ipcRenderer.invoke("gradivus:session-stats", sessionId(id)) as Promise<SessionStatsView>,
+	exportHtml: (id, outputPath) =>
+		ipcRenderer.invoke(
+			"gradivus:export-html",
+			sessionId(id),
+			outputPath === undefined ? undefined : text(outputPath, "export path"),
+		) as Promise<ExportHtmlResult>,
 	onAuthEvent: listener => {
 		const handler = (_event: Electron.IpcRendererEvent, value: AuthEvent) => listener(value);
 		ipcRenderer.on("gradivus:auth", handler);

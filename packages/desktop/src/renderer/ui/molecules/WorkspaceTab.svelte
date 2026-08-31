@@ -11,20 +11,51 @@
 		variant: "chat" | "browser";
 		active: boolean;
 		title: string;
+		tabId: string;
+		controlsId: string;
 		onactivate: () => void;
 		onclose?: () => void;
+		onduplicate?: () => void;
+		onmoveleft?: () => void;
+		onmoveright?: () => void;
+		onkeydown?: (event: KeyboardEvent) => void;
+		ondragstart?: (event: DragEvent) => void;
+		ondragend?: (event: DragEvent) => void;
+		ondragover?: (event: DragEvent) => void;
+		ondrop?: (event: DragEvent) => void;
 		glyph?: string;
 		pill?: string;
+		attentionLabel?: string;
+		faviconUrl?: string;
+		tabindex?: number;
+		draggable?: boolean;
 	}
 
-let { variant, active, title, onactivate, onclose, glyph, icon, pill, ...rest }: Props = $props();
-const DefaultChatIcon = Stars;
-
-	function handleKeydown(event: KeyboardEvent) {
-		if (event.key === "Enter" || event.key === " ") {
-			onactivate();
-		}
-	}
+	let {
+		variant,
+		active,
+		title,
+		tabId,
+		controlsId,
+		onduplicate,
+		onmoveleft,
+		onmoveright,
+		onactivate,
+		onclose,
+		onkeydown,
+		ondragstart,
+		ondragend,
+		ondragover,
+		ondrop,
+		glyph,
+		icon,
+		pill,
+		attentionLabel,
+		faviconUrl,
+		tabindex = active ? 0 : -1,
+		draggable = false,
+	}: Props = $props();
+	const DefaultChatIcon = Stars;
 </script>
 
 {#if variant === "chat"}
@@ -34,8 +65,11 @@ const DefaultChatIcon = Stars;
 		class:is-active={active}
 		role="tab"
 		aria-selected={active}
+		id={tabId}
+		aria-controls={controlsId}
+		{tabindex}
 		onclick={onactivate}
-		{...rest}
+		{onkeydown}
 	>
 		<span class="chat-glyph" aria-hidden="true">
 			{#if icon}
@@ -47,33 +81,63 @@ const DefaultChatIcon = Stars;
 		</span>
 		{title}
 		{#if pill}<span class="runtime-pill">{pill}</span>{/if}
+		{#if attentionLabel}
+			<span class="workspace-tab-attention" aria-label={attentionLabel}>{attentionLabel.split(" ", 1)[0]}</span>
+		{/if}
 	</button>
 {:else}
 	<div
 		class="workspace-tab browser-tab"
 		class:is-active={active}
-		role="tab"
-		tabindex="0"
-		aria-selected={active}
-		onclick={onactivate}
-		onkeydown={handleKeydown}
-		{...rest}
+		role="presentation"
+		{draggable}
+		{ondragstart}
+		{ondragend}
+		{ondragover}
+		{ondrop}
 	>
-		{#if icon}
-			{@const Icon = icon}
-			<Icon size={15} aria-hidden="true" />
+		<button
+			type="button"
+			class="browser-tab-activate"
+			role="tab"
+			aria-selected={active}
+			id={tabId}
+			aria-controls={controlsId}
+			{tabindex}
+			onclick={onactivate}
+			{onkeydown}
+		>
+			{#if faviconUrl}
+				{#key faviconUrl}
+					<img class="tab-favicon" src={faviconUrl} alt="" onerror={(event) => (event.currentTarget as HTMLImageElement).hidden = true} />
+				{/key}
+			{:else if icon}
+				{@const Icon = icon}
+				<Icon size={15} aria-hidden="true" />
+			{/if}
+			<span class="tab-title">{title}</span>
+		</button>
+		{#if onduplicate || onmoveleft || onmoveright}
+			<details class="tab-actions">
+				<summary aria-label={`Actions for ${title}`}>•••</summary>
+				<div class="tab-actions-menu">
+					{#if onduplicate}<button type="button" onclick={onduplicate}>Duplicate</button>{/if}
+					{#if onmoveleft}<button type="button" onclick={onmoveleft}>Move left</button>{/if}
+					{#if onmoveright}<button type="button" onclick={onmoveright}>Move right</button>{/if}
+					{#if onclose}<button type="button" class="is-danger" onclick={onclose}>Close</button>{/if}
+				</div>
+			</details>
 		{/if}
-		<span class="tab-title">{title}</span>
 		{#if onclose}
-			<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-			<span
+			<button
+				type="button"
 				class="tab-close"
-				aria-hidden="true"
+				aria-label={`Close ${title}`}
 				onclick={(event) => {
 					event.stopPropagation();
 					onclose?.();
 				}}
-			><CloseCircle size={14} /></span>
+			><CloseCircle size={14} aria-hidden="true" /></button>
 		{/if}
 	</div>
 {/if}

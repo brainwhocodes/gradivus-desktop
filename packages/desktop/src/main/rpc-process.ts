@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
 	connectOmpGrpc,
 	generateOmpGrpcToken,
@@ -7,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-grpc";
 import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { buildChildEnvironment } from "@oh-my-pi/pi-workspace-runtime/env";
 import type { ProcessState } from "../shared/contracts";
 import type { RpcExtensionUIRequest } from "../shared/rpc-wire";
 import { ompExecutablePath, rpcConfigPath } from "./backend-path";
@@ -33,7 +35,7 @@ export type RpcProcessDependencies = {
 type ProcessOptions = {
 	cwd: string;
 	sessionFile?: string;
-	onEvent: (event: unknown) => void;
+	onEvent: (event: unknown, client: RpcClient, incarnation: string) => void;
 	onExtension: (request: RpcExtensionUIRequest) => void;
 	onState: (state: ProcessState, error?: string) => void;
 	dependencies?: Partial<RpcProcessDependencies>;
@@ -63,6 +65,7 @@ export class RpcProcess {
 	#disposePromise: Promise<void> | undefined;
 	#startupAbort: AbortController | undefined;
 	#generation = 0;
+	#incarnation: string | undefined;
 	#state: ProcessState = "stopped";
 	#stderr = "";
 
@@ -76,6 +79,9 @@ export class RpcProcess {
 	}
 	get client(): RpcClient | undefined {
 		return this.#client;
+	}
+	get incarnation(): string | undefined {
+		return this.#incarnation;
 	}
 	get pid(): number | undefined {
 		return this.#child?.pid;
@@ -194,6 +200,8 @@ export class RpcProcess {
 			this.#setState("starting");
 			this.#assertActive(generation, controller);
 			this.#stderr = "";
+			const incarnation = `${generation}:${randomUUID()}`;
+			this.#incarnation = incarnation;
 			const fixture = process.env.GRADIVUS_RPC_FIXTURE;
 			const executable = this.#dependencies.ompExecutablePath();
 			const configPath = this.#dependencies.rpcConfigPath();
@@ -207,18 +215,28 @@ export class RpcProcess {
 			this.#bootstrapTemp = bootstrapTemp;
 			this.#assertActive(generation, controller);
 			const readyFile = bootstrapTemp.join("bootstrap.json");
+			const transportEnvironment = {
+				OMP_GRPC_HOST: "127.0.0.1",
+				OMP_GRPC_PORT: "0",
+				OMP_GRPC_TOKEN: token,
+				OMP_GRPC_READY_FILE: readyFile,
+			};
+			const fixtureBindings = fixture
+				? Object.fromEntries(
+						Object.entries(process.env).flatMap(([key, value]) =>
+							key.startsWith("GRADIVUS_") && value !== undefined ? [[key, value]] : [],
+						),
+					)
+				: undefined;
 			const child = this.#dependencies.spawn(command, args, {
 				cwd: this.#options.cwd,
 				windowsHide: true,
 				stdio: ["pipe", "pipe", "pipe"],
 				detached: this.#dependencies.platform !== "win32",
-				env: {
-					...process.env,
-					OMP_GRPC_HOST: "127.0.0.1",
-					OMP_GRPC_PORT: "0",
-					OMP_GRPC_TOKEN: token,
-					OMP_GRPC_READY_FILE: readyFile,
-				},
+				env: buildChildEnvironment({
+					explicitBindings: transportEnvironment,
+					scopedDescriptor: fixtureBindings,
+				}),
 			});
 			this.#child = child;
 			child.stderr.on("data", chunk => {
@@ -270,6 +288,7 @@ export class RpcProcess {
 				this.#client = client;
 				if (!this.#isActive(generation, controller)) {
 					this.#client = undefined;
+					this.#incarnation = undefined;
 					throw new StartupAbortedError();
 				}
 				connectionTransferred = true;
@@ -284,7 +303,7 @@ export class RpcProcess {
 						void this.#disposeProcess(0);
 					}
 					if (!this.#isActive(generation, controller)) return;
-					this.#options.onEvent(event);
+					this.#options.onEvent(event, client, incarnation);
 				});
 				client.onExtension(request => {
 					if (this.#isActive(generation, controller)) this.#options.onExtension(request);
@@ -354,6 +373,7 @@ export class RpcProcess {
 		if (!child && !client && !bootstrapTemp) return;
 		this.#child = undefined;
 		this.#client = undefined;
+		this.#incarnation = undefined;
 		this.#bootstrapTemp = undefined;
 
 		const disposal = this.#disposeResources(child, client, bootstrapTemp, gracePeriodMs);

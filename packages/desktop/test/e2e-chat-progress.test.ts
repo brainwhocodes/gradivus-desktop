@@ -156,7 +156,7 @@ vi.mock("../src/main/rpc-process", () => ({
 									autoRetryEnabled: true,
 									tokensPerSecond: 42.5,
 									queuedMessageCount: 0,
-									todoPhases: [],
+									todoState: { phases: [], revision: 0 },
 									contextUsage: { tokens: 1024, contextWindow: 200000 },
 								},
 							};

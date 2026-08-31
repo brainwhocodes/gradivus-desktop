@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as crypto from "node:crypto";
 import AxeBuilder from "@axe-core/playwright";
+import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import { _electron as electron, expect, test } from "@playwright/test";
 import type { ElectronApplication, Locator, Page } from "@playwright/test";
 import * as os from "node:os";
@@ -27,6 +28,10 @@ const bundle = path.join(root, ".vite", "build", "main.js");
 const binary = electronExecutablePath();
 const fixture = path.join(root, "e2e", "rpc-fixture.ts");
 const browserUrl = `http://127.0.0.1:${process.env.GRADIVUS_E2E_PORT ?? "5173"}/browser-fixture.html`;
+async function createUserData(prefix: string): Promise<string> {
+	const realTmp = await fs.realpath(os.tmpdir());
+	return fs.mkdtemp(path.join(realTmp, prefix));
+}
 async function seed(userData: string, cwd: string, ids = ["fixture-chat-1"], settingsOverride?: GradivusSettings | GradivusSettings["theme"]): Promise<void> { try { await fs.mkdir(cwd, { recursive: true });
 	const now = new Date().toISOString();
 	await fs.writeFile(path.join(userData, "sessions-v1.json"), JSON.stringify({ version: 1, sessions: ids.map((id, index) => ({ id, kind: "work", cwd, ompSessionId: "", sessionFile: "", title: index ? "Second chat" : null, createdAt: now, lastOpenedAt: now })), activeByKind: { work: ids[0], code: null } }));
@@ -120,13 +125,75 @@ async function dispatchSlowFileDrag(page: Page, target: string, file: { name: st
 	}, { ...file, bytes: Array.from(file.bytes) });
 	return async () => { await page.evaluate(raw => { const win = window as Window & { __resolveGradivusSlowFile?: (value: ArrayBuffer) => void }; win.__resolveGradivusSlowFile?.(Uint8Array.from(raw).buffer); delete win.__resolveGradivusSlowFile; }, Array.from(file.bytes)); };
 }
+async function collectElectronStartupDiagnostics(userData: string): Promise<string> {
+	const roots = [
+		path.join(userData, "runtime"),
+		path.join(userData, "logs"),
+		path.join(userData, "home", ".omp", "logs"),
+		path.join(userData, "omp-agent", "logs"),
+	];
+	const sections: string[] = [];
+	for (const root of roots) {
+		try {
+			const entries = await fs.readdir(root, { withFileTypes: true });
+			sections.push(`${root}: ${entries.map(entry => entry.name).join(", ") || "(empty)"}`);
+			for (const entry of entries.filter(candidate => candidate.isFile() && candidate.name.endsWith(".log")).slice(-3)) {
+				const contents = await fs.readFile(path.join(root, entry.name), "utf8");
+				sections.push(`${entry.name}:\n${contents.slice(-8 * 1024)}`);
+			}
+		} catch {}
+	}
+	return sections.join("\n");
+}
+
+async function assertElectronLaunched(app: ElectronApplication, userData: string): Promise<void> {
+	const child = app.process();
+	let output = "";
+	const capture = (chunk: unknown): void => {
+		output = `${output}${String(chunk)}`.slice(-16 * 1024);
+	};
+	child.stdout?.on("data", capture);
+	child.stderr?.on("data", capture);
+	const exited = Promise.withResolvers<never>();
+	const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+		exited.reject(
+			new Error(`Electron exited before creating a window (code ${code ?? "none"}, signal ${signal ?? "none"})`),
+		);
+	};
+	child.once("exit", onExit);
+	try {
+		if (child.exitCode !== null || child.signalCode !== null) onExit(child.exitCode, child.signalCode);
+		await Promise.race([app.firstWindow({ timeout: 30_000 }), exited.promise]);
+	} catch (error) {
+		const running = child.exitCode === null && child.signalCode === null;
+		const startupDiagnostics = await collectElectronStartupDiagnostics(userData);
+		if (running) {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		}
+		const detail = output.trim();
+		throw new Error(
+			`${running ? `Electron launched as PID ${child.pid ?? "unknown"} but created no window` : "Electron failed to launch"}: ${
+				error instanceof Error ? error.message : String(error)
+			}${detail ? `\nProcess output:\n${detail}` : ""}${startupDiagnostics ? `\nStartup diagnostics:\n${startupDiagnostics}` : ""}`,
+			{ cause: error },
+		);
+	} finally {
+		child.removeListener("exit", onExit);
+		child.stdout?.removeListener("data", capture);
+		child.stderr?.removeListener("data", capture);
+	}
+}
+
 async function launch(userData: string, workspace: string, fixtureEnv: Record<string, string> = {}) {
+	let app: ElectronApplication | undefined;
 	try {
 		await fs.mkdir(path.join(userData, "home", ".config"), { recursive: true });
 		const tempRoot = path.join(userData, "t");
 		await fs.mkdir(tempRoot, { recursive: true });
 		const captureFile = fixtureEnv.GRADIVUS_ATTACHMENT_CAPTURE_FILE ?? path.join(userData, "attachment-captures.jsonl");
-		return await electron.launch({ executablePath: binary, args: [`--user-data-dir=${userData}`, bundle], env: {
+		app = await electron.launch({ executablePath: binary, args: [`--user-data-dir=${userData}`, bundle], env: {
 			...process.env,
 			PATH: `${path.resolve(root, "../coding-agent/dist")}${path.delimiter}${process.env.PATH ?? ""}`,
 			HOME: path.join(userData, "home"),
@@ -146,8 +213,23 @@ async function launch(userData: string, workspace: string, fixtureEnv: Record<st
 			...fixtureEnv,
 			GRADIVUS_RUNTIME_DIR: path.join(userData, "runtime"),
 		} });
+		await assertElectronLaunched(app, userData);
+		return app;
 	} catch (error) {
-		await teardownElectronTest(undefined, userData).catch(() => {});
+		try {
+			await withTimeout(
+				teardownElectronTest(app, userData),
+				8_000,
+				"Timed out cleaning up Electron after launch failure",
+			);
+		} catch (cleanupError) {
+			throw new AggregateError(
+				[error, cleanupError],
+				`Electron launch failed and cleanup also failed: ${
+					error instanceof Error ? error.message : String(error)
+				}; ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+			);
+		}
 		throw error;
 	}
 }
@@ -293,6 +375,69 @@ test("deletes a chat after confirmation, discloses transcript retention, and fal
 		expect(saved.activeByKind.work).toBe("fixture-chat-1");
 	} finally { await teardownElectronTest(app, userData); }
 });
+
+test("keeps workspace and chat order stable while workspace groups collapse", async () => {
+	const userData = await createUserData("gradivus-workspace-order-");
+	const workspaceA = path.join(userData, "workspace-a");
+	const workspaceB = path.join(userData, "workspace-b");
+	await fs.mkdir(workspaceA, { recursive: true });
+	await fs.mkdir(workspaceB, { recursive: true });
+	const now = new Date().toISOString();
+	await fs.writeFile(
+		path.join(userData, "sessions-v1.json"),
+		JSON.stringify({
+			version: 1,
+			sessions: [
+				{ id: "fixture-workspace-a-first", kind: "work", cwd: workspaceA, ompSessionId: "", sessionFile: "", title: "Workspace A first", createdAt: now, lastOpenedAt: now },
+				{ id: "fixture-workspace-b", kind: "work", cwd: workspaceB, ompSessionId: "", sessionFile: "", title: "Workspace B chat", createdAt: now, lastOpenedAt: now },
+				{ id: "fixture-workspace-a-second", kind: "work", cwd: workspaceA, ompSessionId: "", sessionFile: "", title: "Workspace A second", createdAt: now, lastOpenedAt: now },
+			],
+			activeByKind: { work: "fixture-workspace-a-first", code: null },
+		}),
+	);
+	const app = await launch(userData, workspaceA);
+	const page = await app.firstWindow();
+	try {
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		const workspaceToggles = page.getByRole("button", { name: /^(Collapse|Expand) workspace workspace-/ });
+		await expect(workspaceToggles).toHaveCount(2);
+		const initialOrder = await workspaceToggles.allTextContents();
+		expect(initialOrder[0]).toContain("workspace-a");
+		expect(initialOrder[1]).toContain("workspace-b");
+		const workspaceAChatOrder = await page
+			.getByRole("tree", { name: "workspace-a chats" })
+			.getByRole("treeitem")
+			.allTextContents();
+
+		await page.getByRole("treeitem", { name: /Workspace B chat/ }).click();
+		await expect(page.getByRole("treeitem", { name: /Workspace B chat/ })).toHaveAttribute("aria-selected", "true");
+		await expect(page.getByRole("button", { name: "Collapse workspace workspace-b" })).toHaveAttribute(
+			"aria-current",
+			"true",
+		);
+		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
+
+		await page.getByRole("button", { name: "Collapse workspace workspace-b" }).click();
+		await expect(page.getByRole("button", { name: "Expand workspace workspace-b" })).toHaveAttribute(
+			"aria-expanded",
+			"false",
+		);
+		await expect(page.getByRole("tree", { name: "workspace-b chats" })).toHaveCount(0);
+		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
+		await page.getByRole("button", { name: "Expand workspace workspace-b" }).press("Enter");
+		await expect(page.getByRole("tree", { name: "workspace-b chats" })).toBeVisible();
+
+		await page.getByRole("treeitem", { name: /Workspace A second/ }).click();
+		await expect(page.getByRole("treeitem", { name: /Workspace A second/ })).toHaveAttribute("aria-selected", "true");
+		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
+		expect(
+			await page.getByRole("tree", { name: "workspace-a chats" }).getByRole("treeitem").allTextContents(),
+		).toEqual(workspaceAChatOrder);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
 test("keeps the runtime summary and disclosure usable at both densities", async () => {
 	const userData = await createUserData("gradivus-runtime-");
 	const workspace = path.join(userData, "workspace");
@@ -438,9 +583,6 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 				thinkingWidth: thinkingBounds?.width ?? -1,
 				jumpWidth: jumpStyle.width,
 				jumpParent: jump.parentElement?.className ?? "",
-				terminalCanvasMinHeight: document.querySelector<HTMLElement>(".chat-terminal-canvas")
-					? getComputedStyle(document.querySelector<HTMLElement>(".chat-terminal-canvas")!).minHeight
-					: "",
 			};
 			jump.remove();
 			return values;
@@ -455,8 +597,11 @@ test("verifies repaired chat computed-style contracts across themes and narrow r
 		expect(styles.thinkingWidth).toBeCloseTo(styles.providerWidth, 2);
 		expect(styles.jumpWidth).not.toBe("100%");
 		expect(styles.jumpParent).toContain("composer-wrap");
-		expect(styles.terminalCanvasMinHeight).toBe("0px");
 		await page.getByRole("button", { name: "Close runtime settings" }).click();
+		await page.getByRole("button", { name: "Show terminal" }).click();
+		const terminalCanvas = page.locator(".chat-terminal-canvas");
+		await expect(terminalCanvas).toBeVisible();
+		expect(await terminalCanvas.evaluate(element => getComputedStyle(element).minHeight)).toBe("0px");
 		await expect(page).toHaveTitle(/ · Gradivus$/);
 
 		const aboutButton = page.getByLabel("About Gradivus");
@@ -611,9 +756,10 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					const attach = attachment?.querySelector<HTMLElement>(".attachment-add-button") ?? null;
 					const runtime = tools?.querySelector<HTMLElement>('.runtime-picker > button[aria-controls="runtime-picker-panel"]') ?? null;
 					const context = tools?.querySelector<HTMLElement>('button.context-donut-btn[aria-label^="Context window:"]') ?? null;
+					const sessionActions = tools?.querySelector<HTMLElement>(".session-actions-menu") ?? null;
 					const primary = actionRail?.querySelector<HTMLElement>(".send-turn-btn") ?? null;
 					const footerChildren = [tools, actionRail].filter((element): element is HTMLElement => Boolean(element));
-					const controls = [attach, runtime, context, primary].filter((element): element is HTMLElement => Boolean(element));
+					const controls = [attach, runtime, context, sessionActions, primary].filter((element): element is HTMLElement => Boolean(element));
 					type GeometryRect = { x: number; y: number; right: number; bottom: number; width: number; height: number };
 					const rect = (element: HTMLElement | null): GeometryRect | null => {
 						if (!element) return null;
@@ -648,6 +794,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					const actionRailRect = rect(actionRail);
 					const runtimeRect = rect(runtime);
 					const contextRect = rect(context);
+					const sessionActionsRect = rect(sessionActions);
 					const primaryRect = rect(primary);
 					const childRects = footerChildren.map(rect);
 					const footerStyle = footer ? getComputedStyle(footer) : null;
@@ -668,6 +815,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 						primaryRect,
 						runtimeRect,
 						contextRect,
+						sessionActionsRect,
 						textareaMinHeight: textareaStyle ? Number.parseFloat(textareaStyle.minHeight) : Number.NaN,
 						textareaMaxHeight: textareaStyle ? Number.parseFloat(textareaStyle.maxHeight) : Number.NaN,
 						textareaWidthRatio: inputRect && textareaRect ? textareaRect.width / inputRect.width : 0,
@@ -677,6 +825,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 						textareaContained: within(textareaRect, inputRect),
 						runtimeContained: within(runtimeRect, surfaceRect),
 						contextContained: within(contextRect, surfaceRect),
+						sessionActionsContained: within(sessionActionsRect, surfaceRect),
 						primaryContained: within(primaryRect, surfaceRect),
 						surfaceWithinViewport: Boolean(
 							surfaceRect
@@ -684,20 +833,23 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 							&& surfaceRect.right <= window.innerWidth + 1,
 						),
 						footerContained: within(footerRect, surfaceRect),
-						allControlsReachable: controls.length === 4 && controls.every(reachable),
+						allControlsReachable: controls.length === 5 && controls.every(reachable),
 						textareaReachable: reachable(textarea),
 						widgetsDoNotOverlap: !overlaps(runtimeRect, contextRect)
-							&& !overlaps(contextRect, primaryRect)
+							&& !overlaps(contextRect, sessionActionsRect)
+							&& !overlaps(sessionActionsRect, primaryRect)
 							&& !overlaps(runtimeRect, primaryRect),
 						wideFooterOrdered: Boolean(
-							runtimeRect && contextRect && primaryRect
+							runtimeRect && contextRect && sessionActionsRect && primaryRect
 							&& runtimeRect.right <= contextRect.x + 1
-							&& contextRect.right <= primaryRect.x + 1,
+							&& contextRect.right <= sessionActionsRect.x + 1
+							&& sessionActionsRect.right <= primaryRect.x + 1,
 						),
 						wideFooterGapsCompact: Boolean(
-							runtimeRect && contextRect && primaryRect
+							runtimeRect && contextRect && sessionActionsRect && actionRailRect
 							&& contextRect.x - runtimeRect.right <= 16
-							&& primaryRect.x - contextRect.right <= 16,
+							&& sessionActionsRect.x - contextRect.right <= 16
+							&& actionRailRect.x - sessionActionsRect.right <= 16,
 						),
 						controlGapsCompact: Boolean(
 							runtimeRect && contextRect
@@ -739,6 +891,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				expect(narrowGeometry.primaryRect).not.toBeNull();
 				expect(narrowGeometry.runtimeRect).not.toBeNull();
 				expect(narrowGeometry.contextRect).not.toBeNull();
+				expect(narrowGeometry.sessionActionsRect).not.toBeNull();
 				const surfaceWidth = narrowGeometry.surfaceRect?.width ?? 0;
 				expect(surfaceWidth).toBeGreaterThan(0);
 				expect(surfaceWidth).toBeLessThan(width);
@@ -761,6 +914,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				expect(narrowGeometry.primaryContained).toBe(true);
 				expect(narrowGeometry.runtimeContained).toBe(true);
 				expect(narrowGeometry.contextContained).toBe(true);
+				expect(narrowGeometry.sessionActionsContained).toBe(true);
 				expect(narrowGeometry.allControlsReachable).toBe(true);
 				expect(narrowGeometry.textareaReachable).toBe(true);
 				expect(narrowGeometry.widgetsDoNotOverlap).toBe(true);
@@ -787,6 +941,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				const attachButton = attachmentBar?.querySelector<HTMLElement>(".attachment-add-button") ?? null;
 				const runtime = tools?.querySelector<HTMLElement>('.runtime-picker > button[aria-controls="runtime-picker-panel"]') ?? null;
 				const context = tools?.querySelector<HTMLElement>('button.context-donut-btn[aria-label^="Context window:"]') ?? null;
+				const sessionActions = tools?.querySelector<HTMLElement>(".session-actions-menu") ?? null;
 				const primary = actionRail?.querySelector<HTMLElement>(".send-turn-btn") ?? null;
 				const rect = (element: HTMLElement | null) => {
 					if (!element) return null;
@@ -811,6 +966,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 				const attachRect = rect(attachButton);
 				const runtimeRect = rect(runtime);
 				const contextRect = rect(context);
+				const sessionActionsRect = rect(sessionActions);
 				const primaryRect = rect(primary);
 				const inputActionVerticalOverlap = inputRect && actionsRect
 					? Math.min(inputRect.bottom, actionsRect.bottom) - Math.max(inputRect.y, actionsRect.y)
@@ -837,6 +993,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					attachRect,
 					runtimeRect,
 					contextRect,
+					sessionActionsRect,
 					primaryRect,
 					attachmentParentIsTopBar: attachmentBar?.parentElement === topBar,
 					attachmentSpansTopBar: Boolean(attachmentRect && topBarRect && attachmentRect.width >= topBarRect.width - 24),
@@ -850,17 +1007,20 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 					attachmentReachable,
 					runtimeReachable: reachable(runtime),
 					contextReachable: reachable(context),
+					sessionActionsReachable: reachable(sessionActions),
 					footerGapsCompact: Boolean(
-						runtimeRect && contextRect && primaryRect
+						runtimeRect && contextRect && sessionActionsRect && actionRailRect
 						&& contextRect.x - runtimeRect.right <= 16
-						&& primaryRect.x - contextRect.right <= 16,
+						&& sessionActionsRect.x - contextRect.right <= 16
+						&& actionRailRect.x - sessionActionsRect.right <= 16,
 					),
 					primaryReachable: reachable(primary),
 					textareaReachable: reachable(textarea),
 					footerOrdered: Boolean(
-						runtimeRect && contextRect && primaryRect
+						runtimeRect && contextRect && sessionActionsRect && primaryRect
 						&& runtimeRect.right <= contextRect.x + 1
-						&& contextRect.right <= primaryRect.x + 1,
+						&& contextRect.right <= sessionActionsRect.x + 1
+						&& sessionActionsRect.right <= primaryRect.x + 1,
 					),
 					primaryAnchoredLowerRight: Boolean(
 						actionsRect && primaryRect
@@ -885,6 +1045,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 			expect(geometry.runtimeRect).not.toBeNull();
 			expect(geometry.contextRect).not.toBeNull();
 			expect(geometry.primaryRect).not.toBeNull();
+			expect(geometry.sessionActionsRect).not.toBeNull();
 			expect(geometry.attachmentParentIsTopBar).toBe(true);
 			expect(geometry.attachmentSpansTopBar).toBe(true);
 			expect(geometry.attachmentAboveInput).toBe(true);
@@ -895,6 +1056,7 @@ test("keeps the Command Deck composer as one usable surface at both densities", 
 			expect(geometry.attachmentReachable).toBe(true);
 			expect(geometry.runtimeReachable).toBe(true);
 			expect(geometry.contextReachable).toBe(true);
+			expect(geometry.sessionActionsReachable).toBe(true);
 			expect(geometry.footerGapsCompact).toBe(true);
 			expect(geometry.primaryReachable).toBe(true);
 			expect(geometry.textareaReachable).toBe(true);
@@ -1104,6 +1266,160 @@ test("highlights explicit code and copies raw Markdown and code", async () => {
 		await teardownElectronTest(app, userData);
 	}
 });
+test("reviews, refines, and approves a staged plan without losing focus or edits", async () => {
+	const userData = await createUserData("gradivus-plan-review-");
+	const workspace = path.join(userData, "workspace");
+	const decisionsFile = path.join(userData, "plan-decisions.jsonl");
+	await seed(userData, workspace, ["fixture-plan-review"]);
+	const app = await launch(userData, workspace, {
+		GRADIVUS_PLAN_LARGE: "1",
+		GRADIVUS_PLAN_DECISIONS_FILE: decisionsFile,
+	});
+	const errors = await app.firstWindow().then(page => collectRendererErrors(page));
+	try {
+		const page = await app.firstWindow();
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await expectComposerReady(page);
+		const composer = page.getByLabel("Message OMP");
+		await composer.fill("fixture plan review");
+		await composer.press("Enter");
+
+		let dialog = page.getByRole("dialog", { name: "FIXTURE ROLLOUT" });
+		await expect(dialog).toBeVisible({ timeout: 15_000 });
+		await expect(dialog.getByText("Plan Review", { exact: true })).toBeVisible();
+		await expect(dialog.getByText("local://fixture-rollout-plan.md", { exact: true })).toBeVisible();
+		await expect(dialog.getByRole("heading", { name: "Goal", exact: true })).toBeVisible();
+		await expect(dialog.getByRole("heading", { name: "Execution", exact: true })).toBeVisible();
+		await expect(dialog.getByRole("heading", { name: "Risks", exact: true })).toBeVisible();
+		await expect(dialog.getByRole("heading", { name: "FIXTURE ROLLOUT", exact: true })).toBeFocused();
+
+		const actionLabels = await dialog.locator(".plan-review-actions > button").allTextContents();
+		expect(actionLabels.map(label => label.replace(/\s+/g, " ").trim())).toEqual([
+			"Approve and execute",
+			"Approve and compact context",
+			expect.stringMatching(/^Approve and keep context/),
+			"Refine plan",
+			"Save and quit",
+		]);
+		await expect(dialog.getByRole("button", { name: /^Approve and keep context/ })).toBeDisabled();
+		await expect(dialog.getByText("Context is above 95%")).toBeVisible();
+		await expect(dialog.getByRole("radio", { name: /default.*Fixture Default/i })).toBeChecked();
+
+		await dialog.getByRole("button", { name: "Copy Markdown", exact: true }).click();
+		await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText())).toContain("# Fixture rollout");
+
+		const outline = dialog.getByRole("navigation");
+		await outline.getByRole("button", { name: "Execution", exact: true }).click();
+		await expect(outline.getByRole("button", { name: "Execution", exact: true })).toHaveAttribute("aria-current", "location");
+
+		const executionSection = dialog
+			.getByRole("heading", { name: "Execution", exact: true })
+			.locator("xpath=ancestor::section");
+		await executionSection.getByRole("button", { name: "Annotate", exact: true }).click();
+		const sectionNote = dialog.getByLabel("Note on Execution");
+		await sectionNote.fill("Name the rollout owner.");
+		await sectionNote.press("Escape");
+		await expect(sectionNote).toHaveCount(0);
+		await executionSection.getByRole("button", { name: "Annotate", exact: true }).click();
+		await dialog.getByLabel("Note on Execution").fill("Name the rollout owner.");
+		await dialog.getByLabel("Note on Execution").press("Control+Enter");
+		await expect(executionSection.getByText("Name the rollout owner.", { exact: true })).toBeVisible();
+
+		const lineButton = executionSection.getByRole("button", { name: /^Annotate line / }).first();
+		await lineButton.click();
+		const lineNote = dialog.getByLabel(/^Note on line /);
+		await lineNote.fill("Keep this source anchor.");
+		await dialog.getByRole("button", { name: "Save note" }).click();
+		await expect(executionSection.getByText("Keep this source anchor.", { exact: true })).toBeVisible();
+
+		const riskSection = dialog
+			.getByRole("heading", { name: "Risks", exact: true })
+			.locator("xpath=ancestor::section");
+		await riskSection.getByRole("button", { name: "Delete section" }).click();
+		await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+		await expect(dialog.getByRole("heading", { name: "Risks", exact: true })).toHaveCount(0);
+		await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+		await expect(dialog.getByRole("heading", { name: "Risks", exact: true })).toBeVisible();
+
+		const targets = await dialog.locator("button, input, textarea, summary").evaluateAll(elements =>
+			elements
+				.filter(element => {
+					const rect = element.getBoundingClientRect();
+					return rect.width > 0 && rect.height > 0;
+				})
+				.map(element => {
+					const target =
+						element instanceof HTMLInputElement && element.type === "radio"
+							? element.closest("label") ?? element
+							: element;
+					const rect = target.getBoundingClientRect();
+					return {
+						width: rect.width,
+						height: rect.height,
+						label: element.getAttribute("aria-label") || target.textContent,
+					};
+				}),
+		);
+		expect(targets.filter(target => target.width < 24 || target.height < 24)).toEqual([]);
+		const axe = await new AxeBuilder({ page }).include(".plan-review-dialog").setLegacyMode(true).analyze();
+		expect(axe.violations.filter(value => value.impact === "critical" || value.impact === "serious")).toEqual([]);
+
+		await page.keyboard.press("Escape");
+		await expect(dialog).toHaveCount(0);
+		await expect(composer).toBeFocused();
+		await expect.poll(async () => {
+			try {
+				return (await fs.readFile(decisionsFile, "utf8")).trim();
+			} catch {
+				return "";
+			}
+		}).toBe("");
+
+		await page.getByRole("button", { name: "Review plan" }).click();
+		dialog = page.getByRole("dialog", { name: "FIXTURE ROLLOUT" });
+		await dialog.getByLabel("Additional refinement feedback").fill("Add an explicit canary checkpoint.");
+		await dialog.getByRole("button", { name: "Refine plan", exact: true }).click();
+		await expect(dialog).toHaveCount(0);
+		dialog = page.getByRole("dialog", { name: "REFINED FIXTURE ROLLOUT" });
+		await expect(dialog).toBeVisible({ timeout: 10_000 });
+
+		await page.keyboard.press("Escape");
+		await page.getByRole("button", { name: "Review plan" }).click();
+		dialog = page.getByRole("dialog", { name: "REFINED FIXTURE ROLLOUT" });
+		await dialog.getByRole("button", { name: "Refine plan", exact: true }).click();
+		await expect(dialog).toHaveCount(0);
+		await expect(composer).toHaveAttribute("placeholder", "Describe how OMP should refine the plan…");
+		await expect(page.getByRole("button", { name: "Refine plan", exact: true })).toBeVisible();
+		await composer.fill("Add a staged fallback.");
+		await composer.press("Enter");
+		dialog = page.getByRole("dialog", { name: "REFINED FIXTURE ROLLOUT" });
+		await expect(dialog).toBeVisible({ timeout: 10_000 });
+
+		await page.setViewportSize({ width: 320, height: 700 });
+		await expect.poll(() =>
+			dialog.evaluate(element => element.scrollWidth <= element.clientWidth),
+		).toBe(true);
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await dialog.getByRole("button", { name: "Approve and execute", exact: true }).click();
+		await expect(dialog).toHaveCount(0);
+		await expect(page.getByText("Approved fixture execution started.", { exact: true })).toBeVisible({ timeout: 10_000 });
+
+		const decisions = (await fs.readFile(decisionsFile, "utf8"))
+			.trim()
+			.split(/\r?\n/)
+			.map(line => JSON.parse(line) as { kind: string; feedback?: string; context?: string });
+		expect(decisions).toEqual([
+			expect.objectContaining({ kind: "refine", feedback: expect.stringContaining("Add an explicit canary checkpoint.") }),
+			expect.objectContaining({ kind: "refine", feedback: "" }),
+			expect.objectContaining({ kind: "refine", feedback: expect.stringContaining("Add a staged fallback.") }),
+			expect.objectContaining({ kind: "approve", context: "fresh" }),
+		]);
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
 
 test.describe("composer attachments", () => {
 	test("stages picker files with exact native transport and supports attachment-only send", async () => {
@@ -1467,6 +1783,8 @@ test("steers with exact attachments, rolls back once, and retains files through 
 			'steer with files [Document A1: "steer.md"] [Image A2: "steer.png"]',
 		);
 		await expect(page.locator(".error-toast")).toContainText("Fixture steer delivery failed.");
+		await expect(composer).toBeFocused();
+		await expect(page.getByRole("button", { name: "Remove steer.png" })).toBeVisible();
 		const captureFile = path.join(userData, "attachment-captures.jsonl");
 		const first = await waitForAttachmentCapture(captureFile, value => value.route === "steer");
 		await expect.poll(async () => { try { await fs.access(first.references[0]!.path); return true; } catch { return false; } }).toBe(true);
@@ -1517,7 +1835,13 @@ test("queues exact follow-up attachments, retains them through completion, and l
 		await expect(page.getByRole("button", { name: "Remove queue.md" })).toHaveCount(0);
 		await expect(page.getByRole("button", { name: "Remove queue.png" })).toHaveCount(0);
 		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(true);
-		await expect(page.locator(".timeline-scroll")).toContainText("Follow-up completed after the active turn.");
+		const queuedRow = page.locator(".timeline-item.is-queued").filter({ hasText: "queue with files" });
+		await expect(queuedRow.getByRole("button", { name: "Steer queued message", exact: true })).toBeEnabled();
+		await queuedRow.getByRole("button", { name: "Steer queued message", exact: true }).click();
+		await expect(page.locator(".timeline-scroll")).toContainText(
+			"Held turn completed after promoting the queued message.",
+			{ timeout: 15_000 },
+		);
 		await expect.poll(async () => { try { await fs.access(second.references[0]!.path); return true; } catch { return false; } }).toBe(false);
 		const admittedPaths = second.references.map(reference => reference.path);
 		await app.close();
@@ -1569,6 +1893,185 @@ test("isolates attachments across successful workspace creation", async () => {
 	}
 });
 });
+test("edits subagent prompts with dirty-state and revision conflict recovery", async () => {
+	const userData = await createUserData("gradivus-e2e-agent-prompts-");
+	const workspace = path.join(userData, "workspace");
+	const sessionId = "fixture-agent-prompts";
+	await seed(userData, workspace, [sessionId]);
+	const app = await launch(userData, workspace);
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	try {
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		await page.getByRole("button", { name: "Open settings", exact: true }).click();
+		await page.getByRole("button", { name: "Subagents", exact: true }).click();
+		await expect(page.locator("#settings-category-title")).toHaveText("Subagents");
+
+		const prompt = page.getByRole("textbox", { name: "System prompt" });
+		await expect(prompt).toHaveValue("Inspect the requested surface and return compressed evidence.");
+		await prompt.fill("Use project evidence and return exact source locations.");
+		await expect(page.getByText("Unsaved changes", { exact: true })).toBeVisible();
+
+		await page.getByRole("button", { name: "Tools", exact: true }).click();
+		const keepEditing = page.getByRole("button", { name: "Keep editing", exact: true });
+		await expect(keepEditing).toBeFocused();
+		await keepEditing.click();
+		await expect(prompt).toHaveValue("Use project evidence and return exact source locations.");
+
+		await page.getByRole("button", { name: "Save prompt", exact: true }).click();
+		await expect(page.getByText(/project override saved/)).toBeVisible();
+		await expect(page.locator(".definition-summary")).toContainText("project");
+
+		await page.getByRole("button", { name: "Reset project", exact: true }).click();
+		await expect(page.getByText(`.omp/agents/scout.md`, { exact: true })).toBeVisible();
+		const keepOverride = page.getByRole("button", { name: "Keep override", exact: true });
+		await expect(keepOverride).toBeFocused();
+		await page.getByRole("button", { name: "Delete override", exact: true }).click();
+		await expect(page.getByText(/now uses its bundled definition/)).toBeVisible();
+
+		await prompt.fill("Keep this exact local conflict draft.");
+		await page.evaluate(async id => {
+			const agent = (await window.gradivus.getAgentPrompts(id)).find(candidate => candidate.name === "scout");
+			if (!agent) throw new Error("fixture scout prompt missing");
+			await window.gradivus.saveAgentPrompt(id, agent.name, "project", "Concurrent project prompt.", null);
+		}, sessionId);
+		await page.getByRole("button", { name: "Save prompt", exact: true }).click();
+		await expect(page.getByRole("alert")).toContainText("changed since it was loaded");
+		await expect(prompt).toHaveValue("Keep this exact local conflict draft.");
+
+		await page.getByRole("button", { name: "Back to workspace", exact: true }).click();
+		await expect(page.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+		await page.getByRole("button", { name: "Discard changes", exact: true }).click();
+		await expect(page.getByLabel("Message OMP")).toBeVisible();
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+test("edits hierarchical todos and resolves revision conflicts explicitly", async () => {
+	test.setTimeout(90_000);
+	const userData = await createUserData("gradivus-e2e-todos-");
+	const workspace = path.join(userData, "workspace");
+	const sessionId = "fixture-todo-inspector";
+	await seed(userData, workspace, [sessionId]);
+	const app = await launch(userData, workspace);
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	try {
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		await page.evaluate(async id => {
+			const snapshot = await window.gradivus.openSession(id);
+			const phases = structuredClone(snapshot.todoState.phases);
+			phases[0].tasks[0].status = "in_progress";
+			phases[0].tasks.push({
+				id: "todo-parallel-fixture",
+				content: "Review parallel subagent output",
+				status: "in_progress",
+				parentId: phases[0].tasks[0].id,
+			});
+			await window.gradivus.setTodos(id, phases, snapshot.todoState.revision, "Seed concurrent active todos");
+		}, sessionId);
+		const todoToggle = page.getByRole("button", { name: /session todos/ });
+		await expect(todoToggle).toContainText("0/1");
+		await expect(todoToggle).toContainText("Exercise the desktop boundary");
+		await expect(todoToggle).toContainText("Review parallel subagent output");
+		await page.setViewportSize({ width: 960, height: 720 });
+		const dockBounds = await todoToggle.boundingBox();
+		expect(dockBounds).not.toBeNull();
+		expect(dockBounds!.x).toBeGreaterThanOrEqual(0);
+		expect(dockBounds!.x + dockBounds!.width).toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth));
+		await page.setViewportSize({ width: 1360, height: 860 });
+		await page.evaluate(async id => {
+			const snapshot = await window.gradivus.openSession(id);
+			const phases = structuredClone(snapshot.todoState.phases);
+			phases[0].tasks = phases[0].tasks.filter(task => task.id !== "todo-parallel-fixture");
+			await window.gradivus.setTodos(id, phases, snapshot.todoState.revision, "Finish concurrent active todo");
+		}, sessionId);
+		await expect(todoToggle).not.toContainText("Review parallel subagent output");
+		await todoToggle.click();
+		await expect(page.getByRole("region", { name: "Todo inspector" })).toBeVisible();
+		await page.getByRole("button", { name: "Show closed", exact: true }).click();
+		await page.getByLabel("Task text for Exercise the desktop boundary").fill("Exercise the desktop boundary safely");
+		await page.getByRole("button", { name: /Collapse session todos/ }).click();
+		await expect(page.getByRole("region", { name: "Todo inspector" })).toHaveCount(0);
+		await page.getByRole("button", { name: /Expand session todos/ }).click();
+		await page.getByRole("button", { name: "Show closed", exact: true }).click();
+		await expect(page.getByLabel("Task text for Exercise the desktop boundary safely"))
+			.toHaveValue("Exercise the desktop boundary safely");
+		await page.getByRole("button", { name: "Add child", exact: true }).click();
+		const taskTwoRow = page.getByRole("treeitem", { name: "Task 2, pending" });
+		await taskTwoRow.getByRole("button", { name: "Block", exact: true }).click();
+		await page.getByLabel("Blocker reason for Task 2").fill("Waiting on fixture review");
+		await page.getByRole("button", { name: "Block task", exact: true }).click();
+		await page.getByRole("button", { name: "+ Add task", exact: true }).click();
+
+		const taskThreeRow = page.getByRole("treeitem", { name: "Task 3, pending" });
+		await taskThreeRow.press("Alt+ArrowUp");
+		await expect(page.locator(".todo-task-content").first()).toHaveValue("Task 3");
+		await page.getByRole("button", { name: "Drag task Exercise the desktop boundary safely" })
+			.dragTo(page.getByRole("treeitem", { name: "Task 3, pending" }));
+		await expect(page.locator(".todo-task-content").first()).toHaveValue("Exercise the desktop boundary safely");
+		await taskThreeRow.getByRole("button", { name: "Indent", exact: true }).click();
+		await expect(taskThreeRow).toHaveAttribute("aria-level", "2");
+		await taskThreeRow.getByRole("button", { name: "Outdent", exact: true }).click();
+		await expect(taskThreeRow).toHaveAttribute("aria-level", "1");
+
+		await page.getByRole("treeitem", { name: "Task 2, blocked" }).getByRole("button", { name: "Remove" }).click();
+		await expect(page.getByRole("heading", { name: "Delete task?" })).toBeVisible();
+		await page.getByRole("button", { name: "Cancel", exact: true }).click();
+		await expect(page.getByRole("treeitem", { name: "Task 2, blocked" })).toContainText("Waiting on fixture review");
+		await page.getByRole("treeitem", { name: "Exercise the desktop boundary safely, blocked" })
+			.getByRole("button", { name: "Complete 1 subtasks" })
+			.click();
+		await expect(page.getByRole("treeitem", { name: "Task 2, completed" })).toBeVisible();
+		await expect(page.locator(".todo-validation")).toHaveCount(0);
+
+		await page.getByRole("button", { name: "Save changes", exact: true }).click();
+		await expect(page.getByText("Todo changes saved.", { exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: /Collapse session todos/ })).toBeVisible();
+		await page.getByRole("button", { name: "Undo last save", exact: true }).click();
+		await expect(page.getByText("Previous todo edit restored.", { exact: true })).toBeVisible();
+		await expect(page.getByLabel("Task text for Exercise the desktop boundary")).toHaveValue("Exercise the desktop boundary");
+
+		await page.getByLabel("Task text for Exercise the desktop boundary").fill("Preserve this exact local todo draft");
+		await page.evaluate(async id => {
+			const snapshot = await window.gradivus.openSession(id);
+			const phases = structuredClone(snapshot.todoState.phases);
+			phases[0].tasks.push({
+				id: "todo-remote-fixture",
+				content: "Concurrent remote todo",
+				status: "pending",
+			});
+			await window.gradivus.setTodos(id, phases, snapshot.todoState.revision, "Concurrent fixture edit");
+		}, sessionId);
+		await expect(page.getByRole("alert")).toContainText("todo list changed elsewhere");
+		await expect(page.getByLabel("Task text for Preserve this exact local todo draft"))
+			.toHaveValue("Preserve this exact local todo draft");
+		await page.getByRole("button", { name: "Copy draft", exact: true }).click();
+		await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+			.toContain("Preserve this exact local todo draft");
+		await page.getByRole("button", { name: "Reload latest", exact: true }).click();
+		await expect(page.getByLabel("Task text for Concurrent remote todo")).toHaveValue("Concurrent remote todo");
+		await page.getByLabel("Task text for Concurrent remote todo").fill("Saved after conflict reload");
+		await page.getByRole("button", { name: "Save changes", exact: true }).click();
+		await expect(page.getByText("Todo changes saved.", { exact: true })).toBeVisible();
+
+		await page.getByRole("button", { name: /Collapse session todos/ }).click();
+		await page.getByRole("button", { name: /Expand session todos/ }).click();
+		await expect(page.getByLabel("Task text for Saved after conflict reload"))
+			.toHaveValue("Saved after conflict reload");
+		await page.evaluate(async id => {
+			const snapshot = await window.gradivus.openSession(id);
+			await window.gradivus.setTodos(id, [], snapshot.todoState.revision, "Clear completed todo plan");
+		}, sessionId);
+		await expect(page.getByRole("button", { name: /session todos/ })).toHaveCount(0);
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
+
 test("reopens settings after a delayed refresh closes", async () => {
 	const userData = await createUserData("gradivus-e2e-set-");
 	const workspace = path.join(userData, "workspace");
@@ -1627,7 +2130,7 @@ test("keeps the browser view detached while sidebar-routed settings are open", a
 		if (!before) throw new Error("Fixture browser view did not attach");
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 
-		await page.getByRole("tab", { name: /Gradivus/ }).click();
+		await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
 		await page
 			.getByRole("complementary", { name: "Workspaces" })
 			.getByRole("button", { name: "Open settings", exact: true })
@@ -1644,6 +2147,396 @@ test("keeps the browser view detached while sidebar-routed settings are open", a
 		expect(after).toEqual(before);
 		await expect(browserTab).toHaveAttribute("aria-selected", "true");
 		await expect(browserTab).toBeFocused();
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+test("supports durable browser tab metadata, reordering, and navigation shortcuts", async () => {
+	test.setTimeout(75_000);
+	const userData = await createUserData("gradivus-browser-tabs-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-browser-tabs"]);
+	const app = await launch(userData, workspace);
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	const primaryModifier = process.platform === "darwin" ? "Meta" : "Control";
+	try {
+		await page.setViewportSize({ width: 1360, height: 860 });
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
+		const pane = page.getByRole("group", { name: "Browser pane" });
+		const address = pane.getByRole("textbox", { name: "Address" });
+		await address.fill(browserUrl);
+		await address.press("Enter");
+
+		const fixtureTab = page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true });
+		await expect(fixtureTab).toBeVisible({ timeout: 15_000 });
+		await expect(fixtureTab.locator("xpath=..").locator(".tab-favicon")).toBeVisible();
+		await expect(page).toHaveTitle("Gradivus Browser Fixture · Gradivus");
+		await page.keyboard.press(`${primaryModifier}+L`);
+		await expect(address).toBeFocused();
+		expect(await address.evaluate(input =>
+			input.selectionStart === 0 && input.selectionEnd === input.value.length,
+		)).toBe(true);
+
+		await address.fill(`${browserUrl}#shortcut-history`);
+		await address.press("Enter");
+		await expect(address).toHaveValue(/#shortcut-history$/);
+		await page.keyboard.press("Alt+ArrowLeft");
+		await expect(address).not.toHaveValue(/#shortcut-history$/);
+		await page.keyboard.press("Alt+ArrowRight");
+		await expect(address).toHaveValue(/#shortcut-history$/);
+		await page.keyboard.press(`${primaryModifier}+F`);
+		const findInput = page.getByRole("searchbox", { name: "Find in page" });
+		await expect(findInput).toBeFocused();
+		await findInput.fill("target");
+		await findInput.press("Enter");
+		await expect(page.getByRole("status")).toContainText(/1 of 2|2 of 2/);
+		await findInput.press("Escape");
+		await expect(findInput).toHaveCount(0);
+		await pane.locator('summary[aria-label="More browser actions"]').click();
+		await pane.getByRole("button", { name: "Zoom in", exact: true }).click();
+		await pane.getByRole("button", { name: "Actual size", exact: true }).click();
+		await pane.getByRole("button", { name: "Hard reload", exact: true }).click();
+		await expect(fixtureTab).toBeVisible();
+
+		const workspaceTabs = page.getByRole("tablist", { name: "Workspace tabs" }).getByRole("tab");
+		await page.keyboard.press(`${primaryModifier}+T`);
+		await expect(workspaceTabs).toHaveCount(3);
+		const newestTab = page.getByRole("tab", { selected: true });
+		await expect(newestTab).toHaveCount(1);
+		await newestTab.focus();
+		await newestTab.press(`${primaryModifier}+Shift+Tab`);
+		await expect(fixtureTab).toHaveAttribute("aria-selected", "true");
+		await fixtureTab.press(`${primaryModifier}+Tab`);
+		await expect(fixtureTab).toHaveAttribute("aria-selected", "false");
+		await fixtureTab.focus();
+		await fixtureTab.press("ArrowRight");
+		await expect(fixtureTab).toHaveAttribute("aria-selected", "false");
+		await expect(page.getByRole("tab", { selected: true })).toHaveCount(1);
+
+		const browserOrder = (): Promise<string[]> => page.evaluate(async () => {
+			const document = await window.gradivus.getWorkspaceDocument();
+			if (!document) return [];
+			const browserTabIds = new Set(document.panes.filter(pane => pane.kind === "browser").map(pane => pane.tabId));
+			return document.tabs.filter(tab => browserTabIds.has(tab.id)).map(tab => tab.id);
+		});
+		const before = await browserOrder();
+		expect(before).toHaveLength(2);
+		const browserTabWrappers = page.locator(".workspace-tabs > .browser-tab");
+		await browserTabWrappers.nth(1).dragTo(browserTabWrappers.nth(0));
+		await expect.poll(browserOrder).toEqual([before[1], before[0]]);
+
+		await fixtureTab.click();
+		await fixtureTab.locator("xpath=..").locator('summary[aria-label="Actions for Gradivus Browser Fixture"]').click();
+		await fixtureTab.locator("xpath=..").getByRole("button", { name: "Duplicate", exact: true }).click();
+		await expect(workspaceTabs).toHaveCount(4);
+		await expect(page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true })).toHaveCount(2);
+
+		const originalFixtureTab = page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true }).first();
+		await originalFixtureTab.click();
+		const originalCloseButton = originalFixtureTab.locator("xpath=..").getByRole("button", { name: "Close Gradivus Browser Fixture" });
+		await originalCloseButton.click();
+		await expect(page.getByRole("heading", { name: "Close “Gradivus Browser Fixture”?" })).toBeVisible();
+		await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+		await page.getByRole("button", { name: "Cancel", exact: true }).click();
+		await expect(originalCloseButton).toBeFocused();
+		await originalCloseButton.click();
+		await page.getByRole("button", { name: "Close tab", exact: true }).click();
+		await expect(page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true })).toHaveCount(1);
+		await expect(page.getByRole("tab", { selected: true })).toHaveCount(1);
+
+		await page.keyboard.press(`${primaryModifier}+W`);
+		await page.getByRole("button", { name: "Close tab", exact: true }).click();
+		await expect(workspaceTabs).toHaveCount(2);
+		await page.keyboard.press(`${primaryModifier}+Shift+T`);
+		await expect(workspaceTabs).toHaveCount(3);
+		await expect(page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true })).toBeVisible();
+		await expect(page.getByRole("tab", { selected: true })).toHaveCount(1);
+		await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+		await expect(page.locator(".transcript-actions button[aria-controls='run-inspector']")).toHaveCount(0);
+		await expect(page.getByRole("complementary", { name: "Workspaces" }).getByRole("button", { name: "Open settings" }))
+			.toBeVisible();
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
+
+test("binds Gradivus pane tools to native-consented session authorization", async () => {
+	test.setTimeout(90_000);
+	const userData = await createUserData("gradivus-pane-browser-tool-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-pane-browser-tool"]);
+	const app = await launch(userData, workspace, { GRADIVUS_BROWSER_INVENTORY: "1" });
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	try {
+		await page.setViewportSize({ width: 1360, height: 860 });
+		const composer = page.getByLabel("Message OMP");
+		const timeline = page.locator(".timeline-scroll");
+		await expect(composer).toBeVisible({ timeout: 20_000 });
+		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
+		const address = page.getByRole("group", { name: "Browser pane" }).getByRole("textbox", { name: "Address" });
+		await address.fill(browserUrl);
+		await address.press("Enter");
+		const fixtureTab = page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true });
+		await expect(fixtureTab).toBeVisible({ timeout: 15_000 });
+		const paneId = await page.evaluate(async () => {
+			const document = await window.gradivus.getWorkspaceDocument();
+			const pane = document?.panes.find(candidate => candidate.kind === "browser");
+			if (!pane) throw new Error("Fixture browser pane was unavailable");
+			return pane.id;
+		});
+		await page.getByRole("button", { name: /Open Agent access/ }).click();
+		await expect(page.getByRole("complementary", { name: "Browser automation access" })).toBeVisible();
+		await app.evaluate(({ dialog }) => {
+			dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+		});
+		const denied = await page.evaluate(
+			({ sessionId, paneId }) => window.gradivus.requestPaneAuthorization(sessionId, paneId, "observe"),
+			{ sessionId: "fixture-pane-browser-tool", paneId },
+		);
+		expect(denied.lease).toBeUndefined();
+		await app.evaluate(({ dialog }) => {
+			dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+		});
+		await page.getByRole("button", { name: "Allow Read", exact: true }).click();
+		await expect(page.getByText("Read access", { exact: true })).toBeVisible();
+
+		await test.step("execute the registered Gradivus pane tool", async () => {
+			await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+			await composer.fill("fixture gradivus pane");
+			await composer.press("Enter");
+			await expect(timeline).toContainText("Gradivus pane inventory contains 1 pane.", { timeout: 15_000 });
+			await expect(timeline).toContainText("gradivus_pane");
+			await composer.fill("fixture gradivus pane observe");
+			await composer.press("Enter");
+			await fixtureTab.click();
+			await expect(timeline).toContainText("Gradivus pane observed Gradivus Browser Fixture", {
+				timeout: 15_000,
+			});
+			await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+			await composer.fill("fixture gradivus pane control");
+			await composer.press("Enter");
+			await fixtureTab.click();
+			await expect(timeline).toContainText("insufficient_scope", { timeout: 15_000 });
+			await page.getByRole("button", { name: "Upgrade to Control", exact: true }).click();
+			await expect(page.getByText("Control access", { exact: true })).toBeVisible();
+			await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+			await composer.fill("fixture gradivus pane control");
+			await composer.press("Enter");
+			await fixtureTab.click();
+			await expect(timeline).toContainText("Gradivus pane control completed.", { timeout: 15_000 });
+			const output = await app.evaluate(({ BrowserWindow }) => {
+				const view = BrowserWindow.getAllWindows()[0]?.contentView.children.find(candidate => {
+					if (!candidate || typeof candidate !== "object" || !("webContents" in candidate)) return false;
+					const contents = (candidate.webContents as WebContents | undefined) ?? undefined;
+					return Boolean(contents && !contents.isDestroyed() && contents.getURL().includes("browser-fixture.html"));
+				}) as { webContents: WebContents } | undefined;
+				return view?.webContents.executeJavaScript("document.querySelector('#fixture-output')?.textContent");
+			});
+			expect(output).toBe("Connected");
+		});
+		await test.step("fail closed for sensitive fields, stale epochs, and invalid navigation", async () => {
+			const expectPaneFailure = async (prompt: string, expected: string): Promise<void> => {
+				const assistantItems = page.locator(".timeline-item.item-assistant");
+				const previousCount = await assistantItems.count();
+				await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+				await composer.fill(prompt);
+				await composer.press("Enter");
+				await fixtureTab.click();
+				await expect(assistantItems).toHaveCount(previousCount + 1, { timeout: 15_000 });
+				await expect(assistantItems.last()).toContainText(expected);
+			};
+			await expectPaneFailure("fixture gradivus pane password", "sensitive_field");
+			await expectPaneFailure("fixture gradivus pane file input", "sensitive_field");
+			await expectPaneFailure("fixture gradivus pane stale", "stale_epoch");
+			await expectPaneFailure("fixture gradivus pane invalid navigation", "navigate_failed");
+		});
+		await test.step("return the committed epoch after click navigation", async () => {
+			const assistantItems = page.locator(".timeline-item.item-assistant");
+			const previousCount = await assistantItems.count();
+			await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+			await composer.fill("fixture gradivus pane click navigation");
+			await composer.press("Enter");
+			await fixtureTab.click();
+			await expect(assistantItems).toHaveCount(previousCount + 1, { timeout: 15_000 });
+			await expect(assistantItems.last()).toContainText("Gradivus pane control completed.");
+			await expect
+				.poll(() =>
+					app.evaluate(({ BrowserWindow }) => {
+						const view = BrowserWindow.getAllWindows()[0]?.contentView.children.find(candidate => {
+							if (!candidate || typeof candidate !== "object" || !("webContents" in candidate)) return false;
+							const contents = (candidate.webContents as WebContents | undefined) ?? undefined;
+							return Boolean(
+								contents && !contents.isDestroyed() && contents.getURL().includes("browser-fixture.html"),
+							);
+						}) as { webContents: WebContents } | undefined;
+						return view?.webContents.getURL() ?? "";
+					}),
+				)
+				.toContain("broker-click=1");
+		});
+		await test.step("close only the OMP-owned browser tab", async () => {
+			const inventory = page.getByRole("region", { name: "OMP browser tabs" });
+			if (!(await inventory.isVisible())) await page.getByRole("button", { name: /Agent access/ }).click();
+			await expect(inventory).toContainText("Fixture OMP automation");
+			await expect(inventory).toContainText("fixture-subagent");
+			await inventory.getByRole("button", { name: "Close OMP tab", exact: true }).click();
+			await expect(inventory).toContainText("No OMP-owned browser tabs in this chat.");
+			await expect(fixtureTab).toBeVisible();
+		});
+
+		await test.step("revoke authorization when debugger ownership is lost", async () => {
+			await app.evaluate(({ BrowserWindow }) => {
+				const view = BrowserWindow.getAllWindows()[0]?.contentView.children.find(candidate => {
+					if (!candidate || typeof candidate !== "object" || !("webContents" in candidate)) return false;
+					const contents = (candidate.webContents as WebContents | undefined) ?? undefined;
+					return Boolean(contents && !contents.isDestroyed() && contents.getURL().includes("browser-fixture.html"));
+				}) as { webContents: WebContents } | undefined;
+				if (!view?.webContents.debugger.isAttached()) throw new Error("Broker debugger was not attached");
+				view.webContents.debugger.detach();
+			});
+			await page.getByRole("tab", { name: "Gradivus native", exact: true }).click();
+			await composer.fill("fixture gradivus pane observe");
+			await composer.press("Enter");
+			await fixtureTab.click();
+			await expect(page.locator(".timeline-item.item-assistant").last()).toContainText("unauthorized_pane", {
+				timeout: 15_000,
+			});
+		});
+
+		await test.step("revoke the tool when its pane closes", async () => {
+			await fixtureTab.click();
+			await fixtureTab.locator("xpath=..").getByRole("button", { name: "Close Gradivus Browser Fixture" }).click();
+			await page.getByRole("button", { name: "Close tab", exact: true }).click();
+			await expect(fixtureTab).toHaveCount(0);
+			await expect(composer).toBeVisible();
+			await composer.fill("fixture gradivus pane unavailable");
+			await composer.press("Enter");
+			await expect(timeline).toContainText("Gradivus pane host tool unavailable.", { timeout: 15_000 });
+		});
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
+test("keeps legacy OMP sessions usable when host tools are unavailable", async () => {
+	test.setTimeout(60_000);
+	const userData = await createUserData("gradivus-legacy-host-tools-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-legacy-host-tools"]);
+	const app = await launch(userData, workspace, { GRADIVUS_LEGACY_HOST_TOOLS: "1" });
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	try {
+		const composer = page.getByLabel("Message OMP");
+		await expect(composer).toBeVisible({ timeout: 20_000 });
+		await composer.fill("legacy runtime remains usable");
+		await composer.press("Enter");
+		await expect(page.locator(".timeline-scroll")).toContainText("Fixture completed the requested work.", {
+			timeout: 15_000,
+		});
+
+		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
+		const browserPane = page.getByRole("group", { name: "Browser pane" });
+		const address = browserPane.getByRole("textbox", { name: "Address" });
+		await address.fill(browserUrl);
+		await address.press("Enter");
+		await expect(page.getByRole("tab", { name: "Gradivus Browser Fixture", exact: true })).toBeVisible({
+			timeout: 15_000,
+		});
+		await page.getByRole("button", { name: /Open Agent access/ }).click();
+		const automation = page.getByRole("complementary", { name: "Browser automation access" });
+		await expect(automation.getByRole("status")).toContainText(
+			"Pane automation is unavailable for this OMP runtime: Unknown command: set_host_tools",
+		);
+		await expect(automation.getByRole("button", { name: "Allow Read", exact: true })).toHaveCount(0);
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
+test("exposes compact handoff retry stats export and restart controls", async () => {
+	test.setTimeout(90_000);
+	const userData = await createUserData("gradivus-parity-");
+	const workspace = path.join(userData, "workspace");
+	const sessionId = "fixture-parity";
+	const exportPath = path.join(userData, "fixture-export.html");
+	await seed(userData, workspace, [sessionId]);
+	const app = await launch(userData, workspace);
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	const sessionMenu = page.locator(".session-actions-menu");
+	try {
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		const shortcuts = page.getByRole("navigation", { name: "OMP command shortcuts" });
+		await expect(shortcuts.getByRole("button")).toHaveCount(5);
+		await expect(shortcuts).toContainText("/mcp");
+		await expect(shortcuts).toContainText("/tree");
+		await expect(shortcuts).toContainText("/export");
+		await expect(shortcuts).toContainText("/share");
+		await shortcuts.getByRole("button", { name: "/mcp", exact: true }).click();
+		await expect(page.getByLabel("Message OMP")).toHaveValue("/mcp");
+		await shortcuts.getByRole("button", { name: "All commands…", exact: true }).click();
+		await expect(page.getByRole("listbox", { name: "Slash commands" })).toBeVisible();
+		await page.getByLabel("Message OMP").fill("");
+		await page.getByRole("button", { name: /Context window:/ }).click();
+		await page.getByRole("button", { name: "Compact…", exact: true }).click();
+		await page.getByLabel("Optional focus instructions").fill("Preserve fixture decisions.");
+		await page.getByRole("button", { name: "Compact", exact: true }).click();
+		await expect(page.getByRole("status")).toContainText("Context compacted: 128 → 64 tokens.");
+
+		await page.getByRole("button", { name: /Context window:/ }).click();
+		await page.getByRole("button", { name: "Hand off…", exact: true }).click();
+		await page.getByRole("button", { name: "Hand off", exact: true }).click();
+		await expect(page.getByRole("status")).toContainText("Hand off complete: 64 → 0 tokens.");
+
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Retry last turn", exact: true }).click();
+		await expect(page.locator(".active-turn-status")).toContainText("Retrying (attempt 1 of 3)");
+		await page.getByRole("button", { name: "Cancel retry", exact: true }).click();
+		await expect(page.locator(".parity-status")).toContainText("Cancel retry requested.");
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Retry last turn", exact: true }).click();
+		await expect(page.locator(".parity-status")).toContainText("Nothing to retry.");
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Session statistics", exact: true }).click();
+		await expect(page.getByRole("heading", { name: "Session statistics", exact: true })).toBeVisible();
+		await expect(page.getByText("235", { exact: true })).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(page.getByRole("heading", { name: "Session statistics", exact: true })).toHaveCount(0);
+
+		await app.evaluate(({ dialog }) => {
+			dialog.showSaveDialog = async () => ({ canceled: true, filePath: undefined });
+		});
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Export HTML…", exact: true }).click();
+		await expect.poll(async () => fs.stat(exportPath).then(() => true).catch(() => false)).toBe(false);
+
+		await app.evaluate(({ dialog }, filePath) => {
+			dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+		}, exportPath);
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Export HTML…", exact: true }).click();
+		await expect.poll(() => fs.readFile(exportPath, "utf8")).toContain("Fixture export");
+
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Restart OMP…", exact: true }).click();
+		await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+		await page.getByRole("button", { name: "Cancel", exact: true }).click();
+		await sessionMenu.locator("summary").click();
+		await sessionMenu.getByRole("button", { name: "Restart OMP…", exact: true }).click();
+		await page.getByRole("button", { name: "Restart OMP", exact: true }).click();
+		await expect(page.getByRole("status")).toContainText("OMP restarted with the same session.", { timeout: 20_000 });
+		const activeSession = await page.evaluate(() => window.gradivus.bootstrap().then(snapshot => snapshot.registry.activeByKind.work));
+		expect(activeSession).toBe(sessionId);
+		await expect(page.getByLabel("Message OMP")).toBeVisible();
+		expect(errors).toEqual([]);
 	} finally {
 		await teardownElectronTest(app, userData);
 	}
@@ -1691,8 +2584,9 @@ test("routes native pane context menu actions to pane splits and close", async (
 		const remaining = await readBrowserPaneIds();
 		expect(remaining).not.toContain(secondPane);
 
-		await browserTab.click();
-		await expect(browserTab).toHaveAttribute("aria-selected", "true");
+		const activeBrowserTab = page.getByRole("tab", { selected: true });
+		await expect(activeBrowserTab).toHaveCount(1);
+		await expect(activeBrowserTab).not.toHaveText("OMP Chat");
 	} finally {
 		await teardownElectronTest(app, userData);
 	}
@@ -1760,6 +2654,7 @@ test("keeps timeline activity paused while reading history and renders bounded f
 });
 
 test("opens Agent Hub and Files inspectors with fixture lifecycle and activity controls", async () => {
+	test.setTimeout(75_000);
 	const userData = await createUserData("gradivus-inspect-");
 	const workspace = path.join(userData, "workspace");
 	await seed(userData, workspace, ["fixture-inspector-chat"]);
@@ -1774,7 +2669,7 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		const timeline = page.locator(".timeline-scroll");
 		await expect(composer).toBeVisible({ timeout: 20_000 });
 		await page.getByRole("button", { name: "Open browser tab", exact: true }).click();
-		const browserTab = page.getByRole("tab", { name: "Browser", exact: true });
+		const browserTab = page.locator(".workspace-tabs .browser-tab-activate").first();
 		await expect(browserTab).toBeVisible();
 		const nativeTab = page.getByRole("tab", { name: /Gradivus/ });
 		await nativeTab.click();
@@ -1791,9 +2686,9 @@ test("opens Agent Hub and Files inspectors with fixture lifecycle and activity c
 		await expect(timeline).toContainText("Fixture completed the requested work.", { timeout: 12_000 });
 
 		const runInspector = page.locator("#run-inspector");
-		const inspectorHeader = page.locator(".transcript-actions");
-		const agentHubHeaderControl = inspectorHeader.locator('button[aria-controls="run-inspector"]').filter({ hasText: "Agent Hub" });
-		const filesHeaderControl = inspectorHeader.locator('button[aria-controls="run-inspector"]').filter({ hasText: "Files" });
+		const inspectorControls = page.locator(".composer-inspector-links");
+		const agentHubHeaderControl = inspectorControls.getByRole("button", { name: /Agent Hub/ });
+		const filesHeaderControl = inspectorControls.getByRole("button", { name: /Files/ });
 		await expect(agentHubHeaderControl).toHaveAttribute("aria-label", /Open Agent Hub/);
 		await agentHubHeaderControl.click();
 		await expect(runInspector).toBeVisible();
@@ -2156,6 +3051,87 @@ test("opens the current chat terminal drawer without changing chat state", async
 		await teardownElectronTest(app, userData);
 	}
 });
+test("keeps durable workspace terminal tabs across chats and relaunch", async () => {
+	const userData = await createUserData("gradivus-term-tabs-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-terminal-a", "fixture-terminal-b"]);
+	let app: ElectronApplication | undefined = await launch(userData, workspace);
+	try {
+		let page = await app.firstWindow();
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		const terminalToggle = page.locator('button[aria-controls="chat-terminal-drawer"]');
+		await terminalToggle.click();
+		const drawer = page.getByLabel("Workspace terminal tabs");
+		const terminalOne = drawer.getByRole("tab", { name: "Terminal 1", exact: true });
+		await expect(terminalOne).toBeVisible({ timeout: 10_000 });
+		await drawer.getByRole("button", { name: "New terminal", exact: true }).click();
+		const terminalTwo = drawer.getByRole("tab", { name: "Terminal 2", exact: true });
+		await expect(terminalTwo).toBeVisible({ timeout: 10_000 });
+		await drawer.getByRole("button", { name: "Rename", exact: true }).click();
+		const rename = drawer.getByRole("textbox", { name: "Terminal name", exact: true });
+		await rename.fill("Logs");
+		await rename.press("Enter");
+		const logsTab = drawer.getByRole("tab", { name: "Logs", exact: true });
+		await expect(logsTab).toBeVisible();
+
+		const terminalRegion = drawer.getByRole("region", { name: "Shell terminal" });
+		const activePanel = drawer.getByRole("tabpanel");
+		const logsBefore = Number(await activePanel.getAttribute("data-rendered-offset"));
+		await terminalRegion.click();
+		await page.keyboard.type("echo logs-marker");
+		await page.keyboard.press("Enter");
+		await expect.poll(async () => Number(await activePanel.getAttribute("data-rendered-offset"))).toBeGreaterThan(logsBefore);
+
+		await terminalOne.click();
+		const oneBefore = Number(await activePanel.getAttribute("data-rendered-offset"));
+		await terminalRegion.click();
+		await page.keyboard.type("echo primary-marker");
+		await page.keyboard.press("Enter");
+		await expect.poll(async () => Number(await activePanel.getAttribute("data-rendered-offset"))).toBeGreaterThan(oneBefore);
+		await terminalOne.focus();
+		await page.keyboard.press("End");
+		await expect(logsTab).toBeFocused();
+		await page.keyboard.press("Home");
+		await expect(terminalOne).toBeFocused();
+
+		const secondChat = page.getByRole("treeitem").filter({ hasText: "Second chat" });
+		await secondChat.click();
+		await expect(drawer).toBeVisible();
+		await expect(drawer.getByRole("tab")).toHaveCount(2);
+		await expect(terminalOne).toBeVisible();
+
+		await logsTab.click();
+		const closeButton = drawer.getByRole("button", { name: "Close", exact: true });
+		await closeButton.click();
+		const keepTerminal = page.getByRole("button", { name: "Keep terminal", exact: true });
+		await expect(keepTerminal).toBeFocused();
+		await keepTerminal.click();
+		await expect(logsTab).toBeVisible();
+		await closeButton.click();
+		await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+		await expect(logsTab).toHaveCount(0);
+		await expect(terminalOne).toBeFocused();
+
+		await closeButton.click();
+		await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+		await expect(drawer).toContainText("No terminal tabs");
+		await expect(drawer.getByRole("tab")).toHaveCount(0);
+		await drawer.getByRole("button", { name: "New terminal", exact: true }).click();
+		await expect(drawer.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
+
+		await app.close();
+		app = await launch(userData, workspace);
+		page = await app.firstWindow();
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 20_000 });
+		await page.locator('button[aria-controls="chat-terminal-drawer"]').click();
+		const relaunchedDrawer = page.getByLabel("Workspace terminal tabs");
+		await expect(relaunchedDrawer.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
+		await expect(relaunchedDrawer).toContainText("Shell restarted after app relaunch", { timeout: 10_000 });
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
 
 test("keeps drafts scoped to their chat across session switches and relaunch", async () => {
 	const userData = await createUserData("gradivus-drafts-");
@@ -2254,8 +3230,11 @@ test("replays a backgrounded extension request when returning to its chat", asyn
 	}
 });
 
-test("queues Enter for the next turn while a turn is active", async () => {
-	const userData = await createUserData("gradivus-e2e-steer-"); const workspace = path.join(userData, "workspace"); await seed(userData, workspace, ["fixture-steer-chat"]); const app = await launch(userData, workspace);
+test("steers Enter during an active turn and queues only the explicit secondary action", async () => {
+	const userData = await createUserData("gradivus-e2e-steer-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-steer-chat"]);
+	const app = await launch(userData, workspace, { GRADIVUS_REJECT_NEXT_STEER_QUEUED: "1" });
 	try {
 		const page = await app.firstWindow();
 		await page.setViewportSize({ width: 1440, height: 900 });
@@ -2263,39 +3242,90 @@ test("queues Enter for the next turn while a turn is active", async () => {
 		await expect(composer).toBeVisible({ timeout: 20_000 });
 		const composerShell = page.locator(".composer");
 		const idleSend = composerShell.getByRole("button", { name: "Send message", exact: true });
-		await expect(idleSend).toHaveCount(1);
 		await expect(idleSend).toBeDisabled();
-		await expect(composerShell.getByRole("button", { name: "Stop generation", exact: true })).toHaveCount(0);
 
 		await composer.fill("hold current turn");
 		await composer.press("Enter");
 		await expect(page.getByRole("status")).toContainText(/Turn in progress|Generating response|Reasoning/, { timeout: 8_000 });
-		await expect(composerShell.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
-		const queue = composerShell.getByRole("button", { name: "Queue for the next turn", exact: true });
-		await expect(queue).toHaveCount(1);
-		await expect(queue).toBeDisabled();
+		const steer = composerShell.getByRole("button", { name: "Steer", exact: true });
+		await expect(steer).toBeDisabled();
 		const moreActions = composerShell.locator("summary.action-menu-trigger");
-		await expect(moreActions).toHaveCount(1);
 		await expect(moreActions).toBeEnabled();
-		const stop = page.locator(".active-turn-status .turn-stop-btn");
-		await expect(stop).toHaveCount(1);
-		await expect(page.locator(".turn-stop-btn")).toHaveCount(1);
-		await expect(stop).toHaveAccessibleName("Stop generation");
-		await expect(stop).toBeEnabled();
+		await expect(page.locator(".active-turn-status .turn-stop-btn")).toHaveAccessibleName("Stop generation");
 
-		const queuedText = "queue the next turn";
-		await composer.fill(queuedText);
-		await expect(queue).toBeEnabled();
+		const steeringText = "steer the current turn";
+		await composer.fill(steeringText);
+		await expect(steer).toBeEnabled();
 		await composer.press("Enter");
 		await expect(composer).toHaveValue("");
 		const timeline = page.locator(".timeline-scroll");
-		await expect(timeline.getByText(queuedText, { exact: true })).toHaveCount(1);
+		await expect(timeline.getByText(steeringText, { exact: true })).toHaveCount(1);
+		await expect(timeline.getByRole("button", { name: "Steer queued message", exact: true })).toHaveCount(0);
+		await expect(timeline).toContainText("Held turn completed after steering.", { timeout: 15_000 });
+
+		await composer.fill("hold current turn again");
+		await composer.press("Enter");
+		await expect(page.locator(".active-turn-status")).toBeVisible();
+		const queuedText = "queue the next turn";
+		await composer.fill(queuedText);
+		await moreActions.click();
+		const queue = composerShell.getByRole("button", { name: "Queue for the next turn", exact: true });
+		await expect(queue).toBeEnabled();
+		await queue.click();
+		await expect(composer).toHaveValue("");
 		const queuedRow = timeline.locator(".timeline-item.is-queued").filter({ hasText: queuedText });
 		await expect(queuedRow).toHaveCount(1);
-		await expect(queuedRow.getByRole("button", { name: "Steer queued message", exact: true })).toHaveCount(1);
-		await expect(timeline).toContainText("Follow-up completed after the active turn.", { timeout: 15_000 });
-	} finally { await teardownElectronTest(app, userData); }
+		await expect(queuedRow.getByRole("button", { name: "Steer queued message", exact: true })).toBeEnabled();
+		await moreActions.click();
+		await expect(composerShell.getByRole("button", { name: /Queue for the next turn, 1 queued message/ })).toBeVisible();
+		const queuedSteer = queuedRow.getByRole("button", { name: "Steer queued message", exact: true });
+		await queuedSteer.click();
+		await expect(queuedRow.getByRole("alert")).toContainText("Fixture queued steering failed.");
+		await expect(queuedSteer).toBeEnabled();
+		await queuedSteer.click();
+		await expect(timeline).toContainText("Held turn completed after promoting the queued message.", { timeout: 15_000 });
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
 });
+
+test("keeps eval cards bounded until their native detail disclosure opens", async () => {
+	const userData = await createUserData("gradivus-e2e-eval-");
+	const workspace = path.join(userData, "workspace");
+	await seed(userData, workspace, ["fixture-eval-chat"]);
+	const app = await launch(userData, workspace);
+	const page = await app.firstWindow();
+	const errors = collectRendererErrors(page);
+	try {
+		const composer = page.getByLabel("Message OMP");
+		await expect(composer).toBeVisible({ timeout: 20_000 });
+		await composer.fill("/fixture-eval");
+		await composer.press("Enter");
+
+		const activity = page.getByLabel("Eval activity");
+		await expect(activity).toBeVisible({ timeout: 10_000 });
+		await expect(activity).toContainText("python · js");
+		await expect(activity).toContainText("fixture analysis");
+		await expect(activity).toContainText("2 cells");
+		await expect(activity).toContainText("200 ms");
+		await expect(activity).not.toContainText("FIXTURE_EVAL_JSON_DETAIL");
+		await expect(activity).not.toContainText("tail-40");
+		await expect(activity.locator(".eval-preview pre")).toHaveCount(2);
+		await expect(activity.locator("details.eval-detail")).not.toHaveAttribute("open", "");
+
+		await activity.getByText("Eval details", { exact: true }).click();
+		await expect(activity).toContainText("FIXTURE_EVAL_JSON_DETAIL");
+		await expect(activity).toContainText("tail-40");
+		await expect(activity.getByRole("img", { name: "Eval output 1" })).toBeVisible();
+		await activity.getByText("Eval details", { exact: true }).click();
+		await activity.getByText("Eval details", { exact: true }).click();
+		await expect(activity).toContainText("FIXTURE_EVAL_JSON_DETAIL");
+		expect(errors).toEqual([]);
+	} finally {
+		await teardownElectronTest(app, userData);
+	}
+});
+
 
 test("renders semantic transcript messages", async () => {
 	const userData = await createUserData("gradivus-special-");

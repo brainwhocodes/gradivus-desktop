@@ -13,7 +13,12 @@
 	import type { SessionRecordV1 } from "../../../shared/contracts";
 	import type { ResolvedTheme } from "../../../shared/theme-palette";
 
-	type SessionLiveStatus = { status: "idle" | "running" | "error"; lastCompletedAt?: number; hasUnseenComplete?: boolean };
+	type SessionLiveStatus = {
+		status: "idle" | "running" | "error";
+		lastCompletedAt?: number;
+		hasUnseenComplete?: boolean;
+		planReview?: "ready" | "awaiting_refinement" | "applying" | "failed";
+	};
 
 	interface WorkspaceGroup {
 		cwd: string;
@@ -58,6 +63,15 @@
 		onToggleTheme,
 	}: Props = $props();
 
+	let collapsedWorkspaces = $state(new Set<string>());
+
+	function toggleWorkspace(cwd: string): void {
+		const next = new Set(collapsedWorkspaces);
+		if (next.has(cwd)) next.delete(cwd);
+		else next.add(cwd);
+		collapsedWorkspaces = next;
+	}
+
 	function formatRelativeTime(timestamp?: number | string): string {
 		if (!timestamp) return "";
 		const timeMs = typeof timestamp === "string" ? new Date(timestamp).getTime() : timestamp;
@@ -81,10 +95,20 @@
   </div>
 
   <div class="workspace-tree" aria-label="Workspaces and Chats">
-    {#each groups as group (group.cwd)}
+    {#each groups as group, groupIndex (group.cwd)}
       <div class="workspace-group-node" class:is-active-workspace={currentCwd === group.cwd}>
         <header class="workspace-folder-header">
-          <div class="folder-title-wrap" title={group.cwd}>
+          <button
+            type="button"
+            class="folder-title-wrap"
+            aria-expanded={!collapsedWorkspaces.has(group.cwd)}
+            aria-current={currentCwd === group.cwd ? "true" : undefined}
+            aria-controls={`workspace-chat-group-${groupIndex}`}
+            aria-label={`${collapsedWorkspaces.has(group.cwd) ? "Expand" : "Collapse"} workspace ${group.folderName}`}
+            title={group.cwd}
+            onclick={() => toggleWorkspace(group.cwd)}
+          >
+            <span class="folder-chevron" class:is-expanded={!collapsedWorkspaces.has(group.cwd)}><ArrowRight size={13} aria-hidden="true" /></span>
             <span class="folder-glyph"><Folder size={15} aria-hidden="true" /></span>
             <strong class="folder-name">{group.folderName}</strong>
             <span class="folder-count">{group.sessions.length}</span>
@@ -93,7 +117,7 @@
                 <span class="radar-dot"></span>
               </span>
             {/if}
-          </div>
+          </button>
           <button
             type="button"
             class="btn-folder-new-chat"
@@ -106,7 +130,8 @@
           </button>
         </header>
 
-        <div class="workspace-chat-sublist" role="tree" aria-label={`${group.folderName} chats`}>
+        {#if !collapsedWorkspaces.has(group.cwd)}
+        <div id={`workspace-chat-group-${groupIndex}`} class="workspace-chat-sublist" role="tree" aria-label={`${group.folderName} chats`}>
           {#each group.sessions as session (session.id)}
             {@const live = liveStatus.get(session.id)}
             {@const isSelected = activeId === session.id}
@@ -145,6 +170,17 @@
 
               <span class="session-tree-info">
                 <strong class="session-tree-title" title={displayName(session)}>{displayName(session)}</strong>
+                {#if live?.planReview}
+                  <span class={`session-plan-review status-${live.planReview}`}>
+                    {live.planReview === "ready"
+                      ? "Plan review ready"
+                      : live.planReview === "awaiting_refinement"
+                        ? "Plan refinement requested"
+                        : live.planReview === "applying"
+                          ? "Plan action applying"
+                          : "Plan review needs attention"}
+                  </span>
+                {/if}
                 {#if session.lastOpenedAt || session.createdAt}
                   <span class="session-tree-time">{formatRelativeTime(session.lastOpenedAt || session.createdAt)}</span>
                 {/if}
@@ -160,6 +196,7 @@
             </div>
           {/each}
         </div>
+        {/if}
       </div>
     {:else}
       <div class="rail-empty">

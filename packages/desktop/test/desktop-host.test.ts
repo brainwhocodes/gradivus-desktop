@@ -4,7 +4,13 @@ import * as path from "node:path";
 import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAgentSwatch } from "../src/shared/agent-swatch";
-import type { GradivusEvent, ProcessState, PromptCompositionPart, SessionRecordV1 } from "../src/shared/contracts";
+import type {
+	GradivusEvent,
+	PlanReviewView,
+	ProcessState,
+	PromptCompositionPart,
+	SessionRecordV1,
+} from "../src/shared/contracts";
 
 function composition(...parts: PromptCompositionPart[]) {
 	return { parts };
@@ -20,7 +26,7 @@ const processHarness = vi.hoisted(() => ({
 		emitExtension: (request: unknown) => void;
 	}>,
 	promptResolvers: new Map<string, () => void>(),
-	promptCalls: [] as Array<{ text: string; images?: unknown[] }>,
+	promptCalls: [] as Array<{ text: string; images?: unknown[]; streamingBehavior?: "steer" | "followUp" }>,
 	requestCalls: [] as Array<Record<string, unknown>>,
 	messages: [] as unknown[],
 	branchedMessages: [] as unknown[],
@@ -31,14 +37,16 @@ const processHarness = vi.hoisted(() => ({
 	branchData: { text: "", images: [] as unknown[], cancelled: false },
 	statePatch: {} as Record<string, unknown>,
 	branchedStatePatch: {} as Record<string, unknown>,
+	todoState: { phases: [], revision: 0 } as { phases: unknown[]; revision: number },
 	branched: false,
 	failNextCommand: false,
 	failNextPrompt: false,
+	planReviewUpdateGate: undefined as Promise<void> | undefined,
 }));
 
 vi.mock("electron", () => ({
 	app: { isPackaged: false, getPath: vi.fn(() => os.tmpdir()) },
-	dialog: { showOpenDialog: vi.fn() },
+	dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
 	shell: { openExternal: vi.fn(), openPath: vi.fn(), showItemInFolder: vi.fn() },
 }));
 
@@ -46,17 +54,18 @@ vi.mock("../src/main/rpc-process", () => ({
 	RpcProcess: class {
 		readonly options: {
 			onState: (state: ProcessState, error?: string) => void;
-			onEvent: (event: unknown) => void;
+			onEvent: (event: unknown, client: unknown, incarnation: string) => void;
 			onExtension: (request: unknown) => void;
 		};
 		sessionFile?: string;
 		startCalls = 0;
 		stopCalls = 0;
 		state: ProcessState = "stopped";
+		incarnation = `incarnation-${processHarness.instances.length + 1}`;
 		client:
 			| {
 					request: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
-					prompt: (text: string) => Promise<string>;
+					prompt: (text: string, images?: unknown[], streamingBehavior?: "steer" | "followUp") => Promise<string>;
 					onEvent: (listener: (event: unknown) => void) => () => void;
 					sendExtensionResponse: () => void;
 			  }
@@ -64,7 +73,7 @@ vi.mock("../src/main/rpc-process", () => ({
 
 		constructor(options: {
 			onState: (state: ProcessState, error?: string) => void;
-			onEvent: (event: unknown) => void;
+			onEvent: (event: unknown, client: unknown, incarnation: string) => void;
 			onExtension: (request: unknown) => void;
 		}) {
 			this.options = options;
@@ -76,7 +85,7 @@ vi.mock("../src/main/rpc-process", () => ({
 		}
 
 		emitEvent(event: unknown): void {
-			this.options.onEvent(event);
+			this.options.onEvent(event, this.client, this.incarnation);
 		}
 
 		async start(sessionFile?: string) {
@@ -108,7 +117,7 @@ vi.mock("../src/main/rpc-process", () => ({
 									autoRetryEnabled: true,
 									tokensPerSecond: null,
 									queuedMessageCount: 0,
-									todoPhases: [],
+									todoState: processHarness.todoState,
 									...(processHarness.branched ? processHarness.branchedStatePatch : processHarness.statePatch),
 								},
 							};
@@ -131,6 +140,37 @@ vi.mock("../src/main/rpc-process", () => ({
 						case "branch":
 							processHarness.branched = processHarness.branchData.cancelled !== true;
 							return { success: true, command: "branch", data: processHarness.branchData };
+						case "request_plan_review":
+							return {
+								success: true,
+								command: "request_plan_review",
+								data: { planReview: processHarness.statePatch.planReview },
+							};
+						case "update_plan_review": {
+							await processHarness.planReviewUpdateGate;
+							const current = processHarness.statePatch.planReview;
+							const planReview =
+								typeof current === "object" && current !== null
+									? {
+											...current,
+											content: request.content,
+											annotationState: request.annotationState,
+											revision: "revision-updated",
+										}
+									: current;
+							processHarness.statePatch = { ...processHarness.statePatch, planReview };
+							return {
+								success: true,
+								command: "update_plan_review",
+								data: { planReview },
+							};
+						}
+						case "resolve_plan_review":
+							return {
+								success: true,
+								command: "resolve_plan_review",
+								data: { accepted: true, ...(request.decision && { awaitingRefinement: false }) },
+							};
 						case "get_settings":
 							return {
 								success: true,
@@ -205,12 +245,31 @@ vi.mock("../src/main/rpc-process", () => ({
 								command: "get_agent_hub",
 								data: { agents: processHarness.agentHubAgents },
 							};
+						case "set_todos":
+							if (request.expectedRevision !== processHarness.todoState.revision) {
+								return {
+									success: false,
+									command: "set_todos",
+									error: "todo conflict",
+									code: "todo_conflict",
+								};
+							}
+							processHarness.todoState = {
+								phases: request.phases as unknown[],
+								revision: processHarness.todoState.revision + 1,
+							};
+							this.options.onEvent({
+								type: "todo_update",
+								phases: processHarness.todoState.phases,
+								revision: processHarness.todoState.revision,
+							});
+							return { success: true, command: "set_todos", data: { todoState: processHarness.todoState } };
 						default:
 							return { success: true, command: request.type, data: {} };
 					}
 				},
-				prompt: (text, images) => {
-					processHarness.promptCalls.push({ text, images });
+				prompt: (text, images, streamingBehavior) => {
+					processHarness.promptCalls.push({ text, images, ...(streamingBehavior ? { streamingBehavior } : {}) });
 					if (processHarness.failNextPrompt) {
 						processHarness.failNextPrompt = false;
 						return Promise.reject(new Error("prompt failed"));
@@ -285,6 +344,8 @@ afterEach(async () => {
 	processHarness.statePatch = {};
 	processHarness.branchedStatePatch = {};
 	processHarness.branched = false;
+	processHarness.planReviewUpdateGate = undefined;
+	processHarness.todoState = { phases: [], revision: 0 };
 	vi.clearAllMocks();
 });
 
@@ -298,6 +359,27 @@ function sessionRecord(id: string): SessionRecordV1 {
 		title: null,
 		createdAt: "2026-01-01T00:00:00.000Z",
 		lastOpenedAt: "2026-01-01T00:00:00.000Z",
+	};
+}
+function planReviewFixture(overrides: Partial<PlanReviewView> = {}): PlanReviewView {
+	return {
+		id: "plan-019c0000-0000-7000-8000-000000000001",
+		title: "FEATURE",
+		planFilePath: "local://feature-plan.md",
+		revision: "revision-ready",
+		status: "ready",
+		phase: "ready",
+		content: "# Feature\\n\\nShip safely.\\n",
+		annotationState: { annotations: [], deletedSections: [], additionalFeedback: "" },
+		suggestedSaveName: "FEATURE_PLAN.md",
+		contextUsage: { tokens: 2_000, contextWindow: 32_000, percent: 6.25 },
+		keepContextDisabled: false,
+		executionModels: [
+			{ role: "default", provider: "mock", modelId: "default", label: "Default" },
+			{ role: "slow", provider: "mock", modelId: "slow", label: "Slow" },
+		],
+		defaultExecutionRole: "default",
+		...overrides,
 	};
 }
 
@@ -335,13 +417,150 @@ it("transports files and shell agent settings while filtering unsupported catego
 	});
 });
 
+it("uses one-at-a-time queue defaults when an older state omits delivery modes", async () => {
+	processHarness.statePatch = { steeringMode: undefined, followUpMode: undefined };
+	const host = await createHost(["one"]);
+
+	await expect(host.openSession("one")).resolves.toMatchObject({
+		steeringMode: "one-at-a-time",
+		followUpMode: "one-at-a-time",
+		interruptMode: "immediate",
+	});
+});
+it("hydrates trusted plan review state and retains it across malformed pushes", async () => {
+	const review = planReviewFixture();
+	processHarness.statePatch = { capabilities: { planReview: 1 }, planReview: review };
+	const host = await createHost(["one"]);
+	const snapshot = await host.openSession("one");
+	expect(snapshot).toMatchObject({ planReviewSupported: true, planReview: review });
+
+	processHarness.instances[0]!.emitEvent({
+		type: "plan_review_update",
+		planReview: { ...review, status: "unknown" },
+	});
+	await expect(host.openSession("one")).resolves.toMatchObject({
+		planReview: {
+			id: review.id,
+			content: review.content,
+			error: expect.stringContaining("invalid"),
+		},
+	});
+});
+
+it("serializes plan updates before decisions on one runtime incarnation", async () => {
+	const review = planReviewFixture();
+	processHarness.statePatch = { capabilities: { planReview: 1 }, planReview: review };
+	const host = await createHost(["one"]);
+	await host.openSession("one");
+	const gate = Promise.withResolvers<void>();
+	processHarness.planReviewUpdateGate = gate.promise;
+
+	const update = host.updatePlanReview("one", review.id, "# Feature\\n\\nShip with rollback.\\n", review.revision, {
+		annotations: [],
+		deletedSections: [],
+		additionalFeedback: "Keep rollback explicit.",
+	});
+	await vi.waitFor(() =>
+		expect(processHarness.requestCalls.some(call => call.type === "update_plan_review")).toBe(true),
+	);
+	const resolution = host.resolvePlanReview("one", review.id, "revision-updated", {
+		kind: "approve",
+		context: "keep",
+	});
+	await Promise.resolve();
+	expect(processHarness.requestCalls.some(call => call.type === "resolve_plan_review")).toBe(false);
+
+	gate.resolve();
+	await expect(update).resolves.toMatchObject({ revision: "revision-updated" });
+	await expect(resolution).resolves.toEqual({ accepted: true });
+	expect(
+		processHarness.requestCalls
+			.filter(call => call.type === "update_plan_review" || call.type === "resolve_plan_review")
+			.map(call => call.type),
+	).toEqual(["update_plan_review", "resolve_plan_review"]);
+});
+
+it("replaces the renderer session atomically after a fresh approval reset", async () => {
+	const review = planReviewFixture({ status: "applying", phase: "accepted" });
+	processHarness.statePatch = { capabilities: { planReview: 1 }, planReview: review };
+	const host = await createHost(["one"]);
+	const send = vi.fn();
+	host.setWindow({ webContents: { send } } as never);
+	await host.openSession("one");
+	send.mockClear();
+	processHarness.statePatch = {
+		capabilities: { planReview: 1 },
+		sessionId: "omp-reset",
+		sessionFile: "reset.jsonl",
+		planReview: undefined,
+	};
+
+	processHarness.instances[0]!.emitEvent({
+		type: "plan_review_update",
+		planReview: review,
+		sessionReset: { sessionId: "omp-reset", sessionFile: "reset.jsonl" },
+	});
+	await vi.waitFor(() =>
+		expect(send.mock.calls.some(([, event]) => (event as GradivusEvent).type === "session_reset")).toBe(true),
+	);
+	const resetEvent = send.mock.calls.find(([, event]) => (event as GradivusEvent).type === "session_reset")?.[1] as
+		| GradivusEvent
+		| undefined;
+	expect(resetEvent?.snapshot).toMatchObject({
+		record: { ompSessionId: "omp-reset", sessionFile: "reset.jsonl" },
+		planReviewSupported: true,
+	});
+	expect(resetEvent?.snapshot?.planReview).toBeUndefined();
+	expect(send.mock.calls.map(([, event]) => (event as GradivusEvent).type)).toEqual(["session_reset"]);
+});
+
+it("refreshes the authoritative queued-message count after queue acknowledgements", async () => {
+	const host = await createHost(["one"]);
+	await host.openSession("one");
+	processHarness.statePatch = { queuedMessageCount: 2 };
+
+	await host.queueFollowUp("one", composition({ type: "text", text: "later" }));
+	await expect(host.openSession("one")).resolves.toMatchObject({ queuedMessageCount: 2 });
+	expect(processHarness.requestCalls.slice(-2).map(call => call.type)).toEqual(["follow_up", "get_state"]);
+
+	processHarness.statePatch = { queuedMessageCount: 1 };
+	await host.steerQueued("one", composition({ type: "text", text: "later" }));
+	await expect(host.openSession("one")).resolves.toMatchObject({ queuedMessageCount: 1 });
+	expect(processHarness.requestCalls.slice(-2).map(call => call.type)).toEqual(["steer_queued", "get_state"]);
+});
+
 describe("DesktopHost runtime supervision", () => {
 	it("registers restored sessions without starting their processes", async () => {
 		await createHost(["one", "two"]);
 
 		expect(processHarness.instances).toHaveLength(2);
+
 		expect(processHarness.instances.map(instance => instance.startCalls)).toEqual([0, 0]);
 		expect(processHarness.instances.map(instance => instance.state)).toEqual(["stopped", "stopped"]);
+	});
+	it("accepts revision-checked hierarchical todo edits and rejects stale writes", async () => {
+		const host = await createHost(["one"]);
+		const send = vi.fn();
+		host.setWindow({ webContents: { send } } as never);
+		await host.openSession("one");
+		const phases = [
+			{
+				id: "phase-work",
+				name: "Work",
+				tasks: [
+					{ id: "todo-parent", content: "parent", status: "pending" as const },
+					{ id: "todo-child", content: "child", status: "in_progress" as const, parentId: "todo-parent" },
+				],
+			},
+		];
+
+		const updated = await host.setTodos("one", phases, 0, "desktop indent child");
+		expect(updated).toEqual({ phases, revision: 1 });
+		await vi.waitFor(() => expect(JSON.stringify(send.mock.calls)).toContain("todo_update"));
+		await expect(host.openSession("one")).resolves.toMatchObject({ todoState: updated });
+
+		await expect(host.setTodos("one", [], 0, "stale clear")).rejects.toThrow("todo conflict");
+		await expect(host.openSession("one")).resolves.toMatchObject({ todoState: updated });
 	});
 
 	it("emits state-only runtime reports and includes the report in snapshots", async () => {
@@ -504,6 +723,7 @@ describe("DesktopHost runtime supervision", () => {
 		expect(processHarness.promptCalls.at(-1)).toMatchObject({
 			text: expect.stringContaining('File "notes.md": @"'),
 			images: [{ type: "image", mimeType: "image/png" }],
+			streamingBehavior: "steer",
 		});
 		const sentText = processHarness.promptCalls.at(-1)?.text ?? "";
 		expect(sentText.indexOf(image!.reference)).toBeLessThan(sentText.indexOf(" then "));
@@ -512,7 +732,7 @@ describe("DesktopHost runtime supervision", () => {
 		await host.queueFollowUp("one", orderedComposition);
 		expect(processHarness.requestCalls.filter(request => request.type === "steer")).toHaveLength(1);
 		expect(processHarness.requestCalls.filter(request => request.type === "follow_up")).toHaveLength(1);
-		expect(processHarness.requestCalls.at(-1)).toMatchObject({
+		expect(processHarness.requestCalls.findLast(request => request.type === "follow_up")).toMatchObject({
 			type: "follow_up",
 			message: expect.stringContaining('File "notes.md": @"'),
 			images: [{ type: "image", mimeType: "image/png" }],
@@ -700,6 +920,71 @@ describe("DesktopHost runtime supervision", () => {
 		});
 		expect(result.requestId).toBeUndefined();
 		expect(processHarness.promptCalls).toHaveLength(1);
+	});
+
+	it("dehydrates eval activity on snapshots and live pushes, then loads bounded detail on demand", async () => {
+		const host = await createHost(["one"]);
+		const send = vi.fn();
+		host.setWindow({ webContents: { send } } as never);
+		await host.openSession("one");
+		const runtime = processHarness.instances[0]!;
+		runtime.emitEvent({
+			type: "tool_execution_start",
+			toolCallId: "eval-detail",
+			toolName: "eval",
+			args: { language: "py", title: "bounded eval", code: "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh" },
+		});
+		runtime.emitEvent({
+			type: "tool_execution_end",
+			toolCallId: "eval-detail",
+			result: {
+				details: {
+					languages: ["python"],
+					cells: [
+						{
+							index: 0,
+							title: "bounded eval",
+							language: "python",
+							code: "first\nsecond\nthird\nfourth\nfifth\nsixth\nFULL_CELL_TAIL_SENTINEL",
+							output: "one\ntwo\nthree\nfour\nfive\nsix\nFULL_OUTPUT_TAIL_SENTINEL",
+							status: "complete",
+							durationMs: 42,
+						},
+					],
+					jsonOutputs: [{ value: "RAW_JSON_SENTINEL" }],
+					images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+				},
+			},
+			isError: false,
+		});
+
+		await vi.waitFor(() => expect(JSON.stringify(send.mock.calls)).toContain("eval-detail"));
+		const snapshot = await host.openSession("one");
+		const item = snapshot.timeline.find(candidate => candidate.toolCallId === "eval-detail");
+		expect(item).toMatchObject({
+			toolName: "eval",
+			toolActivity: {
+				operation: "eval",
+				title: "bounded eval",
+				cellCount: 1,
+				durationMs: 42,
+				detailsLoaded: false,
+				omittedImageCount: 1,
+			},
+		});
+		expect(item).not.toHaveProperty("args");
+		expect(item).not.toHaveProperty("result");
+		expect(item).not.toHaveProperty("detail");
+		expect(item).not.toHaveProperty("images");
+		expect(JSON.stringify(item)).not.toContain("RAW_JSON_SENTINEL");
+		expect(JSON.stringify(item)).not.toContain("FULL_CELL_TAIL_SENTINEL");
+		expect(JSON.stringify(send.mock.calls)).not.toContain("RAW_JSON_SENTINEL");
+		expect(JSON.stringify(send.mock.calls)).not.toContain("FULL_CELL_TAIL_SENTINEL");
+
+		const detail = await host.loadTimelineToolDetail("one", item!.id);
+		expect(detail).toMatchObject({ operation: "eval", detailsLoaded: true });
+		expect(JSON.stringify(detail)).toContain("RAW_JSON_SENTINEL");
+		expect(JSON.stringify(detail)).toContain("FULL_CELL_TAIL_SENTINEL");
 	});
 
 	it("preserves nested subagents across snapshots, events, and transcript retrieval", async () => {

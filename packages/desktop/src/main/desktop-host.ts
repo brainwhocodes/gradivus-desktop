@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { parseImageMetadata } from "@oh-my-pi/pi-utils/mime";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { WorkspaceDocumentV1, WorkspacePrincipalV1 } from "@oh-my-pi/pi-wire";
@@ -13,13 +14,18 @@ import type {
 	AgentHubMessagePage,
 	AgentHubMetrics,
 	AgentHubSnapshot,
+	AgentPromptScope,
+	AgentPromptView,
 	AgentSettingOption,
 	AgentSettingValue,
 	AgentSettingView,
 	AuthAccountView,
 	AuthEvent,
 	BootstrapSnapshot,
+	BrowserTabInventoryView,
+	ContextMutationResult,
 	EditMessageResult,
+	ExportHtmlResult,
 	ExtensionView,
 	FileChangeDisposition,
 	FileDiffView,
@@ -30,26 +36,40 @@ import type {
 	OAuthAccountsView,
 	OAuthProviderAccountsView,
 	OpenRouterModelRouting,
+	PlanReviewResolutionResult,
+	PlanReviewView,
 	ProcessState,
 	PromptAttachmentView,
 	PromptImageContent,
 	QueueMode,
 	RuntimeReportView,
 	SessionRecordV1,
+	SessionRetryState,
 	SessionSnapshot,
+	SessionStatsView,
 	SlashCommand,
 	SubagentView,
 	ThinkingLevel,
 	TimelineItem,
 	TimelinePage,
+	TimelineToolActivity,
+	TodoPhase,
+	TodoState,
 	WorkspaceImagePreview,
 } from "../shared/contracts";
 import {
+	MAX_INLINE_PROMPT_BYTES,
 	MAX_PROMPT_ATTACHMENT_BATCH_BYTES,
 	MAX_PROMPT_ATTACHMENT_COUNT,
 	MAX_PROMPT_IMAGE_BYTES,
 } from "../shared/contracts";
-import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "../shared/rpc-wire";
+import type {
+	RpcExtensionUIRequest,
+	RpcExtensionUIResponse,
+	RpcHostToolCallRequest,
+	RpcHostToolCancelRequest,
+	RpcHostToolResultBody,
+} from "../shared/rpc-wire";
 import { loadPersistedGradivusSettings } from "./app-settings";
 import {
 	assertBoundedText,
@@ -58,6 +78,7 @@ import {
 	resolveWorkspaceTarget,
 	safeExternalUrl,
 } from "./guards";
+import type { PaneBroker } from "./pane-broker";
 import { PromptAttachmentStore, type ResolvedPromptComposition } from "./prompt-attachments";
 import type { RpcClient } from "./rpc-client";
 import { RpcProcess } from "./rpc-process";
@@ -132,11 +153,14 @@ type RuntimeSession = {
 	subagents: SubagentView[];
 	agentHub?: AgentHubSnapshot;
 	commands: SlashCommand[];
+	browserInventory: BrowserTabInventoryView[];
 	models?: ModelOption[];
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	fastMode?: boolean;
 	planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
+	planReviewSupported: boolean;
+	planReview?: PlanReviewView;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	interruptMode?: InterruptMode;
@@ -146,7 +170,10 @@ type RuntimeSession = {
 	contextWindow?: number;
 	tokensPerSecond?: number | null;
 	queuedMessageCount?: number;
-	todoPhases?: SessionSnapshot["todoPhases"];
+	isStreaming?: boolean;
+	isCompacting?: boolean;
+	retryState?: SessionRetryState;
+	todoState: TodoState;
 	outstandingExtensions: Map<string, RpcExtensionUIRequest>;
 	fileDiffCache: Map<string, { expiresAt: number; request: Promise<FileDiffView> }>;
 };
@@ -163,8 +190,11 @@ interface StateData {
 	sessionFile?: string;
 	model?: { provider: string; id: string };
 	thinkingLevel?: ThinkingLevel;
+	sessionName?: string;
 	fastModeEnabled: boolean;
 	planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
+	capabilities?: { planReview?: number };
+	planReview?: unknown;
 	steeringMode: QueueMode;
 	followUpMode: QueueMode;
 	interruptMode: InterruptMode;
@@ -173,8 +203,9 @@ interface StateData {
 	contextUsage?: { tokens: number; contextWindow: number };
 	tokensPerSecond: number | null;
 	isStreaming?: boolean;
+	isCompacting?: boolean;
 	queuedMessageCount: number;
-	todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
+	todoState: TodoState;
 }
 async function loadHistory(client: RpcClient): Promise<unknown[]> {
 	const paged = await client.request({ type: "get_messages_page", limit: 256 });
@@ -226,12 +257,229 @@ function normalizeBranchImages(value: unknown): PromptImageContent[] {
 		) {
 			throw new Error("Branch image was invalid");
 		}
+
 		const bytes = Buffer.byteLength(image.data, "base64");
 		if (bytes > MAX_PROMPT_IMAGE_BYTES) throw new Error("Branch image exceeds the size limit");
 		totalBytes += bytes;
 		if (totalBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) throw new Error("Branch images exceed the batch size limit");
 		return { type: "image", data: image.data, mimeType: image.mimeType };
 	});
+}
+function optionalInstructions(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new TypeError(`${label} must be text`);
+	const normalized = value.trim();
+	if (normalized.length > 16_384) throw new RangeError(`${label} is too long`);
+	return normalized || undefined;
+}
+
+function sessionStatNumber(value: unknown, label: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+		throw new Error(`Session statistics field ${label} was invalid`);
+	}
+	return value;
+}
+
+function normalizeSessionStats(value: unknown): SessionStatsView {
+	if (!isRecord(value) || !isRecord(value.tokens) || typeof value.sessionId !== "string") {
+		throw new Error("Session statistics response was invalid");
+	}
+	const context = isRecord(value.contextUsage) ? value.contextUsage : undefined;
+	return {
+		...(typeof value.sessionFile === "string" ? { sessionFile: value.sessionFile } : {}),
+		sessionId: value.sessionId,
+		userMessages: sessionStatNumber(value.userMessages, "userMessages"),
+		assistantMessages: sessionStatNumber(value.assistantMessages, "assistantMessages"),
+		toolCalls: sessionStatNumber(value.toolCalls, "toolCalls"),
+		toolResults: sessionStatNumber(value.toolResults, "toolResults"),
+		totalMessages: sessionStatNumber(value.totalMessages, "totalMessages"),
+		tokens: {
+			input: sessionStatNumber(value.tokens.input, "tokens.input"),
+			output: sessionStatNumber(value.tokens.output, "tokens.output"),
+			reasoning: sessionStatNumber(value.tokens.reasoning, "tokens.reasoning"),
+			cacheRead: sessionStatNumber(value.tokens.cacheRead, "tokens.cacheRead"),
+			cacheWrite: sessionStatNumber(value.tokens.cacheWrite, "tokens.cacheWrite"),
+			total: sessionStatNumber(value.tokens.total, "tokens.total"),
+		},
+		premiumRequests: sessionStatNumber(value.premiumRequests, "premiumRequests"),
+		cost: sessionStatNumber(value.cost, "cost"),
+		...(context
+			? {
+					contextUsage: {
+						tokens: sessionStatNumber(context.tokens, "contextUsage.tokens"),
+						contextWindow: sessionStatNumber(context.contextWindow, "contextUsage.contextWindow"),
+						...(typeof context.percentage === "number" && Number.isFinite(context.percentage)
+							? { percentage: context.percentage }
+							: {}),
+					},
+				}
+			: {}),
+	};
+}
+const PLAN_REVIEW_STATUSES = new Set(["ready", "awaiting_refinement", "applying", "failed"]);
+const PLAN_REVIEW_PHASES = new Set([
+	"ready",
+	"awaiting_refinement",
+	"accepted",
+	"mode_exited",
+	"session_reset",
+	"compaction_finished",
+	"prompt_admitted",
+	"failed",
+]);
+
+function normalizePlanReview(value: unknown): PlanReviewView {
+	if (!isRecord(value)) throw new Error("Plan review payload was invalid");
+	const id = assertBoundedText(value.id, "plan review id");
+	const title = assertBoundedText(value.title, "plan review title");
+	const planFilePath = assertBoundedText(value.planFilePath, "plan review path");
+	const revision = assertBoundedText(value.revision, "plan review revision");
+	const content = assertBoundedText(value.content, "plan review content");
+	const suggestedSaveName = assertBoundedText(value.suggestedSaveName, "plan review save name");
+	if (
+		!id.startsWith("plan-") ||
+		!planFilePath.startsWith("local://") ||
+		planFilePath.includes("\\0") ||
+		planFilePath.includes("\\") ||
+		planFilePath.slice("local://".length).split("/").includes("..")
+	) {
+		throw new Error("Plan review identity or path was invalid");
+	}
+	if (typeof value.status !== "string" || !PLAN_REVIEW_STATUSES.has(value.status)) {
+		throw new Error("Plan review status was invalid");
+	}
+	if (typeof value.phase !== "string" || !PLAN_REVIEW_PHASES.has(value.phase)) {
+		throw new Error("Plan review phase was invalid");
+	}
+	if (!isRecord(value.annotationState)) throw new Error("Plan review annotations were invalid");
+	if (Buffer.byteLength(JSON.stringify(value.annotationState), "utf8") > MAX_INLINE_PROMPT_BYTES) {
+		throw new RangeError("Plan review annotations exceed 512 KiB");
+	}
+	if (
+		!Array.isArray(value.annotationState.annotations) ||
+		!Array.isArray(value.annotationState.deletedSections) ||
+		typeof value.annotationState.additionalFeedback !== "string"
+	) {
+		throw new Error("Plan review annotations were invalid");
+	}
+	const annotations: PlanReviewView["annotationState"]["annotations"] = value.annotationState.annotations.map(
+		annotationValue => {
+			if (!isRecord(annotationValue) || !isRecord(annotationValue.section) || !isRecord(annotationValue.target)) {
+				throw new Error("Plan review annotation was invalid");
+			}
+			const sectionIndex = annotationValue.section.index;
+			if (!Number.isSafeInteger(sectionIndex) || (sectionIndex as number) < 0) {
+				throw new Error("Plan review annotation section was invalid");
+			}
+			const section = {
+				index: sectionIndex as number,
+				title: assertBoundedText(annotationValue.section.title, "plan review annotation title"),
+				...(Array.isArray(annotationValue.section.path)
+					? {
+							path: annotationValue.section.path.map(segment =>
+								assertBoundedText(segment, "plan review annotation path"),
+							),
+						}
+					: {}),
+				...(typeof annotationValue.section.contentHash === "string"
+					? {
+							contentHash: assertBoundedText(
+								annotationValue.section.contentHash,
+								"plan review annotation content hash",
+							),
+						}
+					: {}),
+			};
+			let target: PlanReviewView["annotationState"]["annotations"][number]["target"];
+			if (annotationValue.target.kind === "section") {
+				target = { kind: "section" };
+			} else if (
+				annotationValue.target.kind === "line" &&
+				Number.isSafeInteger(annotationValue.target.row) &&
+				(annotationValue.target.row as number) >= 0
+			) {
+				target = {
+					kind: "line",
+					row: annotationValue.target.row as number,
+					context: assertBoundedText(annotationValue.target.context, "plan review line context"),
+					...(annotationValue.target.contextTruncated === true ? { contextTruncated: true } : {}),
+				};
+			} else {
+				throw new Error("Plan review annotation target was invalid");
+			}
+			return {
+				section,
+				target,
+				note: assertBoundedText(annotationValue.note, "plan review annotation note"),
+			};
+		},
+	);
+	const annotationState: PlanReviewView["annotationState"] = {
+		annotations,
+		deletedSections: value.annotationState.deletedSections.map(section =>
+			assertBoundedText(section, "deleted plan section"),
+		),
+		additionalFeedback: assertBoundedText(value.annotationState.additionalFeedback, "additional plan feedback"),
+	};
+	if (!Array.isArray(value.executionModels)) throw new Error("Plan review execution models were invalid");
+	const executionModels: PlanReviewView["executionModels"] = value.executionModels.map(modelValue => {
+		if (!isRecord(modelValue)) throw new Error("Plan review execution model was invalid");
+		return {
+			role: assertBoundedText(modelValue.role, "plan review execution role"),
+			provider: assertBoundedText(modelValue.provider, "plan review execution provider"),
+			modelId: assertBoundedText(modelValue.modelId, "plan review execution model"),
+			label: assertBoundedText(modelValue.label, "plan review execution label"),
+			...(typeof modelValue.thinkingLevel === "string"
+				? { thinkingLevel: assertBoundedText(modelValue.thinkingLevel, "plan review thinking level") }
+				: {}),
+		};
+	});
+	const roles = new Set(executionModels.map(model => model.role));
+	if (roles.size !== executionModels.length) throw new Error("Plan review execution roles were duplicated");
+	const defaultExecutionRole =
+		typeof value.defaultExecutionRole === "string"
+			? assertBoundedText(value.defaultExecutionRole, "default plan execution role")
+			: undefined;
+	if (defaultExecutionRole && !roles.has(defaultExecutionRole)) {
+		throw new Error("Default plan execution role was invalid");
+	}
+	let contextUsage: PlanReviewView["contextUsage"];
+	if (value.contextUsage !== undefined) {
+		if (!isRecord(value.contextUsage)) throw new Error("Plan review context usage was invalid");
+		const tokens = value.contextUsage.tokens;
+		const contextWindow = value.contextUsage.contextWindow;
+		const percent = value.contextUsage.percent;
+		if (
+			typeof tokens !== "number" ||
+			!Number.isFinite(tokens) ||
+			tokens < 0 ||
+			typeof contextWindow !== "number" ||
+			!Number.isFinite(contextWindow) ||
+			contextWindow <= 0 ||
+			typeof percent !== "number" ||
+			!Number.isFinite(percent) ||
+			percent < 0
+		) {
+			throw new Error("Plan review context usage was invalid");
+		}
+		contextUsage = { tokens, contextWindow, percent };
+	}
+	return {
+		id,
+		title,
+		planFilePath,
+		revision,
+		status: value.status as PlanReviewView["status"],
+		phase: value.phase as PlanReviewView["phase"],
+		content,
+		annotationState,
+		suggestedSaveName,
+		...(contextUsage ? { contextUsage } : {}),
+		keepContextDisabled: value.keepContextDisabled === true,
+		executionModels,
+		...(defaultExecutionRole ? { defaultExecutionRole } : {}),
+		...(typeof value.error === "string" ? { error: assertBoundedText(value.error, "plan review error") } : {}),
+	};
 }
 
 function isWindowUsable(window?: BrowserWindow): boolean {
@@ -240,6 +488,19 @@ function isWindowUsable(window?: BrowserWindow): boolean {
 	if (window.webContents && typeof window.webContents.isDestroyed === "function" && window.webContents.isDestroyed())
 		return false;
 	return Boolean(window.webContents?.send);
+}
+interface PlanReviewResetGate {
+	incarnation: string;
+	frames: Array<{ event: unknown; sourceClient: RpcClient; incarnation: string }>;
+}
+class PlanReviewRpcError extends Error {
+	constructor(
+		message: string,
+		readonly code: string | undefined,
+	) {
+		super(message);
+		this.name = "PlanReviewRpcError";
+	}
 }
 
 export class DesktopHost {
@@ -265,6 +526,13 @@ export class DesktopHost {
 		| undefined;
 	#document: WorkspaceDocumentV1 | undefined;
 	#principal: WorkspacePrincipalV1 | undefined;
+	#paneBroker: PaneBroker | undefined;
+	#paneBrokerUnavailable = new Map<string, string>();
+	#hostToolRefreshQueue = Promise.resolve();
+	#pendingHostToolCalls = new Map<string, { runtimeId: string; incarnation: string; controller: AbortController }>();
+	#planReviewMutationTails = new Map<string, Promise<void>>();
+	#planReviewResetGates = new Map<string, PlanReviewResetGate>();
+	#suppressedEventSessions = new Set<string>();
 
 	constructor(userDataPath: string) {
 		this.#registry = new SessionRegistry(userDataPath);
@@ -290,8 +558,106 @@ export class DesktopHost {
 		return this.#document;
 	}
 
+	paneAutomationSession(sessionId: string):
+		| {
+				record: SessionRecordV1;
+				principal: WorkspacePrincipalV1;
+				incarnation: string;
+				automationUnavailableReason?: string;
+		  }
+		| undefined {
+		const runtime = this.#runtimes.get(sessionId);
+		const incarnation = runtime?.process.incarnation;
+		if (!runtime || !incarnation || !this.#principal) return undefined;
+		return {
+			record: runtime.record,
+			principal: this.#principal,
+			incarnation,
+			...(this.#paneBrokerUnavailable.has(sessionId)
+				? { automationUnavailableReason: this.#paneBrokerUnavailable.get(sessionId) }
+				: {}),
+		};
+	}
+
+	browserInventoryForSession(sessionId: string): BrowserTabInventoryView[] {
+		const runtime = this.#runtimes.get(sessionId);
+		return runtime ? structuredClone(runtime.browserInventory) : [];
+	}
+
+	async closeBrowserTabForSession(
+		sessionIdInput: unknown,
+		nameInput: unknown,
+		confirm = false,
+	): Promise<{
+		closed: boolean;
+		requiresConfirmation: boolean;
+		tab?: BrowserTabInventoryView;
+		inventory: BrowserTabInventoryView[];
+	}> {
+		const sessionId = typeof sessionIdInput === "string" ? sessionIdInput.trim() : "";
+		const name = typeof nameInput === "string" ? nameInput.trim() : "";
+		if (!sessionId) throw new TypeError("Invalid session id");
+		if (!name || name.length > 100 || name.includes("\0")) throw new TypeError("Invalid browser tab name");
+		const runtime = this.#requiredRuntime(sessionId);
+		const client = runtime.process.client;
+		if (!client) {
+			return {
+				closed: false,
+				requiresConfirmation: false,
+				inventory: structuredClone(runtime.browserInventory),
+			};
+		}
+		const response = await client.request({ type: "close_browser_tab", name, confirm });
+		if (!response.success || response.command !== "close_browser_tab" || !isRecord(response.data)) {
+			throw new Error(
+				response.success
+					? "OMP browser tab response was invalid"
+					: (response.error ?? "OMP browser tab close failed"),
+			);
+		}
+		const inventory = normalizeBrowserInventory(response.data.inventory);
+		const tab = normalizeBrowserInventory([response.data.tab])[0];
+		runtime.browserInventory = inventory;
+		this.#emitUrgent({
+			sessionId: runtime.record.id,
+			type: "browser_inventory",
+			browserInventory: structuredClone(inventory),
+		});
+		return {
+			closed: response.data.closed === true,
+			requiresConfirmation: response.data.requiresConfirmation === true,
+			...(tab ? { tab } : {}),
+			inventory: structuredClone(inventory),
+		};
+	}
+
 	syncWithDocument(doc: WorkspaceDocumentV1): void {
 		this.#document = doc;
+	}
+
+	setPaneBroker(broker: PaneBroker): void {
+		this.#paneBroker = broker;
+		void this.refreshPaneBroker();
+	}
+
+	refreshPaneBroker(): Promise<void> {
+		for (const pending of this.#pendingHostToolCalls.values()) {
+			pending.controller.abort(new Error("Gradivus pane authorization changed"));
+		}
+		const refresh = this.#hostToolRefreshQueue
+			.catch(() => undefined)
+			.then(async () => {
+				for (const runtime of this.#runtimes.values()) {
+					const client = runtime.process.client;
+					if (client) await this.#registerRuntimeHostTools(runtime, client);
+				}
+			});
+		this.#hostToolRefreshQueue = refresh.catch(error => {
+			logger.warn("Failed to refresh desktop host tools", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return this.#hostToolRefreshQueue;
 	}
 
 	async load(): Promise<void> {
@@ -411,6 +777,62 @@ export class DesktopHost {
 		const setting = normalizeAgentSetting(data?.setting);
 		if (!setting) throw new Error("Agent setting response was invalid");
 		return setting;
+	}
+
+	async getAgentPrompts(idInput?: unknown): Promise<AgentPromptView[]> {
+		const response = await this.#withAgentPromptClient(idInput, client =>
+			client.request({ type: "get_agent_prompts" }),
+		);
+		if (!response.success) throw rpcResponseError(response.error, response.code, "Subagent prompts are unavailable");
+		const data = isRecord(response.data) ? response.data : undefined;
+		return normalizeAgentPrompts(data?.agents);
+	}
+
+	async saveAgentPrompt(
+		idInput: unknown,
+		nameInput: unknown,
+		scopeInput: unknown,
+		systemPromptInput: unknown,
+		expectedRevisionInput: unknown,
+	): Promise<AgentPromptView> {
+		const name = assertAgentPromptName(nameInput);
+		const scope = assertAgentPromptScope(scopeInput);
+		const systemPrompt = assertBoundedText(systemPromptInput, "agent prompt");
+		if (!systemPrompt.trim()) throw new TypeError("agent prompt cannot be empty");
+		const expectedRevision = assertAgentPromptRevision(expectedRevisionInput, true);
+		const response = await this.#withAgentPromptClient(idInput, client =>
+			client.request({
+				type: "save_agent_prompt",
+				name,
+				scope,
+				systemPrompt,
+				expectedRevision,
+			}),
+		);
+		if (!response.success) throw rpcResponseError(response.error, response.code, "Subagent prompt save failed");
+		const data = isRecord(response.data) ? response.data : undefined;
+		const agent = normalizeAgentPrompt(data?.agent);
+		if (!agent) throw new Error("Subagent prompt response was invalid");
+		return agent;
+	}
+
+	async resetAgentPrompt(
+		idInput: unknown,
+		nameInput: unknown,
+		scopeInput: unknown,
+		expectedRevisionInput: unknown,
+	): Promise<AgentPromptView> {
+		const name = assertAgentPromptName(nameInput);
+		const scope = assertAgentPromptScope(scopeInput);
+		const expectedRevision = assertAgentPromptRevision(expectedRevisionInput, false);
+		const response = await this.#withAgentPromptClient(idInput, client =>
+			client.request({ type: "reset_agent_prompt", name, scope, expectedRevision }),
+		);
+		if (!response.success) throw rpcResponseError(response.error, response.code, "Subagent prompt reset failed");
+		const data = isRecord(response.data) ? response.data : undefined;
+		const agent = normalizeAgentPrompt(data?.agent);
+		if (!agent) throw new Error("Subagent prompt response was invalid");
+		return agent;
 	}
 
 	/** Validated saved workspace preference for the create-session dialog; undefined when unusable. */
@@ -542,6 +964,16 @@ export class DesktopHost {
 		if (!item) throw new Error("Timeline item not found");
 		return { ...item, textLoaded: true };
 	}
+	async loadTimelineToolDetail(idInput: unknown, itemIdInput: unknown): Promise<TimelineToolActivity> {
+		const record = this.#record(idInput);
+		const runtime = this.#runtimes.get(record.id);
+		if (!runtime) throw new Error("Session is not loaded");
+		if (typeof itemIdInput !== "string" || itemIdInput.length === 0) throw new TypeError("invalid timeline item id");
+		const item = runtime.timeline.find(itemIdInput);
+		if (!item) throw new Error("Timeline item not found");
+		if (item.toolActivity?.operation !== "eval") throw new Error("Timeline item has no eval detail");
+		return structuredClone({ ...item.toolActivity, detailsLoaded: true });
+	}
 	async getAvailableCommands(idInput: unknown): Promise<SlashCommand[]> {
 		return this.#runWithRuntime(idInput, async (runtime, client) => {
 			if (runtime.commands.length > 0) return [...runtime.commands];
@@ -659,7 +1091,156 @@ export class DesktopHost {
 	async prompt(id: unknown, compositionInput: unknown): Promise<string> {
 		return this.#runWithRuntime(id, async (runtime, client) => {
 			const resolved: ResolvedPromptComposition = await runtime.attachments.resolve(compositionInput);
-			return client.prompt(resolved.text, resolved.images.length > 0 ? resolved.images : undefined);
+			return client.prompt(resolved.text, resolved.images.length > 0 ? resolved.images : undefined, "steer");
+		});
+	}
+	async requestPlanReview(idInput: unknown): Promise<PlanReviewView> {
+		return this.#enqueuePlanReviewMutation(idInput, async (runtime, client) => {
+			const response = await client.request({ type: "request_plan_review" });
+			if (!response.success || response.command !== "request_plan_review") {
+				throw new PlanReviewRpcError(response.error ?? "Plan review is unavailable", response.code);
+			}
+			const data = isRecord(response.data) ? response.data : undefined;
+			const planReview = normalizePlanReview(data?.planReview);
+			runtime.planReview = planReview;
+			this.#emitUrgent({ sessionId: runtime.record.id, type: "plan_review", planReview });
+			return structuredClone(planReview);
+		});
+	}
+
+	async updatePlanReview(
+		idInput: unknown,
+		reviewIdInput: unknown,
+		contentInput: unknown,
+		expectedRevisionInput: unknown,
+		annotationStateInput: unknown,
+	): Promise<PlanReviewView> {
+		const reviewId = assertBoundedText(reviewIdInput, "plan review id");
+		const content = assertBoundedText(contentInput, "plan review content");
+		const expectedRevision = assertBoundedText(expectedRevisionInput, "plan review revision");
+		return this.#enqueuePlanReviewMutation(idInput, async (runtime, client) => {
+			if (!runtime.planReview) throw new Error("No plan review is pending");
+			const annotationState = normalizePlanReview({
+				...runtime.planReview,
+				content,
+				annotationState: annotationStateInput,
+			}).annotationState;
+			const response = await client.request({
+				type: "update_plan_review",
+				reviewId,
+				content,
+				expectedRevision,
+				annotationState,
+			});
+			if (!response.success || response.command !== "update_plan_review") {
+				throw new PlanReviewRpcError(response.error ?? "Plan review update failed", response.code);
+			}
+			const data = isRecord(response.data) ? response.data : undefined;
+			const planReview = normalizePlanReview(data?.planReview);
+			runtime.planReview = planReview;
+			this.#emitUrgent({ sessionId: runtime.record.id, type: "plan_review", planReview });
+			return structuredClone(planReview);
+		});
+	}
+
+	async resolvePlanReview(
+		idInput: unknown,
+		reviewIdInput: unknown,
+		expectedRevisionInput: unknown,
+		decisionInput: unknown,
+	): Promise<PlanReviewResolutionResult> {
+		const record = this.#record(idInput);
+		const reviewId = assertBoundedText(reviewIdInput, "plan review id");
+		const expectedRevision = assertBoundedText(expectedRevisionInput, "plan review revision");
+		if (!isRecord(decisionInput) || typeof decisionInput.kind !== "string") {
+			throw new TypeError("invalid plan review decision");
+		}
+		return this.#enqueuePlanReviewMutation(record.id, async (runtime, client) => {
+			const current = runtime.planReview;
+			if (!current || current.id !== reviewId) throw new Error("This plan review is no longer current");
+			let decision: Record<string, unknown>;
+			let savedPath: string | undefined;
+			if (decisionInput.kind === "approve") {
+				if (
+					decisionInput.context !== "fresh" &&
+					decisionInput.context !== "compact" &&
+					decisionInput.context !== "keep"
+				) {
+					throw new TypeError("invalid plan approval context");
+				}
+				const executionRole =
+					decisionInput.executionRole === undefined
+						? undefined
+						: assertBoundedText(decisionInput.executionRole, "plan execution role");
+				if (executionRole && !current.executionModels.some(model => model.role === executionRole)) {
+					throw new TypeError("invalid plan execution role");
+				}
+				decision = {
+					kind: "approve",
+					context: decisionInput.context,
+					...(executionRole ? { executionRole } : {}),
+				};
+			} else if (decisionInput.kind === "refine") {
+				const feedback = assertBoundedText(decisionInput.feedback, "plan refinement feedback");
+				let resolvedText = "";
+				let images: PromptImageContent[] = [];
+				if (decisionInput.composition !== undefined) {
+					const resolved = await runtime.attachments.resolve(decisionInput.composition);
+					resolvedText = resolved.text;
+					images = resolved.images;
+				}
+				const text = [feedback.trim(), resolvedText.trim()].filter(Boolean).join("\\n\\n");
+				decision = {
+					kind: "refine",
+					feedback: text,
+					...(images.length > 0 ? { images } : {}),
+				};
+			} else if (decisionInput.kind === "save") {
+				const options: Electron.SaveDialogOptions = {
+					title: "Save reviewed plan",
+					defaultPath: current.suggestedSaveName,
+					filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+					properties: ["createDirectory", "showOverwriteConfirmation"],
+				};
+				const result = this.#window
+					? await dialog.showSaveDialog(this.#window, options)
+					: await dialog.showSaveDialog(options);
+				if (result.canceled || !result.filePath) return { accepted: false, cancelled: true };
+				savedPath = result.filePath;
+				decision = { kind: "save", outputPath: savedPath };
+			} else {
+				throw new TypeError("invalid plan review decision");
+			}
+
+			const response = await client.request({
+				type: "resolve_plan_review",
+				reviewId,
+				expectedRevision,
+				decision,
+			});
+			if (!response.success || response.command !== "resolve_plan_review") {
+				throw new PlanReviewRpcError(response.error ?? "Plan review decision failed", response.code);
+			}
+			const data = isRecord(response.data) ? response.data : undefined;
+			if (data?.accepted !== true) throw new Error("Plan review response was invalid");
+			if (decisionInput.kind !== "save") {
+				return {
+					accepted: true,
+					...(data.awaitingRefinement === true ? { awaitingRefinement: true } : {}),
+				};
+			}
+			runtime.planReview = undefined;
+			this.#emitUrgent({ sessionId: runtime.record.id, type: "plan_review" });
+			try {
+				const createdSession = await this.#createSession(record.kind, record.cwd);
+				return { accepted: true, savedPath, createdSession };
+			} catch (error) {
+				throw new Error(
+					`Saved plan to ${savedPath}, but could not start a new chat: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
 		});
 	}
 
@@ -1012,6 +1593,7 @@ export class DesktopHost {
 				message: resolved.text,
 			});
 			if (!response.success) throw new Error(response.error);
+			await this.#refreshQueuedMessageCount(runtime, client).catch(() => {});
 		});
 	}
 
@@ -1024,7 +1606,198 @@ export class DesktopHost {
 				...(resolved.images.length > 0 ? { images: resolved.images } : {}),
 			});
 			if (!response.success) throw new Error(response.error);
+			await this.#refreshQueuedMessageCount(runtime, client).catch(() => {});
 		});
+	}
+
+	async setTodos(
+		idInput: unknown,
+		phasesInput: unknown,
+		expectedRevisionInput: unknown,
+		actionInput: unknown,
+	): Promise<TodoState> {
+		const phases = normalizeTodoPhasesInput(phasesInput);
+		if (!Number.isSafeInteger(expectedRevisionInput) || (expectedRevisionInput as number) < 0) {
+			throw new TypeError("invalid todo revision");
+		}
+		const expectedRevision = expectedRevisionInput as number;
+		const action = assertBoundedText(actionInput, "todo action").trim();
+		if (!action || action.length > 256) throw new TypeError("invalid todo action");
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			const response = await client.request({
+				type: "set_todos",
+				phases,
+				expectedRevision,
+				action,
+			});
+			if (!response.success) throw rpcResponseError(response.error, response.code, "Todo update failed");
+			const data = isRecord(response.data) ? response.data : undefined;
+			const todoState = normalizeTodoState(data?.todoState);
+			runtime.todoState = todoState;
+			return structuredClone(todoState);
+		});
+	}
+
+	async compact(idInput: unknown, instructionsInput: unknown): Promise<ContextMutationResult> {
+		const instructions = optionalInstructions(instructionsInput, "compaction instructions");
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			if (runtime.isStreaming || runtime.isCompacting || (runtime.queuedMessageCount ?? 0) > 0) {
+				throw new Error("Compaction is unavailable while the session is busy or has queued messages");
+			}
+			const beforeTokens = runtime.contextTokens ?? 0;
+			runtime.isCompacting = true;
+			this.#emitRuntimeLifecycle(runtime);
+			try {
+				const response = await client.request({ type: "compact", customInstructions: instructions });
+				if (!response.success) throw new Error(response.error ?? "Compaction failed");
+				await this.#refreshRuntimeContext(runtime, client);
+				const afterTokens = runtime.contextTokens ?? 0;
+				return { beforeTokens, afterTokens, changed: beforeTokens !== afterTokens };
+			} finally {
+				runtime.isCompacting = false;
+				this.#emitRuntimeLifecycle(runtime);
+			}
+		});
+	}
+
+	async handoff(idInput: unknown, instructionsInput: unknown): Promise<ContextMutationResult> {
+		const instructions = optionalInstructions(instructionsInput, "handoff instructions");
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			if (runtime.isStreaming) throw new Error("Cannot hand off while a response is in progress");
+			const beforeTokens = runtime.contextTokens ?? 0;
+			runtime.isCompacting = true;
+			this.#emitRuntimeLifecycle(runtime);
+			try {
+				const response = await client.request({ type: "handoff", customInstructions: instructions });
+				if (!response.success) throw new Error(response.error ?? "Handoff failed");
+				await this.#refreshRuntimeContext(runtime, client);
+				const data = isRecord(response.data) ? response.data : undefined;
+				const afterTokens = runtime.contextTokens ?? 0;
+				return {
+					beforeTokens,
+					afterTokens,
+					changed: response.data !== null,
+					...(typeof data?.savedPath === "string" ? { savedPath: data.savedPath } : {}),
+				};
+			} finally {
+				runtime.isCompacting = false;
+				this.#emitRuntimeLifecycle(runtime);
+			}
+		});
+	}
+
+	async retry(idInput: unknown): Promise<{ started: boolean }> {
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "prompt", message: "/retry" });
+			if (!response.success) throw new Error(response.error ?? "Retry failed");
+			const data = isRecord(response.data) ? response.data : undefined;
+			return { started: data?.agentInvoked === true };
+		});
+	}
+
+	async abortRetry(idInput: unknown): Promise<void> {
+		await this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "abort_retry" });
+			if (!response.success) throw new Error(response.error ?? "Cancel retry failed");
+		});
+	}
+
+	async getSessionStats(idInput: unknown): Promise<SessionStatsView> {
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({ type: "get_session_stats" });
+			if (!response.success) throw new Error(response.error ?? "Session statistics are unavailable");
+			return normalizeSessionStats(response.data);
+		});
+	}
+
+	async exportHtml(idInput: unknown, outputPathInput: unknown): Promise<ExportHtmlResult> {
+		const record = this.#record(idInput);
+		let outputPath = outputPathInput === undefined ? undefined : assertBoundedText(outputPathInput, "export path");
+		if (!outputPath) {
+			const options: Electron.SaveDialogOptions = {
+				title: "Export OMP session",
+				defaultPath: `${record.title?.trim() || "OMP session"}.html`,
+				filters: [{ name: "HTML", extensions: ["html"] }],
+				properties: ["createDirectory", "showOverwriteConfirmation"],
+			};
+			const result = this.#window
+				? await dialog.showSaveDialog(this.#window, options)
+				: await dialog.showSaveDialog(options);
+			if (result.canceled || !result.filePath) return { cancelled: true };
+			outputPath = result.filePath;
+		}
+		return this.#runWithRuntime(record.id, async (_runtime, client) => {
+			const response = await client.request({ type: "export_html", outputPath });
+			if (!response.success) throw new Error(response.error ?? "HTML export failed");
+			const data = isRecord(response.data) ? response.data : undefined;
+			if (typeof data?.path !== "string") throw new Error("HTML export response was invalid");
+			return { cancelled: false, path: data.path };
+		});
+	}
+
+	async restart(idInput: unknown): Promise<SessionSnapshot> {
+		const record = this.#record(idInput);
+		await this.#runWithRuntime(record.id, async (runtime, client) => {
+			const response = await client.request({ type: "get_state" });
+			if (!response.success || !isRecord(response.data))
+				throw new Error(response.error ?? "OMP state refresh failed");
+			const sessionFile =
+				typeof response.data.sessionFile === "string" ? response.data.sessionFile : runtime.record.sessionFile;
+			if (runtime.timeline.size > 0 && !sessionFile) {
+				throw new Error("This session has no resumable session file");
+			}
+			runtime.record = { ...runtime.record, sessionFile };
+			await this.#registry.update(runtime.record.id, { sessionFile });
+		});
+		this.#flushEvents(record.id);
+		await this.#supervisor.stop(record.id);
+		const runtime = this.#requiredRuntime(record.id);
+		runtime.outstandingExtensions.clear();
+		runtime.retryState = undefined;
+		return this.#runWithRuntime(record.id, () => this.#snapshot(runtime));
+	}
+
+	async #refreshRuntimeContext(runtime: RuntimeSession, client: RpcClient): Promise<void> {
+		const state = await client.request({ type: "get_state" });
+		if (!state.success || !isRecord(state.data)) throw new Error(state.error ?? "OMP state refresh failed");
+		const contextUsage = isRecord(state.data.contextUsage) ? state.data.contextUsage : undefined;
+		runtime.contextTokens =
+			typeof contextUsage?.tokens === "number" && Number.isFinite(contextUsage.tokens)
+				? contextUsage.tokens
+				: undefined;
+		runtime.contextWindow =
+			typeof contextUsage?.contextWindow === "number" && Number.isFinite(contextUsage.contextWindow)
+				? contextUsage.contextWindow
+				: runtime.contextWindow;
+		runtime.tokensPerSecond =
+			typeof state.data.tokensPerSecond === "number" || state.data.tokensPerSecond === null
+				? state.data.tokensPerSecond
+				: runtime.tokensPerSecond;
+		runtime.queuedMessageCount =
+			Number.isSafeInteger(state.data.queuedMessageCount) && (state.data.queuedMessageCount as number) >= 0
+				? (state.data.queuedMessageCount as number)
+				: runtime.queuedMessageCount;
+		runtime.isStreaming = state.data.isStreaming === true;
+		runtime.isCompacting = state.data.isCompacting === true;
+		runtime.timeline.load(await loadHistory(client));
+		this.#emitRuntimeLifecycle(runtime);
+	}
+
+	#emitRuntimeLifecycle(runtime: RuntimeSession): void {
+		this.#emitUrgent({
+			sessionId: runtime.record.id,
+			type: "session",
+			isStreaming: runtime.isStreaming,
+			isCompacting: runtime.isCompacting,
+			retryState: runtime.retryState,
+		});
+	}
+
+	async #refreshQueuedMessageCount(runtime: RuntimeSession, client: RpcClient): Promise<void> {
+		const state = await client.request({ type: "get_state" });
+		if (!state.success || state.command !== "get_state" || !isRecord(state.data)) return;
+		const count = state.data.queuedMessageCount;
+		if (Number.isSafeInteger(count) && (count as number) >= 0) runtime.queuedMessageCount = count as number;
 	}
 
 	async abort(id: unknown): Promise<void> {
@@ -1366,11 +2139,14 @@ export class DesktopHost {
 		runtime.state = "stopped";
 		runtime.subagents = [];
 		runtime.commands = [];
+		runtime.browserInventory = [];
+		runtime.planReviewSupported = false;
+		runtime.todoState = { phases: [], revision: 0 };
 		runtime.outstandingExtensions = new Map();
 		runtime.fileDiffCache = new Map();
 		runtime.process = new RpcProcess({
 			cwd: record.cwd,
-			onEvent: event => this.#onEvent(runtime, event),
+			onEvent: (event, client, incarnation) => this.#onEvent(runtime, event, client, incarnation),
 			onExtension: request => this.#onExtension(runtime, request),
 			onState: (state, error) => {
 				runtime.state = state;
@@ -1399,6 +2175,7 @@ export class DesktopHost {
 				}
 			},
 			stop: async () => {
+				this.#abortHostToolCalls(runtime.record.id, "OMP runtime stopped");
 				await runtime.process.stop();
 				runtime.outstandingExtensions.clear();
 			},
@@ -1407,18 +2184,41 @@ export class DesktopHost {
 		return runtime;
 	}
 
-	async #startRuntime(runtime: RuntimeSession): Promise<void> {
-		const client = await runtime.process.start(runtime.record.sessionFile || undefined);
-		const state = await client.request({ type: "get_state" });
-		if (!state.success || state.command !== "get_state")
-			throw new Error(
-				state.success ? "OMP state response was invalid" : (state.error ?? "OMP state request failed"),
-			);
-		const data = state.data as StateData;
+	#abortHostToolCalls(runtimeId: string, reason: string): void {
+		for (const pending of this.#pendingHostToolCalls.values()) {
+			if (pending.runtimeId === runtimeId) pending.controller.abort(new Error(reason));
+		}
+		void this.#paneBroker?.revokeSession(runtimeId);
+		this.#paneBrokerUnavailable.delete(runtimeId);
+	}
+
+	async #registerRuntimeHostTools(runtime: RuntimeSession, client: RpcClient): Promise<void> {
+		const incarnation = runtime.process.incarnation;
+		const definition = incarnation ? this.#paneBroker?.definitionFor(runtime.record.id, incarnation) : undefined;
+		try {
+			const response = await client.request({ type: "set_host_tools", tools: definition ? [definition] : [] });
+			if (!response.success || response.command !== "set_host_tools") {
+				throw new Error(
+					response.success
+						? "OMP host tool response was invalid"
+						: (response.error ?? "OMP host tool registration failed"),
+				);
+			}
+			this.#paneBrokerUnavailable.delete(runtime.record.id);
+		} catch (error) {
+			const reason = `Pane automation is unavailable for this OMP runtime: ${
+				error instanceof Error ? error.message : String(error)
+			}`;
+			this.#paneBrokerUnavailable.set(runtime.record.id, reason);
+			logger.warn("Failed to register desktop host tools", { sessionId: runtime.record.id, error: reason });
+		}
+	}
+	#applyStateData(runtime: RuntimeSession, data: StateData): void {
 		runtime.record = {
 			...runtime.record,
 			ompSessionId: data.sessionId,
 			sessionFile: data.sessionFile ?? runtime.record.sessionFile,
+			...(data.sessionName ? { title: data.sessionName } : {}),
 			lastOpenedAt: new Date().toISOString(),
 		};
 		runtime.model = data.model ? `${data.model.provider}/${data.model.id}` : undefined;
@@ -1432,8 +2232,22 @@ export class DesktopHost {
 					workflow: typeof planModeRecord.workflow === "string" ? planModeRecord.workflow : undefined,
 				}
 			: undefined;
-		runtime.steeringMode = data.steeringMode ?? "all";
-		runtime.followUpMode = data.followUpMode ?? "all";
+		const capabilities = isRecord(data.capabilities) ? data.capabilities : undefined;
+		runtime.planReviewSupported = capabilities?.planReview === 1;
+		if (!runtime.planReviewSupported || data.planReview === undefined) {
+			runtime.planReview = undefined;
+		} else {
+			try {
+				runtime.planReview = normalizePlanReview(data.planReview);
+			} catch (error) {
+				logger.warn("Ignoring malformed plan review state", {
+					sessionId: runtime.record.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		runtime.steeringMode = data.steeringMode ?? "one-at-a-time";
+		runtime.followUpMode = data.followUpMode ?? "one-at-a-time";
 		runtime.interruptMode = data.interruptMode ?? "immediate";
 		runtime.autoCompactionEnabled = data.autoCompactionEnabled ?? true;
 		runtime.autoRetryEnabled = data.autoRetryEnabled ?? true;
@@ -1441,10 +2255,21 @@ export class DesktopHost {
 		runtime.contextWindow = data.contextUsage?.contextWindow;
 		runtime.tokensPerSecond = data.tokensPerSecond;
 		runtime.queuedMessageCount = data.queuedMessageCount;
-		runtime.todoPhases = data.todoPhases.map(phase => ({
-			title: phase.name,
-			items: phase.tasks.map(task => ({ text: task.content, completed: task.status === "completed" })),
-		}));
+		runtime.isStreaming = data.isStreaming === true;
+		runtime.isCompacting = data.isCompacting === true;
+		runtime.todoState = normalizeTodoState(data.todoState);
+	}
+
+	async #startRuntime(runtime: RuntimeSession): Promise<void> {
+		const client = await runtime.process.start(runtime.record.sessionFile || undefined);
+		await this.#registerRuntimeHostTools(runtime, client);
+		const state = await client.request({ type: "get_state" });
+		if (!state.success || state.command !== "get_state")
+			throw new Error(
+				state.success ? "OMP state response was invalid" : (state.error ?? "OMP state request failed"),
+			);
+		const data = state.data as StateData;
+		this.#applyStateData(runtime, data);
 		const messages = await loadHistory(client);
 		runtime.timeline.load(messages);
 		const subagents = await client.request({ type: "get_subagents" });
@@ -1477,6 +2302,39 @@ export class DesktopHost {
 			if (!client) throw new Error("OMP is not ready");
 			return operation(runtime, client);
 		});
+	}
+	#enqueuePlanReviewMutation<T>(
+		idInput: unknown,
+		operation: (runtime: RuntimeSession, client: RpcClient) => T | Promise<T>,
+	): Promise<T> {
+		const record = this.#record(idInput);
+		const previous = this.#planReviewMutationTails.get(record.id) ?? Promise.resolve();
+		const result = previous
+			.catch(() => {})
+			.then(() =>
+				this.#runWithRuntime(record.id, async (runtime, client) => {
+					const incarnation = runtime.process.incarnation;
+					if (!incarnation) throw new Error("OMP runtime incarnation is unavailable");
+					const value = await operation(runtime, client);
+					if (
+						this.#runtimes.get(record.id) !== runtime ||
+						runtime.process.client !== client ||
+						runtime.process.incarnation !== incarnation
+					) {
+						throw new Error("OMP runtime changed during the plan review operation");
+					}
+					return value;
+				}),
+			);
+		const tail = result.then(
+			() => {},
+			() => {},
+		);
+		this.#planReviewMutationTails.set(record.id, tail);
+		void tail.finally(() => {
+			if (this.#planReviewMutationTails.get(record.id) === tail) this.#planReviewMutationTails.delete(record.id);
+		});
+		return result;
 	}
 
 	/**
@@ -1541,10 +2399,13 @@ export class DesktopHost {
 			subagents: runtime.subagents,
 			agentHub: runtime.agentHub,
 			commands: [...runtime.commands],
+			browserInventory: structuredClone(runtime.browserInventory),
 			model: runtime.model,
 			thinkingLevel: runtime.thinkingLevel,
 			fastMode: runtime.fastMode,
 			planMode: runtime.planMode,
+			planReviewSupported: runtime.planReviewSupported,
+			...(runtime.planReview ? { planReview: structuredClone(runtime.planReview) } : {}),
 			steeringMode: runtime.steeringMode,
 			followUpMode: runtime.followUpMode,
 			interruptMode: runtime.interruptMode,
@@ -1554,7 +2415,10 @@ export class DesktopHost {
 			contextWindow: runtime.contextWindow,
 			tokensPerSecond: runtime.tokensPerSecond,
 			queuedMessageCount: runtime.queuedMessageCount,
-			todoPhases: runtime.todoPhases,
+			isStreaming: runtime.isStreaming,
+			isCompacting: runtime.isCompacting,
+			retryState: runtime.retryState,
+			todoState: structuredClone(runtime.todoState),
 			...(pendingRequest ? { pendingExtension: extensionView(pendingRequest) } : {}),
 			runtime: this.#supervisor.report(runtime.record.id),
 		};
@@ -1616,6 +2480,37 @@ export class DesktopHost {
 			throw error;
 		} finally {
 			if (this.#activeAuthProvider?.id === provider) this.#activeAuthProvider = undefined;
+		}
+	}
+
+	async #withAgentPromptClient<T>(idInput: unknown, operation: (client: RpcClient) => Promise<T>): Promise<T> {
+		let cwd: string | undefined;
+		if (idInput !== undefined) {
+			const record = this.#record(idInput);
+			cwd = record.cwd;
+			const runtime = this.#runtimes.get(record.id);
+			if (runtime && (runtime.state === "ready" || runtime.state === "running")) {
+				return this.#supervisor.run(record.id, () => {
+					const client = runtime.process.client;
+					if (!client) throw new Error("OMP is not ready");
+					return operation(client);
+				});
+			}
+		} else {
+			cwd = await this.#savedWorkspaceDefaultPath();
+		}
+		if (!cwd) throw new Error("Choose a workspace before editing project subagent prompts");
+
+		const process = new RpcProcess({
+			cwd,
+			onEvent: () => {},
+			onExtension: () => {},
+			onState: () => {},
+		});
+		try {
+			return await operation(await process.start());
+		} finally {
+			await process.stop();
 		}
 	}
 
@@ -1715,9 +2610,183 @@ export class DesktopHost {
 		});
 	}
 
-	#onEvent(runtime: RuntimeSession, event: unknown): void {
+	#cancelHostToolCall(runtime: RuntimeSession, incarnation: string, frame: RpcHostToolCancelRequest): void {
+		const pending = this.#pendingHostToolCalls.get(`${incarnation}:${frame.targetId}`);
+		if (!pending || pending.runtimeId !== runtime.record.id || pending.incarnation !== incarnation) return;
+		pending.controller.abort(new Error("Pane Browser call cancelled by OMP"));
+	}
+
+	async #handleHostToolCall(
+		runtime: RuntimeSession,
+		client: RpcClient,
+		incarnation: string,
+		frame: RpcHostToolCallRequest,
+	): Promise<void> {
+		const pendingKey = `${incarnation}:${frame.id}`;
+		if (this.#pendingHostToolCalls.has(pendingKey)) {
+			await client.sendHostToolResult({
+				type: "host_tool_result",
+				id: frame.id,
+				result: { content: [{ type: "text", text: "Duplicate Gradivus pane call ID" }] },
+				isError: true,
+			});
+			return;
+		}
+		const controller = new AbortController();
+		this.#pendingHostToolCalls.set(pendingKey, { runtimeId: runtime.record.id, incarnation, controller });
+		let result: RpcHostToolResultBody;
+		let isError = false;
+		try {
+			if (frame.toolName !== "gradivus_pane" || !this.#paneBroker) {
+				throw new Error(`Host tool ${frame.toolName} is unavailable`);
+			}
+			result = await this.#paneBroker.execute(runtime.record.id, incarnation, frame.arguments, controller.signal);
+		} catch (error) {
+			isError = true;
+			const message = (error instanceof Error ? error.message : String(error)).slice(0, 2_048);
+			result = { content: [{ type: "text", text: message || "Gradivus pane call failed" }] };
+		} finally {
+			this.#pendingHostToolCalls.delete(pendingKey);
+		}
+		if (controller.signal.aborted || runtime.process.client !== client || runtime.process.incarnation !== incarnation)
+			return;
+		try {
+			await client.sendHostToolResult({
+				type: "host_tool_result",
+				id: frame.id,
+				result,
+				...(isError ? { isError: true } : {}),
+			});
+		} catch (error) {
+			logger.warn("Failed to return Gradivus pane result", {
+				sessionId: runtime.record.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	#startPlanReviewReset(runtime: RuntimeSession, client: RpcClient, incarnation: string): void {
+		if (this.#planReviewResetGates.has(runtime.record.id)) return;
+		const gate: PlanReviewResetGate = { incarnation, frames: [] };
+		this.#planReviewResetGates.set(runtime.record.id, gate);
+		void this.#hydratePlanReviewReset(runtime, client, gate);
+	}
+
+	async #hydratePlanReviewReset(runtime: RuntimeSession, client: RpcClient, gate: PlanReviewResetGate): Promise<void> {
+		const sessionId = runtime.record.id;
+		try {
+			const [state, messages] = await Promise.all([client.request({ type: "get_state" }), loadHistory(client)]);
+			if (!state.success || state.command !== "get_state") {
+				throw new Error(
+					state.success ? "OMP state response was invalid" : (state.error ?? "OMP state refresh failed"),
+				);
+			}
+			const ownsGate = this.#planReviewResetGates.get(sessionId) === gate;
+			if (!ownsGate || runtime.process.client !== client || runtime.process.incarnation !== gate.incarnation) {
+				if (ownsGate) this.#planReviewResetGates.delete(sessionId);
+				return;
+			}
+			const data = state.data as StateData;
+			if (typeof data.sessionId !== "string" || data.sessionId.length === 0) {
+				throw new Error("OMP reset state response was invalid");
+			}
+			this.#suppressedEventSessions.add(sessionId);
+			this.#discardQueuedEvents(sessionId);
+			this.#applyStateData(runtime, data);
+			runtime.timeline.load(messages);
+			this.#planReviewResetGates.delete(sessionId);
+			for (const buffered of gate.frames) {
+				if (buffered.incarnation === gate.incarnation && buffered.sourceClient === client) {
+					this.#onEvent(runtime, buffered.event, buffered.sourceClient, buffered.incarnation);
+				}
+			}
+			await this.#registry.update(sessionId, runtime.record);
+			this.#suppressedEventSessions.delete(sessionId);
+			this.#emitUrgent({ sessionId, type: "session_reset", snapshot: this.#snapshot(runtime) });
+		} catch (error) {
+			if (this.#planReviewResetGates.get(sessionId) !== gate) return;
+			this.#planReviewResetGates.delete(sessionId);
+			this.#suppressedEventSessions.delete(sessionId);
+			this.#emitUrgent({
+				sessionId,
+				type: "warning",
+				message: `Could not refresh the reset plan session: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			});
+			for (const buffered of gate.frames) {
+				if (buffered.incarnation === gate.incarnation && buffered.sourceClient === client) {
+					this.#onEvent(runtime, buffered.event, buffered.sourceClient, buffered.incarnation);
+				}
+			}
+		}
+	}
+
+	#discardQueuedEvents(sessionId: string): void {
+		clearTimeout(this.#eventTimers.get(sessionId));
+		this.#eventTimers.delete(sessionId);
+		this.#eventQueues.delete(sessionId);
+		this.#eventQueueIndexes.delete(sessionId);
+	}
+
+	#onEvent(runtime: RuntimeSession, event: unknown, sourceClient: RpcClient, incarnation: string): void {
 		this.#supervisor.touch(runtime.record.id, false);
 		const frame = event as Record<string, unknown>;
+		if (
+			frame.type === "host_tool_call" &&
+			typeof frame.id === "string" &&
+			typeof frame.toolCallId === "string" &&
+			typeof frame.toolName === "string" &&
+			isRecord(frame.arguments)
+		) {
+			void this.#handleHostToolCall(runtime, sourceClient, incarnation, frame as unknown as RpcHostToolCallRequest);
+			return;
+		}
+		if (frame.type === "host_tool_cancel" && typeof frame.id === "string" && typeof frame.targetId === "string") {
+			this.#cancelHostToolCall(runtime, incarnation, frame as unknown as RpcHostToolCancelRequest);
+			return;
+		}
+		const resetGate = this.#planReviewResetGates.get(runtime.record.id);
+		if (resetGate && resetGate.incarnation === incarnation) {
+			resetGate.frames.push({ event, sourceClient, incarnation });
+			return;
+		}
+		if (resetGate) this.#planReviewResetGates.delete(runtime.record.id);
+		if (frame.type === "plan_review_update") {
+			runtime.planReviewSupported = true;
+			let malformedMessage: string | undefined;
+			try {
+				runtime.planReview =
+					"planReview" in frame && frame.planReview !== undefined
+						? normalizePlanReview(frame.planReview)
+						: undefined;
+			} catch (error) {
+				malformedMessage = error instanceof Error ? error.message : String(error);
+				if (runtime.planReview) {
+					runtime.planReview = {
+						...runtime.planReview,
+						error: `Plan review update was invalid: ${malformedMessage}`,
+					};
+				}
+				logger.warn("Ignoring malformed plan review update", {
+					sessionId: runtime.record.id,
+					error: malformedMessage,
+				});
+			}
+			const sessionReset = isRecord(frame.sessionReset) ? frame.sessionReset : undefined;
+			if (sessionReset && typeof sessionReset.sessionId === "string" && sessionReset.sessionId.length > 0) {
+				this.#startPlanReviewReset(runtime, sourceClient, incarnation);
+				return;
+			}
+			this.#emitUrgent({
+				sessionId: runtime.record.id,
+				type: "plan_review",
+				...(runtime.planReview ? { planReview: structuredClone(runtime.planReview) } : {}),
+				...(malformedMessage && !runtime.planReview
+					? { message: `Plan review update was invalid: ${malformedMessage}` }
+					: {}),
+			});
+			return;
+		}
 		if (frame.type === "prompt_result") {
 			const rawError = isRecord(frame.error) ? frame.error : undefined;
 			this.#emitUrgent({
@@ -1757,6 +2826,25 @@ export class DesktopHost {
 				type: "commands",
 				commands: [...runtime.commands],
 			});
+			return;
+		}
+		if (frame.type === "browser_inventory_update") {
+			runtime.browserInventory = normalizeBrowserInventory(frame.inventory);
+			this.#emitUrgent({
+				sessionId: runtime.record.id,
+				type: "browser_inventory",
+				browserInventory: structuredClone(runtime.browserInventory),
+			});
+			return;
+		}
+		if (frame.type === "todo_update") {
+			try {
+				const todoState = normalizeTodoState({ phases: frame.phases, revision: frame.revision });
+				runtime.todoState = todoState;
+				this.#queueEvent({ sessionId: runtime.record.id, type: "todo_update", todoState });
+			} catch {
+				// Ignore malformed pushes; retain the last canonical state.
+			}
 			return;
 		}
 		if (frame.type === "config_update") {
@@ -1808,6 +2896,35 @@ export class DesktopHost {
 			this.#emitUrgent({ sessionId: runtime.record.id, type: "session", record: runtime.record });
 			return;
 		}
+		if (frame.type === "agent_start") {
+			runtime.isStreaming = true;
+			this.#emitRuntimeLifecycle(runtime);
+		} else if (frame.type === "agent_end") {
+			runtime.isStreaming = false;
+			this.#emitRuntimeLifecycle(runtime);
+		} else if (frame.type === "auto_compaction_start") {
+			runtime.isCompacting = true;
+			this.#emitRuntimeLifecycle(runtime);
+		} else if (frame.type === "auto_compaction_end") {
+			runtime.isCompacting = false;
+			this.#emitRuntimeLifecycle(runtime);
+		} else if (
+			frame.type === "auto_retry_start" &&
+			Number.isSafeInteger(frame.attempt) &&
+			Number.isSafeInteger(frame.maxAttempts) &&
+			typeof frame.delayMs === "number" &&
+			Number.isFinite(frame.delayMs)
+		) {
+			runtime.retryState = {
+				attempt: frame.attempt as number,
+				maxAttempts: frame.maxAttempts as number,
+				delayMs: Math.max(0, frame.delayMs),
+			};
+			this.#emitRuntimeLifecycle(runtime);
+		} else if (frame.type === "auto_retry_end") {
+			runtime.retryState = undefined;
+			this.#emitRuntimeLifecycle(runtime);
+		}
 		const writeDisposition = writeDispositionForEvent(runtime.record.cwd, frame);
 		let items = runtime.timeline.applyChanges(event);
 		if (writeDisposition) {
@@ -1822,7 +2939,9 @@ export class DesktopHost {
 		if (items.some(item => item.status === "complete" && item.isError !== true && item.files?.length)) {
 			runtime.fileDiffCache.clear();
 		}
-		for (const item of items) this.#queueEvent({ sessionId: runtime.record.id, type: "timeline", item });
+		for (const item of items) {
+			this.#queueEvent({ sessionId: runtime.record.id, type: "timeline", item: dehydrateTimelineItem(item) });
+		}
 	}
 
 	#updateSubagents(runtime: RuntimeSession, frame: Record<string, unknown>): void {
@@ -1886,6 +3005,7 @@ export class DesktopHost {
 
 	// Stream updates wait one frame; urgent lifecycle/control events flush this queue in arrival order.
 	#queueEvent(event: GradivusEvent): void {
+		if (this.#suppressedEventSessions.has(event.sessionId)) return;
 		const key =
 			event.type === "timeline"
 				? typeof event.item?.id === "string"
@@ -2267,6 +3387,21 @@ function normalizeOpenRouterModelRouting(value: unknown): OpenRouterModelRouting
 }
 
 function dehydrateTimelineItem(item: TimelineItem): TimelineItem {
+	if (item.toolActivity?.operation === "eval") {
+		const dehydrated = { ...item };
+		delete dehydrated.args;
+		delete dehydrated.result;
+		delete dehydrated.detail;
+		delete dehydrated.images;
+		const activity = { ...item.toolActivity };
+		const omittedImageCount = activity.omittedImageCount + (activity.images?.length ?? 0);
+		delete activity.cells;
+		delete activity.jsonOutputs;
+		delete activity.images;
+		delete activity.statusEvents;
+		dehydrated.toolActivity = { ...activity, omittedImageCount, detailsLoaded: false };
+		return dehydrated;
+	}
 	if (item.kind !== "thinking" || item.text.length <= 64 * 1024) return { ...item };
 	return { ...item, text: "Reasoning available. Open to load the full record.", textLoaded: false };
 }
@@ -2437,6 +3572,197 @@ function normalizeOAuthAccounts(value: unknown): OAuthAccountsView {
 	}
 	return { providers };
 }
+function normalizeTodoPhasesInput(value: unknown): TodoPhase[] {
+	if (!Array.isArray(value) || value.length > 100) throw new Error("Todo phases are invalid");
+	const phases: TodoPhase[] = [];
+	const phaseIds = new Set<string>();
+	const phaseNames = new Set<string>();
+	const taskIds = new Set<string>();
+	const taskContents = new Set<string>();
+	for (const candidate of value) {
+		if (
+			!isRecord(candidate) ||
+			typeof candidate.id !== "string" ||
+			!candidate.id ||
+			phaseIds.has(candidate.id) ||
+			typeof candidate.name !== "string" ||
+			!candidate.name ||
+			phaseNames.has(candidate.name) ||
+			!Array.isArray(candidate.tasks) ||
+			candidate.tasks.length > 10_000
+		) {
+			throw new Error("Todo phase is invalid");
+		}
+		const earlierIds = new Set<string>();
+		const tasks: TodoPhase["tasks"] = [];
+		for (const task of candidate.tasks) {
+			if (
+				!isRecord(task) ||
+				typeof task.id !== "string" ||
+				!task.id ||
+				taskIds.has(task.id) ||
+				typeof task.content !== "string" ||
+				!task.content ||
+				task.content.length > 8_192 ||
+				taskContents.has(task.content) ||
+				(task.status !== "pending" &&
+					task.status !== "in_progress" &&
+					task.status !== "completed" &&
+					task.status !== "abandoned" &&
+					task.status !== "blocked") ||
+				(task.blocker !== undefined && (typeof task.blocker !== "string" || task.blocker.length > 8_192)) ||
+				(task.parentId !== undefined && (typeof task.parentId !== "string" || !earlierIds.has(task.parentId)))
+			) {
+				throw new Error("Todo task is invalid");
+			}
+			tasks.push({
+				id: task.id,
+				content: task.content,
+				status: task.status,
+				...(typeof task.blocker === "string" ? { blocker: task.blocker } : {}),
+				...(typeof task.parentId === "string" ? { parentId: task.parentId } : {}),
+			});
+			earlierIds.add(task.id);
+			taskIds.add(task.id);
+			taskContents.add(task.content);
+		}
+		phases.push({ id: candidate.id, name: candidate.name, tasks });
+		phaseIds.add(candidate.id);
+		phaseNames.add(candidate.name);
+	}
+	return phases;
+}
+
+function normalizeBrowserInventory(value: unknown): BrowserTabInventoryView[] {
+	if (!Array.isArray(value)) return [];
+	return value.slice(0, 100).flatMap(candidate => {
+		if (
+			!isRecord(candidate) ||
+			typeof candidate.name !== "string" ||
+			!candidate.name ||
+			candidate.name.length > 100 ||
+			(candidate.state !== "alive" && candidate.state !== "dead") ||
+			(candidate.browser !== "headless" &&
+				candidate.browser !== "connected" &&
+				candidate.browser !== "relay" &&
+				candidate.browser !== "spawned" &&
+				candidate.browser !== "cmux") ||
+			typeof candidate.url !== "string" ||
+			typeof candidate.title !== "string" ||
+			!Array.isArray(candidate.owners) ||
+			!candidate.owners.every(owner => typeof owner === "string") ||
+			!Number.isSafeInteger(candidate.activeRunCount) ||
+			(candidate.activeRunCount as number) < 0 ||
+			!Number.isSafeInteger(candidate.queuedRunCount) ||
+			(candidate.queuedRunCount as number) < 0
+		) {
+			return [];
+		}
+		return [
+			{
+				name: candidate.name,
+				state: candidate.state,
+				browser: candidate.browser,
+				url: candidate.url.slice(0, 4_096),
+				title: candidate.title.slice(0, 240),
+				owners: candidate.owners.slice(0, 100),
+				activeRunCount: candidate.activeRunCount as number,
+				queuedRunCount: candidate.queuedRunCount as number,
+			} satisfies BrowserTabInventoryView,
+		];
+	});
+}
+function normalizeTodoState(value: unknown): TodoState {
+	if (!isRecord(value)) throw new Error("Todo state response was invalid");
+	const revision = value.revision;
+	if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+		throw new Error("Todo state response was invalid");
+	}
+	return { phases: normalizeTodoPhasesInput(value.phases), revision };
+}
+
+function normalizeAgentPrompts(value: unknown): AgentPromptView[] {
+	if (!Array.isArray(value)) throw new Error("Subagent prompt response was invalid");
+	const agents = value
+		.slice(0, 1_000)
+		.map(normalizeAgentPrompt)
+		.filter((agent): agent is AgentPromptView => agent !== undefined);
+	if (agents.length !== value.length) throw new Error("Subagent prompt response was invalid");
+	return agents;
+}
+
+function normalizeAgentPrompt(value: unknown): AgentPromptView | undefined {
+	if (
+		!isRecord(value) ||
+		typeof value.name !== "string" ||
+		!/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value.name) ||
+		typeof value.description !== "string" ||
+		value.description.length > 8_192 ||
+		(value.effectiveSource !== "project" &&
+			value.effectiveSource !== "user" &&
+			value.effectiveSource !== "bundled") ||
+		typeof value.systemPrompt !== "string" ||
+		Buffer.byteLength(value.systemPrompt, "utf8") > 512 * 1024 ||
+		value.apply !== "next-spawn"
+	) {
+		return undefined;
+	}
+	const project = normalizeAgentPromptOverride(value.project);
+	const user = normalizeAgentPromptOverride(value.user);
+	if ((value.project !== undefined && !project) || (value.user !== undefined && !user)) return undefined;
+	return {
+		name: value.name,
+		description: value.description,
+		effectiveSource: value.effectiveSource,
+		systemPrompt: value.systemPrompt,
+		...(project ? { project } : {}),
+		...(user ? { user } : {}),
+		apply: "next-spawn",
+	};
+}
+
+function normalizeAgentPromptOverride(value: unknown): AgentPromptView["project"] {
+	if (value === undefined) return undefined;
+	if (
+		!isRecord(value) ||
+		typeof value.systemPrompt !== "string" ||
+		Buffer.byteLength(value.systemPrompt, "utf8") > 512 * 1024 ||
+		typeof value.revision !== "string" ||
+		!/^[0-9a-f]{64}$/.test(value.revision)
+	) {
+		return undefined;
+	}
+	return { systemPrompt: value.systemPrompt, revision: value.revision };
+}
+
+function assertAgentPromptName(value: unknown): string {
+	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value)) {
+		throw new TypeError("invalid agent name");
+	}
+	return value;
+}
+
+function assertAgentPromptScope(value: unknown): AgentPromptScope {
+	if (value !== "project" && value !== "user") throw new TypeError("invalid agent prompt scope");
+	return value;
+}
+
+function assertAgentPromptRevision(value: unknown, allowNull: true): string | null;
+function assertAgentPromptRevision(value: unknown, allowNull: false): string;
+function assertAgentPromptRevision(value: unknown, allowNull: boolean): string | null {
+	if (allowNull && value === null) return null;
+	if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+		throw new TypeError("invalid agent prompt revision");
+	}
+	return value;
+}
+
+function rpcResponseError(message: string | undefined, code: string | undefined, fallback: string): Error {
+	const error = new Error(message ?? fallback);
+	error.name = code ?? "RpcError";
+	return error;
+}
+
 function normalizeAgentSettings(value: unknown): AgentSettingView[] {
 	if (!Array.isArray(value)) return [];
 	return value

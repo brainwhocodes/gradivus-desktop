@@ -47,7 +47,7 @@ function createHost(): { host: WorkspaceHost; send: Mock; window: object } {
 			removeChildView: vi.fn(),
 		},
 	};
-	return { host: new WorkspaceHost(window as never, "http://127.0.0.1:9222"), send, window };
+	return { host: new WorkspaceHost(window as never), send, window };
 }
 
 function capturedTemplate(): CapturedMenuItem[] {

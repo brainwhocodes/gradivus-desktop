@@ -79,6 +79,20 @@ describe("TranscriptStore", () => {
 		const completeDetail = complete?.detail;
 		expect(typeof completeDetail === "string" && completeDetail.includes(image.data)).toBe(false);
 	});
+	it("labels proposal writes without exposing review payloads in Work projection", () => {
+		const store = new TranscriptStore();
+		const proposal = store.apply({
+			type: "tool_execution_start",
+			toolCallId: "proposal-1",
+			toolName: "write",
+			args: { path: "xd://propose", content: "Approve the full internal plan payload" },
+		});
+		expect(proposal?.toolName).toBe("Plan proposed");
+		const projected = proposal ? projectTimeline("work", [proposal])[0] : undefined;
+		expect(projected?.toolName).toBe("Plan proposed");
+		expect(JSON.stringify(projected)).not.toContain("Approve the full internal plan payload");
+	});
+
 	it("keeps raw hashline edit grammar out of activity previews and projects structured diffs", () => {
 		const store = new TranscriptStore();
 		const write = store.apply({
@@ -156,6 +170,67 @@ describe("TranscriptStore", () => {
 		expect(JSON.stringify(completedEdit?.toolActivity)).not.toContain("*** Begin Patch");
 		expect(JSON.stringify(completedEdit?.toolActivity)).not.toContain("PUT");
 		expect(virtualWrite?.files).toBeUndefined();
+	});
+	it("projects eval cells into bounded semantic previews with lazy-loadable details", () => {
+		const store = new TranscriptStore();
+		const longLine = "x".repeat(700);
+		store.apply({
+			type: "tool_execution_start",
+			toolCallId: "eval-1",
+			toolName: "eval",
+			args: { language: "py", title: "analysis", code: "seed = 1" },
+		});
+		const completed = store.apply({
+			type: "tool_execution_end",
+			toolCallId: "eval-1",
+			result: {
+				details: {
+					languages: ["python", "js"],
+					cells: [
+						{
+							index: 0,
+							title: "imports",
+							language: "python",
+							code: `import json\n${longLine}\nprint("ready")`,
+							output: "ready\nline 2\nline 3\nline 4",
+							status: "complete",
+							durationMs: 125,
+							statusEvents: [{ op: "phase", title: "imports" }],
+						},
+						{
+							index: 1,
+							title: "use",
+							language: "js",
+							code: "console.log('next')",
+							output: "next",
+							status: "error",
+							durationMs: 75,
+							exitCode: 1,
+						},
+					],
+					jsonOutputs: [{ ok: true }],
+					images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+				},
+			},
+			isError: true,
+		});
+
+		expect(completed?.toolActivity).toMatchObject({
+			operation: "eval",
+			languages: ["python", "js"],
+			title: "analysis",
+			cellCount: 2,
+			durationMs: 200,
+			detailsLoaded: true,
+		});
+		if (completed?.toolActivity?.operation !== "eval") throw new Error("eval activity missing");
+		expect(completed.toolActivity.codePreview.length).toBeLessThanOrEqual(6);
+		expect(completed.toolActivity.outputPreview.length).toBeLessThanOrEqual(6);
+		expect(completed.toolActivity.codePreview.every(line => line.length <= 512)).toBe(true);
+		expect(completed.toolActivity.cells?.[0]?.code).toContain("print");
+		expect(completed.toolActivity.cells?.[0]?.statusEvents?.[0]).toContain('"phase"');
+		expect(completed.toolActivity.jsonOutputs?.[0]).toContain('"ok": true');
+		expect(completed.toolActivity.images).toEqual([{ data: "aGVsbG8=", mimeType: "image/png" }]);
 	});
 
 	it("streams one stable reasoning item before the assistant answer", () => {

@@ -31,18 +31,39 @@ test("renders the compiled OMP Chat performance timeline without long tasks", as
 		const page = await app!.firstWindow();
 		await page.setViewportSize({ width: 1440, height: 900 });
 		await page.evaluate(() => {
-			(window as unknown as { __maxLongTask: number }).__maxLongTask = 0;
+			Reflect.set(window, "__maxLongTask", 0);
 			new PerformanceObserver(list => {
 				for (const entry of list.getEntries()) {
-					const state = window as unknown as { __maxLongTask: number };
-					state.__maxLongTask = Math.max(state.__maxLongTask, entry.duration);
+					const current = Reflect.get(window, "__maxLongTask");
+					Reflect.set(window, "__maxLongTask", Math.max(typeof current === "number" ? current : 0, entry.duration));
 				}
 			}).observe({ entryTypes: ["longtask"] });
 		});
 		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 30_000 });
 		await expect(page.locator(".timeline-scroll")).toContainText("Performance timeline entry 9999", { timeout: 30_000 });
-		const maxLongTask = await page.evaluate(() => (window as unknown as { __maxLongTask: number }).__maxLongTask);
+		const evalActivities = page.getByLabel("Eval activity");
+		await expect(evalActivities).toHaveCount(100);
+		await expect(page.locator("body")).not.toContainText("PERFORMANCE_EVAL_RAW_");
+		const maxLongTask = await page.evaluate(() => Reflect.get(window, "__maxLongTask"));
 		expect(maxLongTask).toBeLessThan(500);
+		await page.addInitScript(() => {
+			Reflect.set(window, "__maxLongTask", 0);
+			new PerformanceObserver(list => {
+				for (const entry of list.getEntries()) {
+					const current = Reflect.get(window, "__maxLongTask");
+					Reflect.set(window, "__maxLongTask", Math.max(typeof current === "number" ? current : 0, entry.duration));
+				}
+			}).observe({ entryTypes: ["longtask"] });
+		});
+		await page.reload();
+		await expect(page.getByLabel("Message OMP")).toBeVisible({ timeout: 30_000 });
+		await expect(page.getByLabel("Eval activity")).toHaveCount(100);
+		await expect(page.locator("body")).not.toContainText("PERFORMANCE_EVAL_RAW_");
+		const rebuildLongTask = await page.evaluate(() => Reflect.get(window, "__maxLongTask"));
+		expect(rebuildLongTask).toBeLessThan(500);
+		const firstEval = page.getByLabel("Eval activity").first();
+		await firstEval.getByText("Eval details", { exact: true }).click();
+		await expect(firstEval).toContainText("PERFORMANCE_EVAL_RAW_0");
 	} finally {
 		await teardownElectronTest(app, userData);
 	}

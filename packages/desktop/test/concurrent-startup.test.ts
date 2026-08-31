@@ -116,6 +116,7 @@ describe("Concurrent terminal and browser startup with revision retries", () => 
 				id: "pane-term-c1",
 				tabId: "tab-terminal-c1",
 				workspaceId: "ws-concurrent",
+				name: "Terminal",
 				cols: 80,
 				rows: 24,
 			}),

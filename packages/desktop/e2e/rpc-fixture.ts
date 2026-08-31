@@ -56,6 +56,7 @@ let rejectNextPrompt = process.env.GRADIVUS_REJECT_NEXT_PROMPT === "immediate"
     : undefined;
 let rejectNextSteer = process.env.GRADIVUS_REJECT_NEXT_STEER === "1";
 let rejectNextFollowUp = process.env.GRADIVUS_REJECT_NEXT_FOLLOW_UP === "1";
+let rejectNextSteerQueued = process.env.GRADIVUS_REJECT_NEXT_STEER_QUEUED === "1";
 
 function decodeMention(value: string): string {
   if (value.startsWith('"')) {
@@ -457,12 +458,52 @@ const timelineMessages = timelineFixture
 if (performanceMessages) {
   const reasoningChunk = "x".repeat(512 * 1024);
   for (const message of performanceMessages.slice(-10)) message.content.unshift({ type: "thinking", thinking: reasoningChunk });
+  const evalTail = Array.from({ length: 200 }, (_, index) => `performance-eval-tail-${index + 1}`).join("\n");
+  for (let index = 0; index < 100; index += 1) {
+    const toolCallId = `performance-eval-${index}`;
+    performanceMessages.push(
+      {
+        id: `performance-eval-call-${index}`,
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: toolCallId,
+          name: "eval",
+          arguments: { language: "py", title: `performance eval ${index + 1}`, code: `value = ${index}\n${evalTail}` },
+        }],
+      },
+      {
+        id: `performance-eval-result-${index}`,
+        role: "toolResult",
+        toolCallId,
+        isError: false,
+        content: [{ type: "text", text: "performance eval complete" }],
+        details: {
+          languages: ["python"],
+          cells: [{
+            index: 0,
+            title: `performance eval ${index + 1}`,
+            language: "python",
+            code: `value = ${index}\n${evalTail}`,
+            output: `${index}\n${evalTail}`,
+            status: "complete",
+            durationMs: index + 1,
+          }],
+          jsonOutputs: [{ marker: `PERFORMANCE_EVAL_RAW_${index}` }],
+        },
+      },
+    );
+  }
 }
 
 const availableCommands = [
   { name: "status", aliases: ["usage"], description: "Show current session status", source: "builtin" },
   { name: "compact", description: "Compact the current context", input: { hint: "custom instructions" }, source: "builtin" },
   { name: "model", description: "Choose the active model", source: "builtin" },
+  { name: "mcp", description: "Manage MCP servers", source: "builtin" },
+  { name: "tree", description: "Show the session tree", source: "builtin" },
+  { name: "export", description: "Export the current session", input: { hint: "path" }, source: "builtin" },
+  { name: "share", description: "Share the current session", source: "builtin" },
   { name: "thinking", description: "Choose the reasoning level", source: "builtin" },
   { name: "fast", description: "Toggle fast mode", source: "builtin" },
   { name: "handoff", description: "Create a handoff prompt", input: { hint: "instructions" }, source: "builtin" },
@@ -625,6 +666,49 @@ let agentSettings = [
     apply: "immediate",
   },
 ];
+const bundledAgentPrompts = {
+  scout: {
+    name: "scout",
+    description: "Read-only codebase research and evidence gathering.",
+    effectiveSource: "bundled",
+    systemPrompt: "Inspect the requested surface and return compressed evidence.",
+    apply: "next-spawn",
+  },
+  reviewer: {
+    name: "reviewer",
+    description: "Evidence-backed code review for correctness and security.",
+    effectiveSource: "bundled",
+    systemPrompt: "Review the change and report only evidence-backed findings.",
+    apply: "next-spawn",
+  },
+};
+let todoState = {
+  phases: [{
+    id: "phase-fixture-progress",
+    name: "Fixture progress",
+    tasks: [{
+      id: "todo-fixture-exercise",
+      content: "Exercise the desktop boundary",
+      status: "completed",
+    }],
+  }],
+  revision: 1,
+};
+let agentPrompts = Object.values(bundledAgentPrompts).map(agent => ({ ...agent }));
+
+function updateAgentPrompt(agent, scope, systemPrompt) {
+  const override = {
+    systemPrompt,
+    revision: Bun.SHA256.hash(`${agent.name}:${scope}:${systemPrompt}`, "hex"),
+  };
+  const updated = { ...agent, [scope]: override };
+  const effective = updated.project ?? updated.user;
+  return {
+    ...updated,
+    effectiveSource: updated.project ? "project" : updated.user ? "user" : "bundled",
+    systemPrompt: effective?.systemPrompt ?? bundledAgentPrompts[agent.name]?.systemPrompt ?? agent.systemPrompt,
+  };
+}
 const historyMessages = performanceMessages ?? specialMessages ?? timelineMessages ?? [
   { id: "fixture-welcome", role: "assistant", content: [{ type: "text", text: "Fixture ready. Choose a Work or Code action." }] },
   {
@@ -684,6 +768,7 @@ if (authStateFile) {
 let pendingAuth;
 let pendingAgentPrompt;
 let heldPrompt;
+let queuedMessageCount = 0;
 let delayedSelectPrompt;
 let answerSequence = 0;
 let model = modelOptions[0];
@@ -694,6 +779,65 @@ let followUpMode = "all";
 let interruptMode = "immediate";
 let autoCompactionEnabled = true;
 let autoRetryEnabled = true;
+let contextTokens = 128;
+let isCompacting = false;
+let retryInvocationCount = 0;
+let planMode;
+let planRevision = 1;
+let planReview;
+const basePlanBody = `# Fixture rollout
+
+## Goal
+
+Ship the Gradivus plan review safely.
+
+## Execution
+
+1. Update the trusted RPC boundary.
+2. Review the desktop workflow.
+3. Verify rollback behavior.
+
+### Rollback
+
+Restore the prior runtime and preserve the reviewed Markdown.
+
+## Risks
+
+- Context pressure
+- Interrupted execution
+`;
+const fixturePlanBody = process.env.GRADIVUS_PLAN_LARGE === "1"
+  ? `${basePlanBody}\n## Detailed checks\n\n${Array.from({ length: 5_500 }, (_, index) => `- Check ${index + 1}: retain source line anchors.`).join("\n")}\n`
+  : basePlanBody;
+
+function makePlanReview(content = fixturePlanBody, title = "FIXTURE ROLLOUT") {
+  return {
+    id: `plan-fixture-${planRevision}`,
+    title,
+    planFilePath: "local://fixture-rollout-plan.md",
+    revision: `fixture-revision-${planRevision}`,
+    status: "ready",
+    phase: "ready",
+    content,
+    annotationState: { annotations: [], deletedSections: [], additionalFeedback: "" },
+    suggestedSaveName: "FIXTURE_ROLLOUT_PLAN.md",
+    contextUsage: { tokens: 31_000, contextWindow: 32_000, percent: 96.875 },
+    keepContextDisabled: true,
+    executionModels: [
+      { role: "default", provider: "fixture", modelId: "fixture-default", label: "Fixture Default" },
+      { role: "slow", provider: "fixture", modelId: "fixture-slow", label: "Fixture Slow", thinkingLevel: "high" },
+    ],
+    defaultExecutionRole: "default",
+  };
+}
+
+function emitPlanReview(options = {}) {
+  send({
+    type: "plan_review_update",
+    ...(planReview ? { planReview } : {}),
+    ...options,
+  });
+}
 const fixtureAgentCreatedAt = Date.now();
 let fixtureAgents = [
   {
@@ -781,6 +925,22 @@ let sendQueue = connection.send({
   protocolVersion: OMP_GRPC_PROTOCOL_VERSION,
   maxMessageBytes: OMP_GRPC_MAX_MESSAGE_BYTES,
 });
+let registeredHostTools = [];
+const pendingPaneBrowserPrompts = new Map();
+let paneBrowserCallSequence = 0;
+let lastGradivusPane;
+let browserInventory = process.env.GRADIVUS_BROWSER_INVENTORY === "1"
+  ? [{
+      name: "fixture-omp-tab",
+      state: "alive",
+      browser: "relay",
+      url: "https://agent.example.test/",
+      title: "Fixture OMP automation",
+      owners: ["fixture-subagent"],
+      activeRunCount: 1,
+      queuedRunCount: 1,
+    }]
+  : [];
 
 function send(value) {
   const { type, ...payload } = value;
@@ -803,6 +963,9 @@ function sendAgentHubUpdate() {
 }
 
 setTimeout(() => send({ type: "available_commands_update", commands: availableCommands }), 10);
+if (browserInventory.length > 0) {
+  setTimeout(() => send({ type: "browser_inventory_update", inventory: browserInventory }), 15);
+}
 
 function handleFrame(frame) {
   if (frame.kind === "ready" || frame.kind === "response") return;
@@ -825,6 +988,14 @@ function handleFrame(frame) {
     command: commandName,
     success: Boolean(success),
     ...(success ? { data } : { error: error ?? "fixture command failed" }),
+  });
+  const conflictResponse = () => send({
+    type: "response",
+    id: command.id,
+    command: command.type,
+    success: false,
+    error: "The subagent prompt changed since it was loaded. Reload before saving again.",
+    code: "agent_prompt_conflict",
   });
   const promptResult = (promptCommand, agentInvoked, error) => send({
     type: "prompt_result",
@@ -854,6 +1025,41 @@ function handleFrame(frame) {
       promptResult(resultCommand, true);
     }, delay);
   };
+  const finishPlanProposal = promptCommand => {
+    const sequence = ++answerSequence;
+    const toolCallId = `fixture-plan-proposal-${sequence}`;
+    setTimeout(() => {
+      planMode = { enabled: true, planFilePath: "local://fixture-rollout-plan.md", workflow: "parallel" };
+      send({ type: "config_update", planMode });
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: `fixture-plan-user-${sequence}`, role: "user", content: promptCommand.message } });
+      send({ type: "tool_execution_start", toolCallId, toolName: "write", args: { path: "xd://propose", content: "Fixture rollout" } });
+    }, 40);
+    setTimeout(() => {
+      send({
+        type: "tool_execution_end",
+        toolCallId,
+        toolName: "write",
+        result: {
+          content: [{ type: "text", text: "Plan ready for review." }],
+          details: {
+            xdev: {
+              tool: "propose",
+              mode: "execute",
+              inner: { planFilePath: "local://fixture-rollout-plan.md", title: "FIXTURE ROLLOUT", planExists: true },
+            },
+          },
+        },
+        isError: false,
+      });
+      planReview = makePlanReview();
+      emitPlanReview();
+      send({ type: "message_end", message: { id: `fixture-plan-answer-${sequence}`, role: "assistant", content: [{ type: "text", text: "The fixture plan is ready for review." }] } });
+      send({ type: "agent_end", isTerminal: true, messages: [] });
+      promptResult(promptCommand, true);
+    }, 180);
+  };
+
   const finishTimelineWave = (promptCommand) => {
     const sequence = ++answerSequence;
     const answerId = `fixture-wave-answer-${sequence}`;
@@ -932,6 +1138,57 @@ function handleFrame(frame) {
       promptResult(promptCommand, true);
     }, 880);
   };
+  const finishEval = (promptCommand) => {
+    const sequence = ++answerSequence;
+    const toolCallId = `fixture-eval-${sequence}`;
+    const tail = Array.from({ length: 40 }, (_, index) => `tail-${index + 1}`).join("\n");
+    setTimeout(() => {
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: `fixture-eval-user-${sequence}`, role: "user", content: promptCommand.message } });
+      send({
+        type: "tool_execution_start",
+        toolCallId,
+        toolName: "eval",
+        args: { language: "py", title: "fixture analysis", code: "value = 1\nprint(value)" },
+      });
+      send({
+        type: "tool_execution_end",
+        toolCallId,
+        result: {
+          details: {
+            languages: ["python", "js"],
+            cells: [
+              {
+                index: 0,
+                title: "fixture analysis",
+                language: "python",
+                code: `value = 1\n${tail}`,
+                output: `1\n${tail}`,
+                status: "complete",
+                durationMs: 125,
+                statusEvents: [{ op: "phase", title: "fixture" }],
+              },
+              {
+                index: 1,
+                title: "fixture follow-up",
+                language: "js",
+                code: "console.log('done')",
+                output: "done",
+                status: "complete",
+                durationMs: 75,
+              },
+            ],
+            jsonOutputs: [{ marker: "FIXTURE_EVAL_JSON_DETAIL" }],
+            images: [{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" }],
+          },
+        },
+        isError: false,
+      });
+      send({ type: "message_end", message: { id: `fixture-eval-answer-${sequence}`, role: "assistant", content: [{ type: "text", text: "Eval fixture completed." }] } });
+      send({ type: "agent_end", isTerminal: true, messages: [] });
+      promptResult(promptCommand, true);
+    }, 60);
+  };
   const finishSpecialMessages = (promptCommand) => {
     const liveIrc = {
       role: "custom",
@@ -982,13 +1239,66 @@ function handleFrame(frame) {
     finishAgent(actualCommand, finalText, 60, resultCommand);
   };
 
+  if (command.type === "set_host_tools") {
+    if (process.env.GRADIVUS_LEGACY_HOST_TOOLS === "1") {
+      return response(undefined, false, command.id, command.type, "Unknown command: set_host_tools");
+    }
+    registeredHostTools = Array.isArray(command.tools) ? command.tools : [];
+    return response({ toolNames: registeredHostTools.map(tool => tool.name) });
+  }
+  if (command.type === "close_browser_tab") {
+    const tab = browserInventory.find(candidate => candidate.name === command.name);
+    if (!tab) return response({ closed: false, inventory: browserInventory });
+    const busy = tab.owners.length > 0 || tab.activeRunCount > 0 || tab.queuedRunCount > 0;
+    if (busy && command.confirm !== true) {
+      return response({ closed: false, requiresConfirmation: true, tab, inventory: browserInventory });
+    }
+    browserInventory = browserInventory.filter(candidate => candidate.name !== command.name);
+    send({ type: "browser_inventory_update", inventory: browserInventory });
+    return response({ closed: true, inventory: browserInventory });
+  }
+  if (command.type === "host_tool_result") {
+    const pending = pendingPaneBrowserPrompts.get(command.id);
+    if (!pending) return;
+    pendingPaneBrowserPrompts.delete(command.id);
+    send({
+      type: "tool_execution_end",
+      toolCallId: "fixture-gradivus-pane-tool",
+      toolName: "gradivus_pane",
+      result: command.result,
+      isError: command.isError === true,
+    });
+    const text = command.result?.content?.find(item => item?.type === "text")?.text;
+    let details;
+    try { details = typeof text === "string" ? JSON.parse(text) : undefined; } catch {}
+    const paneCount = Array.isArray(details?.panes) ? details.panes.length : 0;
+    if (details?.panes?.[0]) lastGradivusPane = details.panes[0];
+    const controls = Array.isArray(details?.interactive) ? details.interactive.length : 0;
+    const title = typeof details?.title === "string" ? details.title : "unknown page";
+    finishAgent(pending.prompt, pending.cancelled
+      ? "Gradivus pane cancellation failed because a result arrived."
+      : command.isError
+        ? `Gradivus pane failed: ${String(text || "unknown error")}`
+        : pending.mode === "observe"
+          ? `Gradivus pane observed ${title} with ${controls} interactive controls.`
+          : pending.mode === "control" || pending.mode === "click-navigation"
+            ? "Gradivus pane control completed."
+            : `Gradivus pane inventory contains ${paneCount} pane${paneCount === 1 ? "" : "s"}.`);
+    return;
+  }
+  if (command.type === "host_tool_cancel") {
+    pendingPaneBrowserPrompts.delete(command.targetId);
+    return;
+  }
+
   if (command.type === "get_state") return response({
+    capabilities: { planReview: 1 },
     sessionId,
     sessionFile,
     model,
     thinkingLevel,
     isStreaming: Boolean(heldPrompt),
-    isCompacting: false,
+    isCompacting,
     steeringMode,
     followUpMode,
     interruptMode,
@@ -996,11 +1306,13 @@ function handleFrame(frame) {
     autoRetryEnabled,
     fastModeEnabled,
     fastModeActive: fastModeEnabled,
-    contextUsage: { tokens: 128, contextWindow: model.contextWindow },
+    ...(planMode ? { planMode } : {}),
+    ...(planReview ? { planReview } : {}),
+    contextUsage: { tokens: contextTokens, contextWindow: model.contextWindow },
     tokensPerSecond: 22,
     messageCount: historyMessages.length,
-    queuedMessageCount: 0,
-    todoPhases: [{ name: "Fixture progress", tasks: [{ content: "Exercise the desktop boundary", status: "completed" }] }],
+    queuedMessageCount,
+    todoState,
     runtime: {
       pid: process.pid,
       uptimeMs: Math.round(process.uptime() * 1_000),
@@ -1010,6 +1322,90 @@ function handleFrame(frame) {
       externalMemoryBytes: process.memoryUsage().external,
     },
   });
+  if (command.type === "set_plan_mode") {
+    planMode = command.enabled
+      ? { enabled: true, planFilePath: command.planFilePath ?? "local://fixture-rollout-plan.md", workflow: command.workflow ?? "parallel" }
+      : undefined;
+    if (!planMode) planReview = undefined;
+    send({ type: "config_update", planMode });
+    return response({ planMode });
+  }
+  if (command.type === "request_plan_review") {
+    if (!planReview) {
+      if (!planMode) return response(undefined, false, command.id, command.type, "Plan mode is not active.");
+      planReview = makePlanReview();
+    }
+    emitPlanReview();
+    return response({ planReview });
+  }
+  if (command.type === "update_plan_review") {
+    if (!planReview || command.reviewId !== planReview.id) {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: "This plan review is no longer current.", code: "plan_review_stale" });
+      return;
+    }
+    if (command.expectedRevision !== planReview.revision) {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: "The plan changed outside the review.", code: "plan_review_conflict" });
+      return;
+    }
+    if (command.content !== planReview.content) planRevision += 1;
+    planReview = {
+      ...planReview,
+      content: command.content,
+      revision: `fixture-revision-${planRevision}`,
+      annotationState: command.annotationState,
+    };
+    emitPlanReview();
+    return response({ planReview });
+  }
+  if (command.type === "resolve_plan_review") {
+    if (!planReview || command.reviewId !== planReview.id || command.expectedRevision !== planReview.revision) {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: "This plan review is stale.", code: "plan_review_stale" });
+      return;
+    }
+    const decision = command.decision ?? {};
+    const decisionFile = process.env.GRADIVUS_PLAN_DECISIONS_FILE;
+    if (decisionFile) fs.appendFileSync(decisionFile, `${JSON.stringify(decision)}\n`, "utf8");
+    if (decision.kind === "refine" && !String(decision.feedback ?? "").trim()) {
+      planReview = { ...planReview, status: "awaiting_refinement", phase: "awaiting_refinement" };
+      emitPlanReview();
+      return response({ accepted: true, awaitingRefinement: true });
+    }
+    planReview = { ...planReview, status: "applying", phase: "accepted" };
+    emitPlanReview();
+    response({ accepted: true });
+    if (decision.kind === "save") {
+      fs.mkdirSync(path.dirname(decision.outputPath), { recursive: true });
+      fs.writeFileSync(decision.outputPath, planReview.content, "utf8");
+      planReview = undefined;
+      planMode = undefined;
+      emitPlanReview();
+      send({ type: "config_update", planMode: undefined });
+      return;
+    }
+    if (decision.kind === "refine") {
+      const prior = planReview;
+      setTimeout(() => {
+        planRevision += 1;
+        planReview = {
+          ...makePlanReview(`${prior.content}\n## Refined\n\n${String(decision.feedback).trim()}\n`, "REFINED FIXTURE ROLLOUT"),
+          id: `plan-fixture-${planRevision}`,
+        };
+        emitPlanReview();
+      }, 180);
+      return;
+    }
+    setTimeout(() => {
+      planReview = undefined;
+      planMode = undefined;
+      emitPlanReview();
+      send({ type: "config_update", planMode: undefined });
+      send({ type: "agent_start" });
+      send({ type: "message_start", message: { id: `fixture-plan-execution-${answerSequence + 1}`, role: "developer", content: "Execute the approved fixture plan." } });
+      send({ type: "message_end", message: { id: `fixture-plan-execution-answer-${answerSequence + 1}`, role: "assistant", content: [{ type: "text", text: "Approved fixture execution started." }] } });
+      send({ type: "agent_end", isTerminal: true, messages: [] });
+    }, 180);
+    return;
+  }
   if (command.type === "get_available_commands") return response({ commands: availableCommands });
   if (command.type === "get_available_models") return response({ models: modelOptions });
   if (command.type === "get_openrouter_model_routing") return response(openRouterRouting(command.modelId));
@@ -1033,6 +1429,55 @@ function handleFrame(frame) {
     else return response(undefined, false);
     persistOAuthState();
     return response(oauthAccountsResponse());
+  }
+  if (command.type === "compact") {
+    const before = contextTokens;
+    isCompacting = true;
+    send({ type: "auto_compaction_start", reason: "manual" });
+    contextTokens = Math.max(16, Math.floor(contextTokens / 2));
+    isCompacting = false;
+    send({ type: "auto_compaction_end", success: true });
+    return response({ tokensBefore: before, tokensAfter: contextTokens });
+  }
+  if (command.type === "handoff") {
+    contextTokens = 0;
+    return response({ savedPath: `${sessionFile}.handoff.md` });
+  }
+  if (command.type === "abort_retry") {
+    send({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
+    return response(undefined);
+  }
+  if (command.type === "get_session_stats") return response({
+    sessionFile,
+    sessionId,
+    userMessages: 4,
+    assistantMessages: 5,
+    toolCalls: 3,
+    toolResults: 3,
+    totalMessages: 15,
+    tokens: { input: 120, output: 80, reasoning: 20, cacheRead: 10, cacheWrite: 5, total: 235 },
+    premiumRequests: 2,
+    cost: 0.0123,
+    contextUsage: { tokens: contextTokens, contextWindow: model.contextWindow, percentage: contextTokens / model.contextWindow * 100 },
+  });
+  if (command.type === "export_html") {
+    fs.writeFileSync(command.outputPath, "<!doctype html><title>Fixture export</title>", "utf8");
+    return response({ path: command.outputPath });
+  }
+  if (command.type === "set_todos") {
+    if (command.expectedRevision !== todoState.revision) {
+      return send({
+        type: "response",
+        id: command.id,
+        command: command.type,
+        success: false,
+        error: "The todo list changed since it was loaded. Reload before saving again.",
+        code: "todo_conflict",
+      });
+    }
+    todoState = { phases: command.phases, revision: todoState.revision + 1 };
+    send({ type: "todo_update", phases: todoState.phases, revision: todoState.revision });
+    return response({ todoState });
   }
   if (command.type === "set_oauth_account_failover") {
     oauthAccountFailover = command.enabled === true;
@@ -1065,6 +1510,32 @@ function handleFrame(frame) {
     if (index < 0) return response(undefined, false);
     agentSettings = agentSettings.map((setting, settingIndex) => settingIndex === index ? { ...setting, value: command.value } : setting);
     return response({ setting: agentSettings[index] });
+  }
+  if (command.type === "get_agent_prompts") return response({ agents: agentPrompts });
+  if (command.type === "save_agent_prompt") {
+    const index = agentPrompts.findIndex(agent => agent.name === command.name);
+    if (index < 0 || (command.scope !== "project" && command.scope !== "user") || !command.systemPrompt?.trim()) {
+      return response(undefined, false);
+    }
+    const current = agentPrompts[index][command.scope];
+    if ((current?.revision ?? null) !== (command.expectedRevision ?? null)) return conflictResponse();
+    const agent = updateAgentPrompt(agentPrompts[index], command.scope, command.systemPrompt);
+    agentPrompts = agentPrompts.map((candidate, agentIndex) => agentIndex === index ? agent : candidate);
+    return response({ agent });
+  }
+  if (command.type === "reset_agent_prompt") {
+    const index = agentPrompts.findIndex(agent => agent.name === command.name);
+    if (index < 0 || (command.scope !== "project" && command.scope !== "user")) return response(undefined, false);
+    const current = agentPrompts[index][command.scope];
+    if (!current || current.revision !== command.expectedRevision) return conflictResponse();
+    const agent = { ...agentPrompts[index] };
+    delete agent[command.scope];
+    const effective = agent.project ?? agent.user;
+    const bundled = bundledAgentPrompts[agent.name];
+    agent.effectiveSource = agent.project ? "project" : agent.user ? "user" : "bundled";
+    agent.systemPrompt = effective?.systemPrompt ?? bundled?.systemPrompt ?? agent.systemPrompt;
+    agentPrompts = agentPrompts.map((candidate, agentIndex) => agentIndex === index ? agent : candidate);
+    return response({ agent });
   }
   if (command.type === "login" && command.providerId === "openai-codex") {
     const promptId = `fixture-auth-${Date.now()}`;
@@ -1205,7 +1676,14 @@ function handleFrame(frame) {
   }
   if (command.type === "steer_queued") {
     captureCommand(command, "steer_queued");
+    if (rejectNextSteerQueued) {
+      rejectNextSteerQueued = false;
+      return response(undefined, false, command.id, "steer_queued", "Fixture queued steering failed.");
+    }
+    if (queuedMessageCount === 0) return response(undefined, false, command.id, "steer_queued", "No queued message remains.");
+    queuedMessageCount -= 1;
     response({ accepted: true });
+    if (heldPrompt) finishHeld(command, "Held turn completed after promoting the queued message.");
     return;
   }
   if (command.type === "follow_up") {
@@ -1215,14 +1693,8 @@ function handleFrame(frame) {
       response(undefined, false, command.id, "follow_up", "Fixture follow-up delivery failed.");
       return;
     }
+    queuedMessageCount += 1;
     response({ accepted: true });
-    if (heldPrompt) {
-      const resultCommand = heldPrompt;
-      heldPrompt = undefined;
-      finishAgent(command, "Follow-up completed after the active turn.", 120, resultCommand);
-    } else {
-      finishAgent(command, "Follow-up completed.", 120);
-    }
     return;
   }
   if (command.type === "prompt") {
@@ -1233,6 +1705,11 @@ function handleFrame(frame) {
       send({ type: "command_output", text: analysis.report ? `Fixture status: ready\n${analysis.report}` : "Fixture status: ready" });
       return;
     }
+    if (/fixture plan review|\/fixture-plan/i.test(analysis.baseText)) {
+      response({ accepted: true });
+      finishPlanProposal(command);
+      return;
+    }
     if (specialMessagesFixture && /\/fixture-special|semantic transcript/i.test(analysis.baseText)) {
       finishSpecialMessages(command);
       return;
@@ -1240,6 +1717,12 @@ function handleFrame(frame) {
     if (/queue delivery failed|fail queue|failure/i.test(analysis.baseText)) {
       response(undefined, false, command.id, "prompt", "Fixture queue delivery failed.");
       setTimeout(() => promptResult(command, false, { message: "Fixture queue delivery failed.", code: "QUEUE_DELIVERY_FAILED" }), 100);
+      return;
+    }
+    if (analysis.baseText.trim() === "/retry") {
+      const started = ++retryInvocationCount === 1;
+      response({ agentInvoked: started });
+      if (started) send({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 250 });
       return;
     }
     if (rejectNextPrompt === "immediate") {
@@ -1253,7 +1736,131 @@ function handleFrame(frame) {
       setTimeout(() => promptResult(command, false, { message: "Fixture prompt delivery failed.", code: "PROMPT_DELIVERY_FAILED" }), 700);
       return;
     }
+    if (/fixture gradivus pane/i.test(analysis.baseText)) {
+      response({ accepted: true });
+      if (!registeredHostTools.some(tool => tool?.name === "gradivus_pane")) {
+        finishAgent(command, "Gradivus pane host tool unavailable.");
+        return;
+      }
+      const hostCallId = `fixture-gradivus-pane-call-${++paneBrowserCallSequence}`;
+      const cancelled = /cancel/i.test(analysis.baseText);
+      const mode = /password/i.test(analysis.baseText)
+        ? "password"
+        : /file input/i.test(analysis.baseText)
+          ? "file"
+          : /stale/i.test(analysis.baseText)
+            ? "stale"
+            : /click navigation/i.test(analysis.baseText)
+              ? "click-navigation"
+              : /invalid navigation/i.test(analysis.baseText)
+                ? "invalid-navigation"
+                : /control/i.test(analysis.baseText)
+                  ? "control"
+                  : /observe/i.test(analysis.baseText)
+                    ? "observe"
+                    : "list";
+      const paneOperation = mode === "click-navigation" && lastGradivusPane
+        ? {
+            action: "act",
+            op: "click",
+            paneId: lastGradivusPane.paneId,
+            documentEpoch: lastGradivusPane.documentEpoch,
+            selector: "#fixture-navigate",
+            timeoutMs: 5000,
+          }
+        : mode === "password" && lastGradivusPane
+          ? {
+              action: "act",
+              op: "fill",
+              paneId: lastGradivusPane.paneId,
+              documentEpoch: lastGradivusPane.documentEpoch,
+              selector: "#fixture-password",
+              value: "must-not-be-filled",
+              timeoutMs: 5000,
+            }
+          : mode === "file" && lastGradivusPane
+            ? {
+                action: "act",
+                op: "fill",
+                paneId: lastGradivusPane.paneId,
+                documentEpoch: lastGradivusPane.documentEpoch,
+                selector: "#fixture-file",
+                value: "C:/must-not-upload.txt",
+                timeoutMs: 5000,
+              }
+            : mode === "stale" && lastGradivusPane
+              ? {
+                  action: "observe",
+                  paneId: lastGradivusPane.paneId,
+                  documentEpoch: lastGradivusPane.documentEpoch + 1,
+                  timeoutMs: 5000,
+                }
+              : mode === "invalid-navigation" && lastGradivusPane
+                ? {
+                    action: "navigate",
+                    paneId: lastGradivusPane.paneId,
+                    documentEpoch: lastGradivusPane.documentEpoch,
+                    url: "file:///C:/forbidden",
+                    timeoutMs: 5000,
+                  }
+                : undefined;
+      const toolArguments = paneOperation ?? (mode === "control" && lastGradivusPane
+        ? {
+            action: "act",
+            op: "click",
+            paneId: lastGradivusPane.paneId,
+            documentEpoch: lastGradivusPane.documentEpoch,
+            selector: "#fixture-action",
+            timeoutMs: 5000,
+          }
+        : mode === "observe" && lastGradivusPane
+          ? {
+              action: "observe",
+              paneId: lastGradivusPane.paneId,
+              documentEpoch: lastGradivusPane.documentEpoch,
+              timeoutMs: 5000,
+            }
+          : { action: "list" });
+      pendingPaneBrowserPrompts.set(hostCallId, { prompt: command, cancelled, mode });
+      const dispatchHostCall = () => {
+        send({
+          type: "tool_execution_start",
+          toolCallId: "fixture-gradivus-pane-tool",
+          toolName: "gradivus_pane",
+          args: toolArguments,
+        });
+        send({
+          type: "host_tool_call",
+          id: hostCallId,
+          toolCallId: "fixture-gradivus-pane-tool",
+          toolName: "gradivus_pane",
+          arguments: toolArguments,
+        });
+        if (!cancelled) return;
+        send({ type: "host_tool_cancel", id: `fixture-cancel-${hostCallId}`, targetId: hostCallId });
+        setTimeout(() => {
+          const pending = pendingPaneBrowserPrompts.get(hostCallId);
+          if (!pending?.cancelled) return;
+          pendingPaneBrowserPrompts.delete(hostCallId);
+          send({
+            type: "tool_execution_end",
+            toolCallId: "fixture-gradivus-pane-tool",
+            toolName: "gradivus_pane",
+            result: { content: [{ type: "text", text: "Gradivus pane call cancelled." }] },
+            isError: true,
+          });
+          finishAgent(pending.prompt, "Gradivus pane cancellation acknowledged.");
+        }, 250);
+      };
+      if (mode === "list") dispatchHostCall();
+      else setTimeout(dispatchHostCall, 250);
+      return;
+    }
     response({ accepted: true });
+    if (/fixture eval|\/fixture-eval/i.test(analysis.baseText)) {
+      finishEval(command);
+      return;
+    }
     if (/timeline wave|activity wave/i.test(analysis.baseText)) {
       finishTimelineWave(command);
       return;

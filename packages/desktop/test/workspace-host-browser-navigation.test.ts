@@ -55,7 +55,7 @@ describe("WorkspaceHost pending-navigation state machine", () => {
 				removeChildView: vi.fn(),
 			},
 		};
-		const host = new WorkspaceHost(window as never, "http://127.0.0.1:9222");
+		const host = new WorkspaceHost(window as never);
 		return { host, send };
 	}
 

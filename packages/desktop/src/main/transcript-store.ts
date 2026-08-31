@@ -1,12 +1,14 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { promptAttachmentDisplayText } from "../shared/attachment-display";
 import type {
 	FileChangeDisposition,
+	TimelineEvalCellDetail,
 	TimelineFileChange,
 	TimelineImage,
 	TimelineItem,
 	TimelineToolActivity,
 } from "../shared/contracts";
-import { promptAttachmentDisplayText } from "./prompt-attachments";
+import { TRANSCRIPT_PRESENTATION_LIMITS } from "../shared/transcript-limits";
 import { presentAssistantOutcome, presentEvent, presentMessage, stableMessageKey } from "./transcript-presentation";
 
 export interface BranchMessageCandidate {
@@ -416,8 +418,10 @@ function extractText(value: unknown): string {
 }
 function normalizeToolName(value: unknown, args: unknown): string | undefined {
 	const name = typeof value === "string" ? value : undefined;
-	if (name !== "write" || !isRecord(args) || args.path !== "xd://generate_image") return name;
-	return "generate_image";
+	if (name !== "write" || !isRecord(args)) return name;
+	if (args.path === "xd://generate_image") return "generate_image";
+	if (args.path === "xd://propose") return "Plan proposed";
+	return name;
 }
 function extractFileChanges(toolName: string | undefined, args: unknown): TimelineFileChange[] | undefined {
 	if (!isRecord(args)) return undefined;
@@ -455,15 +459,21 @@ function formatToolDetail(toolName: string | undefined, value: unknown): string 
 	return formatValue(value);
 }
 const MAX_ACTIVITY_PATH = 1_024;
-const MAX_ACTIVITY_LINE = 512;
 const MAX_READ_PREVIEW_LINES = 12;
 const MAX_EDIT_DIFF_LINES = 40;
+const MAX_EVAL_CELLS = 100;
+const MAX_EVAL_DETAIL_LINES = 256;
+const MAX_EVAL_JSON_OUTPUTS = 32;
+const MAX_EVAL_STATUS_EVENTS = 64;
+const MAX_EVAL_DETAIL_IMAGES = 16;
+const MAX_EVAL_IMAGE_DATA = 256 * 1024;
 
 function extractToolActivity(
 	toolName: string | undefined,
 	args: unknown,
 	result?: unknown,
 ): TimelineToolActivity | undefined {
+	if (toolName === "eval") return extractEvalToolActivity(args, result);
 	if (toolName === "read" && isRecord(args)) {
 		const readTarget = splitReadPath(args.path);
 		if (!readTarget) return undefined;
@@ -508,6 +518,152 @@ function extractToolActivity(
 	return undefined;
 }
 
+function extractEvalToolActivity(args: unknown, result: unknown): TimelineToolActivity {
+	const argRecord = isRecord(args) ? args : undefined;
+	const resultRecord = isRecord(result) ? result : undefined;
+	const details = resultRecord && isRecord(resultRecord.details) ? resultRecord.details : resultRecord;
+	const detailCells =
+		details && Array.isArray(details.cells) ? details.cells.filter(isRecord).slice(0, MAX_EVAL_CELLS) : [];
+	const cells =
+		detailCells.length > 0
+			? detailCells
+			: argRecord && typeof argRecord.code === "string"
+				? [
+						{
+							index: 0,
+							code: argRecord.code,
+							language: argRecord.language,
+							title: argRecord.title,
+							output: "",
+							status: result === undefined ? "running" : "complete",
+						},
+					]
+				: [];
+	const declaredLanguages = details && Array.isArray(details.languages) ? details.languages : [];
+	const languages = uniqueBoundedStrings(
+		declaredLanguages.length > 0 ? declaredLanguages : [...cells.map(cell => cell.language), argRecord?.language],
+	);
+	const codeText = cells
+		.map(cell => (typeof cell.code === "string" ? cell.code : ""))
+		.filter(Boolean)
+		.join("\n");
+	const outputText = cells
+		.map(cell => (typeof cell.output === "string" ? cell.output : ""))
+		.filter(Boolean)
+		.join("\n");
+	const previewLimit = Math.min(
+		TRANSCRIPT_PRESENTATION_LIMITS.collapsedLines,
+		TRANSCRIPT_PRESENTATION_LIMITS.previewLines * Math.max(1, Math.min(cells.length, 2)),
+	);
+	const codePreview = boundedLines(codeText, previewLimit);
+	const outputPreview = boundedLines(outputText, previewLimit);
+	const images = extractImages(result);
+	const detailImages = images
+		.filter(image => image.data.length <= MAX_EVAL_IMAGE_DATA)
+		.slice(0, MAX_EVAL_DETAIL_IMAGES);
+	const cellDetails = cells.map((cell, index) => evalCellDetail(cell, index));
+	const durationMs = cellDetails.reduce((total, cell) => total + (cell.durationMs ?? 0), 0);
+	const title =
+		boundedScalar(argRecord?.title, TRANSCRIPT_PRESENTATION_LIMITS.scalarWidth) ??
+		(cellDetails.length === 1 ? cellDetails[0]?.title : undefined);
+	const jsonOutputs =
+		details && Array.isArray(details.jsonOutputs)
+			? details.jsonOutputs.slice(0, MAX_EVAL_JSON_OUTPUTS).map(formatEvalStructuredOutput)
+			: [];
+	const statusEvents =
+		details && Array.isArray(details.statusEvents)
+			? details.statusEvents.slice(0, MAX_EVAL_STATUS_EVENTS).map(formatEvalStructuredOutput)
+			: [];
+	return {
+		operation: "eval",
+		languages,
+		...(title ? { title } : {}),
+		cellCount: cells.length,
+		durationMs,
+		codePreview,
+		outputPreview,
+		omittedLineCount:
+			Math.max(0, lineCount(codeText) - codePreview.length) +
+			Math.max(0, lineCount(outputText) - outputPreview.length),
+		omittedImageCount: Math.max(0, images.length - detailImages.length),
+		detailsLoaded: true,
+		cells: cellDetails,
+		...(jsonOutputs.length > 0 ? { jsonOutputs } : {}),
+		...(detailImages.length > 0 ? { images: detailImages } : {}),
+		...(statusEvents.length > 0 ? { statusEvents } : {}),
+	};
+}
+
+function evalCellDetail(cell: Record<string, unknown>, fallbackIndex: number): TimelineEvalCellDetail {
+	const code = boundEvalDetailText(typeof cell.code === "string" ? cell.code : "");
+	const output = boundEvalDetailText(typeof cell.output === "string" ? cell.output : "");
+	const status =
+		cell.status === "pending" || cell.status === "running" || cell.status === "complete" || cell.status === "error"
+			? cell.status
+			: "running";
+	const durationMs = boundedCount(cell.durationMs);
+	const exitCode =
+		typeof cell.exitCode === "number" && Number.isFinite(cell.exitCode) ? Math.floor(cell.exitCode) : undefined;
+	const statusEvents = Array.isArray(cell.statusEvents)
+		? cell.statusEvents.slice(0, MAX_EVAL_STATUS_EVENTS).map(formatEvalStructuredOutput)
+		: undefined;
+	return {
+		index: boundedCount(cell.index) ?? fallbackIndex,
+		...(boundedScalar(cell.title, TRANSCRIPT_PRESENTATION_LIMITS.scalarWidth)
+			? { title: boundedScalar(cell.title, TRANSCRIPT_PRESENTATION_LIMITS.scalarWidth) }
+			: {}),
+		...(boundedScalar(cell.language, 32) ? { language: boundedScalar(cell.language, 32) } : {}),
+		status,
+		...(durationMs === undefined ? {} : { durationMs }),
+		...(exitCode === undefined ? {} : { exitCode }),
+		code: code.text,
+		output: output.text,
+		...(code.omittedCount > 0 ? { omittedCodeLineCount: code.omittedCount } : {}),
+		...(output.omittedCount > 0 ? { omittedOutputLineCount: output.omittedCount } : {}),
+		...(statusEvents && statusEvents.length > 0 ? { statusEvents } : {}),
+	};
+}
+
+function boundEvalDetailText(value: string): { text: string; omittedCount: number } {
+	const all = normalizedLines(value);
+	const lines = all
+		.slice(0, MAX_EVAL_DETAIL_LINES)
+		.map(line =>
+			line.length > TRANSCRIPT_PRESENTATION_LIMITS.lineWidth
+				? `${line.slice(0, TRANSCRIPT_PRESENTATION_LIMITS.lineWidth - 1)}…`
+				: line,
+		);
+	return { text: lines.join("\n"), omittedCount: Math.max(0, all.length - lines.length) };
+}
+
+function uniqueBoundedStrings(values: unknown[]): string[] {
+	const seen = new Set<string>();
+	const result: string[] = [];
+	for (const value of values) {
+		const text = boundedScalar(value, 32);
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		result.push(text);
+	}
+	return result;
+}
+
+function formatEvalStructuredOutput(value: unknown): string {
+	try {
+		return boundEvalDetailText(JSON.stringify(value, null, 2) ?? String(value)).text;
+	} catch {
+		return boundEvalDetailText(String(value)).text;
+	}
+}
+
+function normalizedLines(value: string): string[] {
+	return value ? value.replace(/\r\n?/g, "\n").split("\n") : [];
+}
+
+function lineCount(value: string): number {
+	return normalizedLines(value).length;
+}
+
 function splitReadPath(value: unknown): { path: string; range?: string } | undefined {
 	if (typeof value !== "string") return undefined;
 	const target = value.trim();
@@ -546,12 +702,13 @@ function editResultDiff(value: unknown): string {
 }
 
 function boundedLines(value: string, maxLines: number): string[] {
-	if (!value) return [];
-	return value
-		.replace(/\r\n?/g, "\n")
-		.split("\n")
+	return normalizedLines(value)
 		.slice(0, maxLines)
-		.map(line => (line.length > MAX_ACTIVITY_LINE ? `${line.slice(0, MAX_ACTIVITY_LINE - 1)}…` : line));
+		.map(line =>
+			line.length > TRANSCRIPT_PRESENTATION_LIMITS.lineWidth
+				? `${line.slice(0, TRANSCRIPT_PRESENTATION_LIMITS.lineWidth - 1)}…`
+				: line,
+		);
 }
 
 function boundedScalar(value: unknown, maxLength: number): string | undefined {
@@ -563,7 +720,7 @@ function boundedScalar(value: unknown, maxLength: number): string | undefined {
 
 function boundedCount(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	return Math.max(0, Math.min(100_000, Math.floor(value)));
+	return Math.max(0, Math.min(TRANSCRIPT_PRESENTATION_LIMITS.count, Math.floor(value)));
 }
 
 function readResultCount(value: unknown): number | undefined {
