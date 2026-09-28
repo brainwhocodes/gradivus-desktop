@@ -2,11 +2,7 @@ import { lookupBuiltinSlashCommand } from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
 
-export {
-	ACP_BUILTIN_RESERVED_NAMES,
-	ACP_BUILTIN_SLASH_COMMANDS,
-	isAcpBuiltinShadowedName,
-} from "./builtin-registry";
+export { ACP_BUILTIN_RESERVED_NAMES, ACP_BUILTIN_SLASH_COMMANDS, isAcpBuiltinShadowedName } from "./builtin-registry";
 
 /**
  * Dispatch a slash command in ACP/text mode. Returns:

@@ -1,20 +1,14 @@
+import { getAllSettingDefs, type SettingDef } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { lookup, type AnySetting } from "../../config/registry";
+import { createSettingsHost } from "../../config/settings-ui";
 import type { Settings } from "../../config/settings";
-import {
-	getEnumValues,
-	getType,
-	getUi,
-	isCredential,
-	type SettingPath,
-	type SettingTab,
-} from "../../config/settings-schema";
 import type { SamplingParameters } from "../../session/agent-session";
-import type { ConfiguredThinkingLevel } from "../../thinking";
-import type { RpcSettingOption, RpcSettingTab, RpcSettingValue, RpcSettingView } from "./rpc-types";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { RpcSettingOption, RpcSettingValue, RpcSettingView } from "./rpc-types";
 
 export type RpcSettingsSession = {
 	settings: Settings;
 	refreshBaseSystemPrompt(): Promise<void>;
-	applyInspectImageModeChange(): Promise<boolean>;
 	setThinkingLevel?(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
 	setAdvisorEnabled?(enabled: boolean): boolean;
 	setOmitThinking?(enabled: boolean): void;
@@ -29,20 +23,8 @@ export type RpcSettingsSession = {
 
 export type RpcSettingEffect = (session: RpcSettingsSession, value: RpcSettingValue) => Promise<void>;
 
-type RpcSettingDescriptor = {
-	readonly path: SettingPath;
-	readonly apply: "immediate" | "next-session";
-	readonly effect?: RpcSettingEffect;
-};
-
 const refreshPromptEffect: RpcSettingEffect = async session => {
 	await session.refreshBaseSystemPrompt();
-};
-
-const inspectImageEffect: RpcSettingEffect = async session => {
-	if (!(await session.applyInspectImageModeChange())) {
-		throw new Error("The inspect_image tool could not be applied to this session");
-	}
 };
 
 const defaultThinkingEffect: RpcSettingEffect = async (session, value) => {
@@ -111,137 +93,44 @@ const autoCompactionEffect: RpcSettingEffect = async (session, value) => {
 	setAutoCompactionEnabled.call(session, value as boolean);
 };
 
-/**
- * Explicitly curated, credential-safe scalar settings. Schema entries are not
- * exported implicitly: a setting must be listed here before it is available to
- * RPC clients.
- */
-export const RPC_SETTING_DESCRIPTORS: readonly RpcSettingDescriptor[] = [
-	{ path: "images.autoResize", apply: "immediate" },
-	{ path: "images.blockImages", apply: "immediate" },
-	{ path: "images.describeForTextModels", apply: "immediate" },
-	{ path: "includeModelInPrompt", apply: "immediate", effect: refreshPromptEffect },
-	{ path: "personality", apply: "immediate", effect: refreshPromptEffect },
-	{ path: "temperature", apply: "immediate", effect: samplingEffect("temperature") },
-	{ path: "retry.maxRetries", apply: "immediate" },
-	{ path: "retry.modelFallback", apply: "immediate" },
-	{ path: "retry.usageAwareFallback", apply: "immediate" },
-	{ path: "retry.fallbackRevertPolicy", apply: "immediate" },
-	{ path: "compaction.midTurnEnabled", apply: "immediate" },
-	{ path: "compaction.methodOrder", apply: "immediate" },
-	{ path: "compaction.supersedeReads", apply: "immediate" },
-	{ path: "compaction.dropUseless", apply: "immediate" },
-	{ path: "compaction.enabled", apply: "immediate", effect: autoCompactionEffect },
-	{ path: "tools.approvalMode", apply: "immediate" },
-	{ path: "todo.enabled", apply: "next-session" },
-	{ path: "launch.enabled", apply: "next-session" },
-	{ path: "generate_image.enabled", apply: "next-session" },
-	{ path: "inspect_image.mode", apply: "immediate", effect: inspectImageEffect },
-	{ path: "tools.intentTracing", apply: "next-session" },
-	{ path: "tools.abortOnFabricatedResult", apply: "next-session" },
-	{ path: "async.enabled", apply: "next-session" },
-	{ path: "tools.xdev", apply: "next-session" },
-	{ path: "tools.xdevDocs", apply: "immediate", effect: refreshPromptEffect },
-	{ path: "plan.enabled", apply: "next-session" },
-	{ path: "goal.enabled", apply: "next-session" },
-	{ path: "task.eager", apply: "next-session" },
-	{ path: "task.batch", apply: "immediate" },
-	{ path: "task.enableEffort", apply: "immediate" },
-	{ path: "task.maxConcurrency", apply: "immediate" },
-	{ path: "task.enableLsp", apply: "immediate" },
-	{ path: "modelRoleStorage", apply: "immediate" },
-	{ path: "defaultThinkingLevel", apply: "immediate", effect: defaultThinkingEffect },
-	{ path: "advisor.enabled", apply: "immediate", effect: advisorEffect },
-	{ path: "omitThinking", apply: "immediate", effect: omitThinkingEffect },
-	{ path: "externalThinking", apply: "immediate", effect: thinkToolEffect },
-	{ path: "model.loopGuard.enabled", apply: "immediate" },
-	{ path: "model.loopGuard.checkAssistantContent", apply: "immediate" },
-	{ path: "model.loopGuard.toolCallReminder", apply: "immediate" },
-	{ path: "model.toolCallLoopGuard.enabled", apply: "immediate" },
-	{ path: "inlineToolDescriptors", apply: "next-session" },
-	{ path: "includeWorkspaceTree", apply: "next-session" },
-	{ path: "topP", apply: "immediate", effect: samplingEffect("topP") },
-	{ path: "topK", apply: "immediate", effect: samplingEffect("topK") },
-	{ path: "minP", apply: "immediate", effect: samplingEffect("minP") },
-	{ path: "presencePenalty", apply: "immediate", effect: samplingEffect("presencePenalty") },
-	{ path: "repetitionPenalty", apply: "immediate", effect: samplingEffect("repetitionPenalty") },
-	{ path: "textVerbosity", apply: "immediate" },
-	{ path: "prewalk.enabled", apply: "next-session" },
-	{ path: "steeringMode", apply: "immediate", effect: steeringEffect },
-	{ path: "followUpMode", apply: "immediate", effect: followUpEffect },
-	{ path: "interruptMode", apply: "immediate", effect: interruptEffect },
-	{ path: "magicKeywords.enabled", apply: "immediate" },
-	{ path: "magicKeywords.ultrathink", apply: "immediate" },
-	{ path: "magicKeywords.orchestrate", apply: "immediate" },
-	{ path: "magicKeywords.workflow", apply: "immediate" },
-	{ path: "features.unexpectedStopDetection", apply: "immediate" },
-	{ path: "contextPromotion.enabled", apply: "immediate" },
-	{ path: "compaction.handoffSaveToDisk", apply: "immediate" },
-	{ path: "snapcompact.systemPrompt", apply: "next-session" },
-	{ path: "snapcompact.toolResults", apply: "next-session" },
-	{ path: "snapcompact.shape", apply: "next-session" },
-	{ path: "tools.format", apply: "next-session" },
-	{ path: "edit.mode", apply: "next-session" },
-	{ path: "edit.fuzzyMatch", apply: "next-session" },
-	{ path: "edit.fuzzyThreshold", apply: "next-session" },
-	{ path: "edit.streamingAbort", apply: "next-session" },
-	{ path: "edit.blockAutoGenerated", apply: "next-session" },
-	{ path: "edit.enforceSeenLines", apply: "next-session" },
-	{ path: "readLineNumbers", apply: "next-session" },
-	{ path: "read.defaultLimit", apply: "next-session" },
-	{ path: "read.renderMarkdown", apply: "next-session" },
-	{ path: "read.summarize.enabled", apply: "next-session" },
-	{ path: "read.summarize.prose", apply: "next-session" },
-	{ path: "read.toolResultPreview", apply: "next-session" },
-	{ path: "lsp.enabled", apply: "next-session" },
-	{ path: "lsp.lazy", apply: "next-session" },
-	{ path: "lsp.shared", apply: "next-session" },
-	{ path: "lsp.formatOnWrite", apply: "next-session" },
-	{ path: "lsp.diagnosticsOnWrite", apply: "next-session" },
-	{ path: "lsp.diagnosticsOnEdit", apply: "next-session" },
-	{ path: "lsp.diagnosticsDeduplicate", apply: "next-session" },
-	{ path: "bash.enabled", apply: "next-session" },
-	{ path: "bash.autoBackground.enabled", apply: "next-session" },
-	{ path: "bashInterceptor.enabled", apply: "next-session" },
-	{ path: "bash.direnv", apply: "next-session" },
-	{ path: "shellMinimizer.enabled", apply: "next-session" },
-	{ path: "shellMinimizer.sourceOutlineLevel", apply: "next-session" },
-	{ path: "eval.py", apply: "next-session" },
-	{ path: "eval.js", apply: "next-session" },
-	{ path: "eval.rb", apply: "next-session" },
-	{ path: "eval.jl", apply: "next-session" },
-	{ path: "python.kernelMode", apply: "next-session" },
-	{ path: "tools.artifactSpillThreshold", apply: "immediate" },
-	{ path: "tools.artifactTailBytes", apply: "immediate" },
-	{ path: "tools.artifactHeadBytes", apply: "immediate" },
-	{ path: "tools.outputMaxColumns", apply: "immediate" },
-	{ path: "tools.artifactTailLines", apply: "immediate" },
-	{ path: "todo.reminders", apply: "immediate" },
-	{ path: "todo.remindersMax", apply: "immediate" },
-	{ path: "grep.contextBefore", apply: "immediate" },
-	{ path: "grep.contextAfter", apply: "immediate" },
-	{ path: "inspect_image.timeoutMs", apply: "immediate" },
-	{ path: "computer.enabled", apply: "immediate", effect: computerToolEffect },
-	{ path: "fetch.enabled", apply: "immediate" },
-	{ path: "security.enabled", apply: "immediate" },
-	{ path: "tools.maxTimeout", apply: "immediate" },
-	{ path: "async.pollWaitDuration", apply: "immediate" },
-	{ path: "irc.timeoutMs", apply: "immediate" },
-	{ path: "mcp.renderMarkdownResults", apply: "immediate" },
-	{ path: "task.maxRecursionDepth", apply: "immediate" },
-	{ path: "task.maxRuntimeMs", apply: "immediate" },
-	{ path: "task.softRequestBudget", apply: "immediate" },
-	{ path: "task.softRequestBudgetNotice", apply: "immediate" },
-	{ path: "task.maxEffort", apply: "immediate" },
-] as const;
+const settingsHost = createSettingsHost();
+const rpcSettingDefs = getAllSettingDefs(settingsHost.entries);
 
-type RpcSettingPath = (typeof RPC_SETTING_DESCRIPTORS)[number]["path"];
-const RPC_SETTING_PATH_SET: Readonly<Record<string, true>> = Object.fromEntries(
-	RPC_SETTING_DESCRIPTORS.map(descriptor => [descriptor.path, true]),
-) as Readonly<Record<string, true>>;
+const rpcSettingEffects: ReadonlyMap<string, RpcSettingEffect> = new Map([
+	["includeModelInPrompt", refreshPromptEffect],
+	["personality", refreshPromptEffect],
+	["temperature", samplingEffect("temperature")],
+	["compaction.enabled", autoCompactionEffect],
+	["tools.xdevDocs", refreshPromptEffect],
+	["defaultThinkingLevel", defaultThinkingEffect],
+	["advisor.enabled", advisorEffect],
+	["omitThinking", omitThinkingEffect],
+	["externalThinking", thinkToolEffect],
+	["topP", samplingEffect("topP")],
+	["topK", samplingEffect("topK")],
+	["minP", samplingEffect("minP")],
+	["presencePenalty", samplingEffect("presencePenalty")],
+	["repetitionPenalty", samplingEffect("repetitionPenalty")],
+	["computer.enabled", computerToolEffect],
+	["steeringMode", steeringEffect],
+	["followUpMode", followUpEffect],
+	["interruptMode", interruptEffect],
+]);
+
+const MAX_RPC_SETTING_DEPTH = 16;
+const MAX_RPC_SETTING_ENTRIES = 1_000;
+const MAX_RPC_SETTING_TEXT_LENGTH = 2_048;
 
 export function getRpcSettings(settings: Settings): RpcSettingView[] {
-	return RPC_SETTING_DESCRIPTORS.map(descriptor => toRpcSetting(settings, descriptor));
+	const views: RpcSettingView[] = [];
+	for (const definition of rpcSettingDefs) {
+		if (definition.condition && !definition.condition()) continue;
+		const setting = getRpcSettingHandle(definition);
+		if (!setting) continue;
+		const view = toRpcSetting(settings, definition, setting);
+		if (view) views.push(view);
+	}
+	return views;
 }
 
 export async function setRpcSetting(
@@ -249,22 +138,32 @@ export async function setRpcSetting(
 	pathInput: string,
 	value: unknown,
 ): Promise<RpcSettingView> {
-	if (!isRpcSettingPath(pathInput)) throw new Error(`Setting is not available over RPC: ${pathInput}`);
-	const descriptor = RPC_SETTING_DESCRIPTORS.find(candidate => candidate.path === pathInput);
-	if (!descriptor) throw new Error(`Setting is not available over RPC: ${pathInput}`);
-	const path = descriptor.path;
-	const nextValue = validateSettingValue(path, value);
-	const previousValue = session.settings.get(path);
-	if (!isRpcSettingValue(previousValue)) throw new Error(`Setting value is not RPC-compatible: ${path}`);
+	const definition = rpcSettingDefs.find(candidate => candidate.path === pathInput);
+	const setting =
+		definition && (!definition.condition || definition.condition()) ? getRpcSettingHandle(definition) : undefined;
+	if (!definition || !setting) throw new Error(`Setting is not available over RPC: ${pathInput}`);
 
-	session.settings.set(path, nextValue as never);
+	const nextValue = validateSettingValue(definition, value);
+	const previousValue = setting.layered(session.settings);
+	const previousView = toRpcSetting(session.settings, definition, setting);
+	if (!previousView) throw new Error(`Setting value is not RPC-compatible: ${pathInput}`);
+	const effect = rpcSettingEffects.get(pathInput);
+
+	setting.set(session.settings, nextValue);
 	try {
-		if (descriptor.effect) await descriptor.effect(session, nextValue);
+		if (effect) await effect(session, nextValue);
+		await session.settings.flush();
 	} catch (error) {
-		session.settings.set(path, previousValue as never);
-		if (descriptor.effect) {
+		if (previousValue === undefined) setting.unset(session.settings);
+		else setting.set(session.settings, previousValue);
+		try {
+			await session.settings.flush();
+		} catch {
+			// Preserve the original application or persistence error.
+		}
+		if (effect) {
 			try {
-				await descriptor.effect(session, previousValue);
+				await effect(session, previousView.value);
 			} catch {
 				// Preserve the original application error; rollback is best effort.
 			}
@@ -272,106 +171,242 @@ export async function setRpcSetting(
 		throw error;
 	}
 
-	return toRpcSetting(session.settings, descriptor);
+	const view = toRpcSetting(session.settings, definition, setting);
+	if (!view) throw new Error(`Setting value is not RPC-compatible: ${pathInput}`);
+	return view;
 }
 
-function isRpcSettingPath(path: string): path is RpcSettingPath {
-	return Object.hasOwn(RPC_SETTING_PATH_SET, path);
+function getRpcSettingHandle(definition: SettingDef): AnySetting | undefined {
+	const setting = lookup(definition.path);
+	return setting && !setting.isCredential ? setting : undefined;
 }
 
-function toRpcSetting(settings: Settings, descriptor: (typeof RPC_SETTING_DESCRIPTORS)[number]): RpcSettingView {
-	const { path } = descriptor;
-	if (isCredential(path)) throw new Error(`Credential setting cannot be exposed over RPC: ${path}`);
-	const ui = getUi(path);
-	if (!ui) throw new Error(`Setting has no UI metadata: ${path}`);
-	const value = settings.get(path);
-	if (!isRpcSettingValue(value)) throw new Error(`Setting value is not RPC-compatible: ${path}`);
-	const type = getType(path);
-	const options = type === "boolean" ? undefined : getSettingOptions(path);
-	if (type !== "boolean" && (!options || options.length === 0)) {
-		throw new Error(`Setting has no finite choices: ${path}`);
-	}
-	return {
-		path,
-		tab: normalizeRpcSettingTab(ui.tab),
-		group: ui.group,
-		label: ui.label,
-		description: ui.description,
-		control: type === "boolean" ? "toggle" : type === "array" ? "multiselect" : "select",
-		value,
-		options,
-		...(type === "array" ? { ordered: ui.ordered === true } : {}),
-		apply: descriptor.apply,
+function toRpcSetting(settings: Settings, definition: SettingDef, setting: AnySetting): RpcSettingView | undefined {
+	const common = {
+		path: definition.path,
+		tab: definition.tab,
+		group: definition.group,
+		label: definition.label,
+		description: definition.description,
+		warning: definition.warning,
 	};
+	const value = setting.layered(settings);
+
+	if (definition.type === "boolean") {
+		if (typeof value !== "boolean") return undefined;
+		return { ...common, control: "toggle", value };
+	}
+
+	if (definition.type === "enum") {
+		if (definition.values.length === 0 || typeof value !== "string" || !definition.values.includes(value))
+			return undefined;
+		return {
+			...common,
+			control: "select",
+			value,
+			options: definition.values.map(option => ({ value: option, label: formatOptionLabel(option) })),
+		};
+	}
+
+	if (definition.type === "submenu") {
+		if (definition.options.length === 0 && definition.schemaType === "string") {
+			if (value !== undefined && typeof value !== "string") return undefined;
+			return { ...common, control: "text", value: value ?? "" };
+		}
+		const options = toRpcSettingOptions(
+			definition.options,
+			definition.schemaType,
+			definition.path,
+			definition.defaultValue,
+		);
+		if (
+			options.length === 0 ||
+			(typeof value !== "string" && typeof value !== "number") ||
+			!options.some(option => Object.is(option.value, value))
+		) {
+			return undefined;
+		}
+		return { ...common, control: "select", value, options };
+	}
+
+	if (definition.type === "multiselect") {
+		const options = toRpcSettingOptions(
+			definition.options,
+			definition.schemaType,
+			definition.path,
+			definition.defaultValue,
+		);
+		if (
+			options.length === 0 ||
+			!Array.isArray(value) ||
+			!value.every(
+				(entry): entry is string =>
+					typeof entry === "string" &&
+					entry.length <= MAX_RPC_SETTING_TEXT_LENGTH &&
+					options.some(option => option.value === entry),
+			)
+		) {
+			return undefined;
+		}
+		return { ...common, control: "multiselect", value, options, ordered: definition.ordered };
+	}
+
+	if (definition.type === "providerLimits") {
+		if (!isPlainRecord(value)) return undefined;
+		const limits = settingsHost.validateProviderLimits(value);
+		if (!isRpcSettingJsonValue(limits)) return undefined;
+		return { ...common, control: "provider-limits", value: limits };
+	}
+
+	if (definition.schemaType === "record") {
+		if (!isPlainRecord(value) || !isRpcSettingJsonValue(value)) return undefined;
+		return { ...common, control: "json", value };
+	}
+	if (definition.schemaType === "string") {
+		if (value !== undefined && (typeof value !== "string" || value.length > MAX_RPC_SETTING_TEXT_LENGTH)) {
+			return undefined;
+		}
+		return { ...common, control: "text", value: value ?? "" };
+	}
+	return undefined;
 }
 
-function getSettingOptions(path: RpcSettingPath): RpcSettingOption[] | undefined {
-	const configured = getUi(path)?.options;
-	if (configured === "runtime") return undefined;
-	const values = Array.isArray(configured)
-		? configured
-		: getEnumValues(path)?.map(value => ({ value, label: formatOptionLabel(value) }));
-	if (!values) return undefined;
-	const numberSetting = getType(path) === "number";
-	return values.map(option => ({
-		value: numberSetting ? parseNumberOption(path, option.value) : option.value,
+function toRpcSettingOptions(
+	options: ReadonlyArray<{ value: string; label: string; description?: string }>,
+	schemaType: string,
+	path: string,
+	defaultValue: unknown,
+): RpcSettingOption[] {
+	return options.map(option => ({
+		value: schemaType === "number" ? parseNumberOption(path, option.value, defaultValue) : option.value,
 		label: option.label,
 		description: option.description,
 	}));
 }
 
-function parseNumberOption(path: RpcSettingPath, value: string): number {
+function parseNumberOption(path: string, value: string, defaultValue: unknown): number {
+	if (value === "default" && typeof defaultValue === "number" && Number.isFinite(defaultValue)) {
+		return defaultValue;
+	}
 	const parsed = Number(value);
 	if (!Number.isFinite(parsed)) throw new Error(`Invalid numeric option for ${path}: ${value}`);
 	return parsed;
 }
 
-function validateSettingValue(path: RpcSettingPath, value: unknown): RpcSettingValue {
-	const type = getType(path);
-	if (type === "boolean") {
-		if (typeof value !== "boolean") throw new TypeError(`${path} must be boolean`);
+function validateSettingValue(definition: SettingDef, value: unknown): RpcSettingValue {
+	if (definition.type === "boolean") {
+		if (typeof value !== "boolean") throw new TypeError(`${definition.path} must be boolean`);
 		return value;
 	}
-	if (type === "array") {
-		if (!Array.isArray(value) || !value.every((entry): entry is string => typeof entry === "string")) {
-			throw new TypeError(`${path} must be an array of strings`);
+
+	if (definition.type === "enum") {
+		if (typeof value !== "string" || !definition.values.includes(value)) {
+			throw new RangeError(`${String(value)} is not a supported value for ${definition.path}`);
 		}
-		const options = getSettingOptions(path);
-		if (!options?.length || value.some(entry => !options.some(option => option.value === entry))) {
-			throw new RangeError(`${JSON.stringify(value)} is not a supported value for ${path}`);
+		return value;
+	}
+
+	if (definition.type === "submenu") {
+		if (definition.options.length === 0 && definition.schemaType === "string") {
+			if (typeof value !== "string" || value.length > MAX_RPC_SETTING_TEXT_LENGTH) {
+				throw new TypeError(
+					`${definition.path} must be a string of at most ${MAX_RPC_SETTING_TEXT_LENGTH} characters`,
+				);
+			}
+			return value;
 		}
-		return [...value];
+		const options = toRpcSettingOptions(
+			definition.options,
+			definition.schemaType,
+			definition.path,
+			definition.defaultValue,
+		);
+		const matches = options.some(option => Object.is(option.value, value));
+		if (!matches) throw new RangeError(`${String(value)} is not a supported value for ${definition.path}`);
+		if (definition.schemaType === "number" && typeof value === "number") return value;
+		if (definition.schemaType !== "number" && typeof value === "string") return value;
+		throw new TypeError(`${definition.path} must match one of its scalar options`);
 	}
-	if (!isRpcSettingValue(value) || Array.isArray(value)) throw new TypeError(`${path} must be a scalar value`);
-	const options = getSettingOptions(path);
-	if (!options?.some(option => Object.is(option.value, value))) {
-		throw new RangeError(`${String(value)} is not a supported value for ${path}`);
+
+	if (definition.type === "multiselect") {
+		const options = toRpcSettingOptions(
+			definition.options,
+			definition.schemaType,
+			definition.path,
+			definition.defaultValue,
+		);
+		if (
+			!Array.isArray(value) ||
+			!value.every(
+				(entry): entry is string =>
+					typeof entry === "string" &&
+					entry.length <= MAX_RPC_SETTING_TEXT_LENGTH &&
+					options.some(option => option.value === entry),
+			)
+		) {
+			throw new TypeError(`${definition.path} must contain only supported string options`);
+		}
+		return value;
 	}
-	return value;
+
+	if (definition.type === "providerLimits") {
+		if (!isPlainRecord(value) || !isRpcSettingJsonValue(value)) {
+			throw new TypeError(`${definition.path} must be a JSON object`);
+		}
+		const limits = settingsHost.validateProviderLimits(value);
+		if (!isRpcSettingJsonValue(limits)) throw new TypeError(`${definition.path} is not RPC-compatible`);
+		return limits;
+	}
+
+	if (definition.schemaType === "record") {
+		if (!isPlainRecord(value) || !isRpcSettingJsonValue(value)) {
+			throw new TypeError(`${definition.path} must be a JSON object`);
+		}
+		return value;
+	}
+	if (definition.schemaType === "string") {
+		if (typeof value !== "string" || value.length > MAX_RPC_SETTING_TEXT_LENGTH) {
+			throw new TypeError(
+				`${definition.path} must be a string of at most ${MAX_RPC_SETTING_TEXT_LENGTH} characters`,
+			);
+		}
+		return value;
+	}
+	throw new TypeError(`${definition.path} does not have an RPC-editable value`);
 }
 
-function isRpcSettingValue(value: unknown): value is RpcSettingValue {
-	return (
-		typeof value === "boolean" ||
-		typeof value === "string" ||
-		(typeof value === "number" && Number.isFinite(value)) ||
-		(Array.isArray(value) && value.every(entry => typeof entry === "string"))
-	);
+function isRpcSettingJsonValue(value: unknown): value is RpcSettingValue {
+	let entries = 0;
+	const visit = (candidate: unknown, depth: number): boolean => {
+		if (depth > MAX_RPC_SETTING_DEPTH) return false;
+		if (candidate === null || typeof candidate === "boolean") return true;
+		if (typeof candidate === "string") return candidate.length <= MAX_RPC_SETTING_TEXT_LENGTH;
+		if (typeof candidate === "number") return Number.isFinite(candidate);
+		if (Array.isArray(candidate)) {
+			for (const entry of candidate) {
+				if (++entries > MAX_RPC_SETTING_ENTRIES || !visit(entry, depth + 1)) return false;
+			}
+			return true;
+		}
+		if (!isPlainRecord(candidate)) return false;
+		for (const key of Object.keys(candidate)) {
+			if (
+				key.length > MAX_RPC_SETTING_TEXT_LENGTH ||
+				++entries > MAX_RPC_SETTING_ENTRIES ||
+				!visit(candidate[key], depth + 1)
+			) {
+				return false;
+			}
+		}
+		return true;
+	};
+	return visit(value, 0);
 }
 
-function normalizeRpcSettingTab(tab: SettingTab): RpcSettingTab {
-	if (
-		tab === "appearance" ||
-		tab === "model" ||
-		tab === "interaction" ||
-		tab === "context" ||
-		tab === "files" ||
-		tab === "shell" ||
-		tab === "tools" ||
-		tab === "tasks"
-	)
-		return tab;
-	throw new Error(`Setting tab is not available over RPC: ${tab}`);
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
 function formatOptionLabel(value: string): string {

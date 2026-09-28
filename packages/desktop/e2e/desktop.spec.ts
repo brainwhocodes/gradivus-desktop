@@ -405,16 +405,15 @@ test("keeps workspace and chat order stable while workspace groups collapse", as
 		expect(initialOrder[0]).toContain("workspace-a");
 		expect(initialOrder[1]).toContain("workspace-b");
 		const workspaceAChatOrder = await page
-			.getByRole("tree", { name: "workspace-a chats" })
-			.getByRole("treeitem")
+			.getByRole("list", { name: "workspace-a chats" })
+			.getByRole("listitem")
 			.allTextContents();
 
-		await page.getByRole("treeitem", { name: /Workspace B chat/ }).click();
-		await expect(page.getByRole("treeitem", { name: /Workspace B chat/ })).toHaveAttribute("aria-selected", "true");
-		await expect(page.getByRole("button", { name: "Collapse workspace workspace-b" })).toHaveAttribute(
-			"aria-current",
-			"true",
-		);
+		const workspaceBChat = page.getByRole("list", { name: "workspace-b chats" }).getByRole("button", {
+			name: /^Workspace B chat/,
+		});
+		await workspaceBChat.click();
+		await expect(workspaceBChat).toHaveAttribute("aria-current", "page");
 		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
 
 		await page.getByRole("button", { name: "Collapse workspace workspace-b" }).click();
@@ -422,16 +421,19 @@ test("keeps workspace and chat order stable while workspace groups collapse", as
 			"aria-expanded",
 			"false",
 		);
-		await expect(page.getByRole("tree", { name: "workspace-b chats" })).toHaveCount(0);
+		await expect(page.getByRole("list", { name: "workspace-b chats" })).toHaveCount(0);
 		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
 		await page.getByRole("button", { name: "Expand workspace workspace-b" }).press("Enter");
-		await expect(page.getByRole("tree", { name: "workspace-b chats" })).toBeVisible();
+		await expect(page.getByRole("list", { name: "workspace-b chats" })).toBeVisible();
 
-		await page.getByRole("treeitem", { name: /Workspace A second/ }).click();
-		await expect(page.getByRole("treeitem", { name: /Workspace A second/ })).toHaveAttribute("aria-selected", "true");
+		const workspaceASecond = page.getByRole("list", { name: "workspace-a chats" }).getByRole("button", {
+			name: /^Workspace A second/,
+		});
+		await workspaceASecond.click();
+		await expect(workspaceASecond).toHaveAttribute("aria-current", "page");
 		expect(await workspaceToggles.allTextContents()).toEqual(initialOrder);
 		expect(
-			await page.getByRole("tree", { name: "workspace-a chats" }).getByRole("treeitem").allTextContents(),
+			await page.getByRole("list", { name: "workspace-a chats" }).getByRole("listitem").allTextContents(),
 		).toEqual(workspaceAChatOrder);
 	} finally {
 		await teardownElectronTest(app, userData);

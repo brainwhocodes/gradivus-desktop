@@ -7,11 +7,11 @@ import {
 	ensureSecureRuntimeRoot,
 	getGlobalDaemonRuntimeDir,
 	isEnoent,
+	isEexist,
 	LocalJsonlDecoder,
 	logger,
 	postmortem,
 	readControlToken,
-	rotateControlToken,
 } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
@@ -75,23 +75,31 @@ export interface DaemonBrokerClient {
 export class DaemonBrokerRejectedError extends Error {}
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
-	let stat: { isSymbolicLink(): boolean; isDirectory(): boolean };
-	try {
-		stat = await fs.lstat(runtimeDir);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-		stat = await fs.lstat(runtimeDir);
-	}
-	if (!stat.isSymbolicLink() && stat.isDirectory()) await fs.chmod(runtimeDir, 0o700);
 	await ensureSecureRuntimeRoot(runtimeDir);
-	try {
-		return await readControlToken(runtimeDir, TOKEN_FILE);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		await rotateControlToken(runtimeDir, TOKEN_FILE);
-		return readControlToken(runtimeDir, TOKEN_FILE);
+	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			const token = await readControlToken(runtimeDir, TOKEN_FILE);
+			if (token.length > 0) return token;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+
+		try {
+			const handle = await fs.open(tokenPath, "wx", 0o600);
+			try {
+				const token = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
+				await handle.writeFile(token, "utf8");
+				return token;
+			} finally {
+				await handle.close();
+			}
+		} catch (error) {
+			if (!isEexist(error)) throw error;
+		}
+		await Bun.sleep(10);
 	}
+	throw new Error(`Timed out creating daemon broker token in ${runtimeDir}`);
 }
 
 function requestTimeoutMs(operation: DaemonOperation): number {
@@ -288,8 +296,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#bindSocket(await openSocket(this.#endpoint, 250));
 			return;
 		} catch {
-			// No live broker. Multiple clients may race to spawn; the broker's PID
-			// lease selects one winner before any candidate touches the socket.
+			// No live broker. Multiple clients may race to spawn; the broker's
+			// process-owned lease selects one winner before any candidate touches
+			// the socket.
 		}
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -303,7 +312,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				await Bun.sleep(CONNECT_RETRY_MS);
 			}
 		}
-		throw new Error(`Failed to start daemon broker: ${lastError?.message ?? "socket unavailable"}`);
+		throw new Error(
+			`Failed to start daemon broker at ${this.#endpoint} after ${CONNECT_TIMEOUT_MS / 1000}s: ` +
+				`${lastError?.message ?? "socket unavailable"}. Scope: ${this.#runtimeDir}. ` +
+				"Run `omp --smoke-test` to verify broker startup, or `omp ps` to inspect supervised processes.",
+		);
 	}
 
 	#spawnBroker(): void {

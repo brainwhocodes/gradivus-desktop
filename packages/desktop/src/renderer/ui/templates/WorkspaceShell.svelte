@@ -5,8 +5,7 @@
 	import Refresh from "@solar-icons/svelte/linear/refresh";
 	import type { BrowserViewState } from "../../../shared/contracts";
 	import type { WorkspaceTab } from "../../workspace-types";
-	import GradivusMark from "../atoms/GradivusMark.svelte";
-	import IconButton from "../molecules/IconButton.svelte";
+	import { GradivusMark, IconButton } from "@gradivus/chat";
 	import WindowControls from "../molecules/WindowControls.svelte";
 	import WorkspaceTabMolecule from "../molecules/WorkspaceTab.svelte";
 

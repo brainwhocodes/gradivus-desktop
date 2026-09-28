@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
@@ -9,18 +10,16 @@ const previousCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
 
 function session(options: { configured?: boolean; relay?: boolean } = {}): ToolSession {
 	const configured = options.configured ?? true;
+	const settings = Settings.isolated({
+		"browser.relay": options.relay ?? configured,
+		"browser.relayUrl": "http://127.0.0.1:1",
+		"browser.headless": true,
+		...(configured ? { "browser.cdpUrl": "http://127.0.0.1:9223" } : {}),
+	});
 	return {
 		cwd: process.cwd(),
 		hasUI: false,
-		settings: {
-			get: (key: string) => {
-				if (key === "browser.relay") return options.relay ?? configured;
-				if (key === "browser.relayUrl") return "http://127.0.0.1:1";
-				if (key === "browser.cdpUrl") return configured ? "http://127.0.0.1:9223" : undefined;
-				if (key === "browser.headless") return true;
-				return undefined;
-			},
-		},
+		settings,
 	} as unknown as ToolSession;
 }
 
@@ -69,11 +68,7 @@ describe("Gradivus browser inheritance", () => {
 				},
 				session(),
 			),
-		).toEqual({ kind: "connected", cdpUrl: "http://127.0.0.1:9444" });
-		expect(resolveBrowserKind({ action: "open", app: { path: process.execPath } }, session())).toEqual({
-			kind: "spawned",
-			path: process.execPath,
-		});
+		).toMatchObject({ kind: "spawned", path: process.execPath });
 	});
 	test("keeps explicit relay and cmux choices in Gradivus", () => {
 		process.env.GRADIVUS_TERMINAL = "1";

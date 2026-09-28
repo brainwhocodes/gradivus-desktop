@@ -12,16 +12,12 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { PlanReviewDecision } from "../../plan-mode/review-controller";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import type { FileEntry } from "../../session/session-entries";
+import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type {
-	AgentProgress,
-	SubagentEventPayload,
-	SubagentLifecyclePayload,
-	SubagentProgressPayload,
-} from "../../task";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { BrowserTabInventory } from "../../tools/browser/tab-supervisor";
-import type { TodoPhase } from "../../tools/todo";
 import type { AgentPromptScope, RpcAgentPromptView } from "./rpc-agents";
 import type { RpcFileDiffResult } from "./rpc-file-diff";
 import type { RpcMessagesPage } from "./rpc-messages";
@@ -40,6 +36,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "open_session"; sessionDir: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -86,10 +83,13 @@ export type RpcCommand =
 			expectedRevision: string;
 	  }
 	| { id?: string; type: "get_available_commands" }
+	| { id?: string; type: "get_entries"; since?: string }
+	| { id?: string; type: "get_tree" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[]; expectedRevision: number; action: string }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
+	| { id?: string; type: "set_event_filter"; events: string[] | null }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
 	| { id?: string; type: "get_agent_hub" }
@@ -113,6 +113,7 @@ export type RpcCommand =
 	// Thinking
 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
 	| { id?: string; type: "cycle_thinking_level" }
+	| { id?: string; type: "get_available_thinking_levels" }
 
 	// Queue modes
 	| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
@@ -155,11 +156,28 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
-export type RpcSettingValue = boolean | string | number | string[];
-export type RpcSettingTab = "appearance" | "model" | "interaction" | "context" | "files" | "shell" | "tools" | "tasks";
+export type RpcSettingJsonValue =
+	| null
+	| boolean
+	| string
+	| number
+	| RpcSettingJsonValue[]
+	| { [key: string]: RpcSettingJsonValue };
+export type RpcSettingValue = RpcSettingJsonValue;
+export type RpcSettingTab =
+	| "appearance"
+	| "model"
+	| "interaction"
+	| "context"
+	| "memory"
+	| "files"
+	| "shell"
+	| "tools"
+	| "tasks"
+	| "providers";
 
 export interface RpcSettingOption {
-	value: RpcSettingValue;
+	value: string | number;
 	label: string;
 	description?: string;
 }
@@ -175,11 +193,11 @@ export interface RpcSettingView {
 	group?: string;
 	label: string;
 	description: string;
-	control: "toggle" | "select" | "multiselect";
+	warning?: string;
+	control: "toggle" | "select" | "multiselect" | "text" | "json" | "provider-limits";
 	value: RpcSettingValue;
 	options?: RpcSettingOption[];
 	ordered?: boolean;
-	apply: "immediate" | "next-session";
 }
 export interface RpcRuntimeMetrics {
 	pid: number;
@@ -249,6 +267,11 @@ export interface RpcSessionState {
 	queuedMessageCount: number;
 	todoState: RpcTodoState;
 	runtime: RpcRuntimeMetrics;
+	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	hasPendingAsyncWork: boolean;
+	/** Same predicate as `session_settled`: idle with nothing queued or pending. */
+	isSettled: boolean;
+	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
@@ -279,11 +302,74 @@ export interface RpcConfigUpdateFrame {
 	planMode?: { enabled: boolean; planFilePath?: string; workflow?: "parallel" | "iterative" };
 }
 
+/** How a prompt's work ended, as reported by its {@link RpcPromptResultFrame}. */
+export type RpcPromptStatus = "completed" | "aborted" | "error";
+
+/**
+ * Failure detail for a `prompt_result` with `status: "error"`. `message` is the
+ * provider's error text without OMP-local diagnostics (e.g. request dump paths).
+ */
+export interface RpcPromptError {
+	message: string;
+	provider?: string;
+	model?: string;
+	/** HTTP status reported by the provider, when the failure came from a request. */
+	httpStatus?: number;
+	/** The failure is classified transient: resubmitting later may succeed. OMP's own retries are already exhausted. */
+	retryable: boolean;
+}
+
+/**
+ * Terminal frame emitted exactly once per accepted `prompt`/`abort_and_prompt`,
+ * after all work the prompt caused has settled. Correlate on `id`.
+ */
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
+	/** False when the prompt completed locally (slash command) or failed before reaching the agent. */
 	agentInvoked: boolean;
-	error?: { message: string; code?: string };
+	error?: RpcPromptError & { code?: string };
+	status: RpcPromptStatus;
+	/**
+	 * The agent yielded and nothing will wake the session again: no run is live and no
+	 * queued message or background job (async bash/task/eval) will inject a follow-up.
+	 * When false, a {@link RpcSessionSettledFrame} follows once that work is done.
+	 */
+	sessionSettled: boolean;
+}
+
+/**
+ * Emitted when the session goes quiet after agent activity: the last run yielded
+ * and no background work remains that could inject messages and wake it again.
+ * Distinct from a terminal `agent_end`, which only means one run yielded.
+ */
+export interface RpcSessionSettledFrame {
+	type: "session_settled";
+}
+
+/** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
+export interface RpcOpenSessionResult {
+	cancelled: boolean;
+	resumed: boolean;
+	sessionId: string;
+	sessionFile?: string;
+}
+
+export interface RpcReadyFrame {
+	type: "ready";
+	protocolVersion: 1;
+	supportedProtocolVersions: [1, 2];
+	maxFrameBytes: number;
+	maxReassembledFrameBytes: number;
+}
+
+export interface RpcChunkFrame {
+	type: "rpc_chunk";
+	chunkId: string;
+	index: number;
+	count: number;
+	byteLength: number;
+	data: string;
 }
 
 export interface RpcHandoffResult {
@@ -418,6 +504,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -467,9 +554,23 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "get_entries";
+			success: true;
+			data: { entries: SessionEntry[]; leafId: string | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "set_setting";
 			success: true;
 			data: { setting: RpcSettingView };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_tree";
+			success: true;
+			data: { tree: SessionTreeNode[]; leafId: string | null };
 	  }
 	| {
 			id?: string;
@@ -488,6 +589,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoState: RpcTodoState } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
+	| { id?: string; type: "response"; command: "set_event_filter"; success: true; data: { events: string[] | null } }
 	| {
 			id?: string;
 			type: "response";
@@ -610,6 +712,13 @@ export type RpcResponse =
 			success: true;
 			data: { level: Effort } | null;
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_available_thinking_levels";
+			success: true;
+			data: { levels: ThinkingLevel[] };
+	  }
 
 	// Queue modes
 	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
@@ -705,8 +814,23 @@ export interface RpcBrowserInventoryUpdateFrame {
 }
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
+/** Message lifecycle event kinds that RPC mode stamps with a `messageId`. */
+export type RpcMessageEventType = "message_start" | "message_update" | "message_end";
+
+/**
+ * Message lifecycle frame as written by RPC mode. `messageId` is shared by the
+ * `message_start`, every `message_update`, and the `message_end` of one message;
+ * it is unique within the RPC process.
+ */
+export type RpcMessageEventFrame = Extract<AgentSessionEvent, { type: RpcMessageEventType }> & { messageId: string };
+
+/** Session event as written to stdout: message lifecycle events carry a `messageId`. */
+export type RpcAgentSessionEventFrame =
+	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
+	| RpcMessageEventFrame;
+
 export type RpcSessionEventFrame =
-	| AgentSessionEvent
+	| RpcAgentSessionEventFrame
 	| RpcSubagentFrame
 	| RpcPromptResultFrame
 	| RpcAgentHubUpdateFrame
@@ -801,6 +925,8 @@ export interface RpcHostToolDefinition {
 	hidden?: boolean;
 	/** How this host tool is presented when enabled; omission normalizes to `"discoverable"` at the adapter boundary. */
 	loadMode?: ToolLoadMode;
+	/** Whether this host tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 /** Emitted by the RPC server when it needs the host to execute a registered tool. */

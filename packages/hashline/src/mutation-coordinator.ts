@@ -126,7 +126,7 @@ export class MutationCoordinator {
 	}
 
 	#drain(): void {
-		for (let index = 0; index < this.#pending.length; ) {
+		for (let index = 0; index < this.#pending.length;) {
 			const request = this.#pending[index];
 			if (request.settled || request.signal?.aborted) {
 				request.settled = true;

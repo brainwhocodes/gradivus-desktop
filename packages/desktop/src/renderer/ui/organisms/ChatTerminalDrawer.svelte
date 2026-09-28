@@ -10,7 +10,7 @@
     type TerminalRendererAppearance,
     type TerminalRendererConfiguration,
   } from "../../terminal/terminal-renderer";
-  import ModalShell from "../molecules/ModalShell.svelte";
+  import { ModalShell } from "@gradivus/chat";
 
   const NATIVE_MONO_FONT =
     'ui-monospace, "SFMono-Regular", Menlo, Monaco, "Cascadia Mono", Consolas, "Liberation Mono", monospace';

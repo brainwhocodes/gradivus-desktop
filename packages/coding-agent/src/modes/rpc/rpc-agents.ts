@@ -6,7 +6,8 @@ import { refreshAgentDiscovery } from "../../task";
 import { replaceAgentPromptBody, serializeAgentDefinition } from "../../task/agent-serialization";
 import { parseAgent } from "../../task/agents";
 import { discoverAgents } from "../../task/discovery";
-import type { AgentDefinition, AgentSource } from "../../task/types";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentDefinition } from "../../task/types";
 
 export type AgentPromptScope = "project" | "user";
 

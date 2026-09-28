@@ -1,9 +1,9 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { TimelineItem, TimelinePresentation, TimelineTone } from "../shared/contracts";
 
-export { TRANSCRIPT_PRESENTATION_LIMITS } from "../shared/transcript-limits";
+export { TRANSCRIPT_PRESENTATION_LIMITS } from "@gradivus/chat/transcript-limits";
 
-import { TRANSCRIPT_PRESENTATION_LIMITS } from "../shared/transcript-limits";
+import { TRANSCRIPT_PRESENTATION_LIMITS } from "@gradivus/chat/transcript-limits";
 
 type MessageProjection = {
 	text: string;

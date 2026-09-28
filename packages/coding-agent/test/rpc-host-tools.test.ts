@@ -8,6 +8,7 @@ import type {
 	RpcHostToolCancelRequest,
 	RpcHostToolUpdate,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { toolReadsSkillUris } from "@oh-my-pi/pi-coding-agent/system-prompt";
 
 const fixturePath = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 
@@ -100,6 +101,21 @@ describe("RpcHostToolBridge", () => {
 		});
 		await expect(execution).rejects.toThrow('Host tool "host_wait" was aborted');
 	});
+
+	it("exposes skill URI readability declared by the host tool", async () => {
+		const bridge = new RpcHostToolBridge(() => {});
+		const [tool] = bridge.setTools([
+			{
+				name: "host_read",
+				label: "Host Read",
+				description: "Reads files in the host process",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+				readsSkillUris: true,
+			},
+		]);
+
+		expect(toolReadsSkillUris(tool)).toBe(true);
+	});
 });
 
 describe("RpcClient custom tools", () => {
@@ -129,7 +145,9 @@ describe("RpcClient custom tools", () => {
 
 		try {
 			await client.start();
-			const events = await client.promptAndWait("Trigger host tool");
+			const eventsPromise = client.collectEvents();
+			await client.prompt("Trigger host tool");
+			const events = await eventsPromise;
 			const toolEnd = events.find(
 				(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
 					event.type === "tool_execution_end",

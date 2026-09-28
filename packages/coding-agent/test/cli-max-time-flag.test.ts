@@ -147,14 +147,12 @@ describe("parseArgs — --max-time flag", () => {
 		try {
 			for (const testCase of cases) {
 				const authStorage = await AuthStorage.create(path.join(tempDir.path(), `${testCase.name}-auth.db`));
-				await authStorage.set("anthropic", [
-					startupOAuthCredential(`${testCase.name}-a`),
-					startupOAuthCredential(`${testCase.name}-b`),
-				]);
+				await authStorage.credentials.upsert("anthropic", startupOAuthCredential(`${testCase.name}-a`));
+				await authStorage.credentials.upsert("anthropic", startupOAuthCredential(`${testCase.name}-b`));
 				const selectedSuffix = `${testCase.name}-b`;
 				const identityHash = startupAccountHash(selectedSuffix);
-				const selectedAccount = authStorage
-					.listStoredOAuthAccounts("anthropic")
+				const selectedAccount = authStorage.oauth
+					.accounts("anthropic")
 					.find(account => account.accountId === `account-${selectedSuffix}`);
 				const settings = Settings.isolated({
 					"marketplace.autoUpdate": "off",
@@ -170,18 +168,18 @@ describe("parseArgs — --max-time flag", () => {
 				parsed.noLsp = true;
 				parsed.sessionDir = tempDir.path();
 				const stopAtAvailability = new Error(`stop at ${testCase.name} availability`);
-				const availabilitySpy = vi.spyOn(ModelRegistry.prototype, "getAvailable").mockImplementation(function (
-					this: ModelRegistry,
-				) {
-					expect(this.authStorage).toBe(authStorage);
-					expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
-						identityHash,
-						credentialId: selectedAccount?.credentialId,
-						available: true,
-						allowSiblingFailover: true,
+				const availabilitySpy = vi
+					.spyOn(ModelRegistry.prototype, "getAvailable")
+					.mockImplementation(function (this: ModelRegistry) {
+						expect(this.authStorage).toBe(authStorage);
+						expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+							identityHash,
+							credentialId: selectedAccount?.credentialId,
+							available: true,
+							allowSiblingFailover: true,
+						});
+						throw stopAtAvailability;
 					});
-					throw stopAtAvailability;
-				});
 
 				try {
 					await expect(

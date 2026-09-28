@@ -8,7 +8,7 @@ import { discoverAuthStorage } from "../sdk";
 import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import { SessionManager } from "../session/session-manager";
 import { reserveStructuredSubagentId, runStructuredSubagent } from "../task/structured-subagent";
-import type { AgentProgress } from "../task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { EventBus } from "../utils/event-bus";
 import type { CleanseCheckerDescriptor, CustomCleanseCheckerSpec } from "./checkers";
@@ -78,7 +78,8 @@ export async function createCleanseAgentRuntime(options: {
 	hooks?: CleanseAgentHooks;
 }): Promise<CleanseAgentRuntime> {
 	const cwd = options.cwd ?? getProjectDir();
-	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	const settings = await Settings.init({ cwd });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	installOAuthAccountSelectionFromSettings(settings, authStorage);
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();

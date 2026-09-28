@@ -36,6 +36,7 @@
       "types": "./src/index.ts",
       "import": "./src/index.ts"
     },
+    "./aria/aria-snapshot.bundle.txt": "./src/aria/aria-snapshot.bundle.txt",
     "./*": {
       "types": "./src/*.ts",
       "import": "./src/*.ts"

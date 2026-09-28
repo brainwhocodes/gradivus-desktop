@@ -359,10 +359,9 @@ describe("dispatchRpcCommand", () => {
 
 describe("RpcCommandDispatcher", () => {
 	test("control pushes resolve extension UI requests while an ordinary command is active", async () => {
-		let depsRef: RpcCommandDeps;
-		const { deps, outputs } = makeDeps(async command => {
+		const setup: { deps: RpcCommandDeps; outputs: OutputFrame[] } = makeDeps(async command => {
 			if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);
-			const response = await requestExtensionInput(depsRef, "ui-active", "Continue?");
+			const response = await requestExtensionInput(setup.deps, "ui-active", "Continue?");
 			return {
 				id: command.id,
 				type: "response",
@@ -371,7 +370,7 @@ describe("RpcCommandDispatcher", () => {
 				data: { agentInvoked: "value" in response && response.value === "continue" },
 			};
 		});
-		depsRef = deps;
+		const { deps, outputs } = setup;
 		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "prompt-1", type: "prompt", message: "ask extension" });
@@ -446,6 +445,9 @@ describe("RpcCommandDispatcher", () => {
 							heapTotalBytes: 32 * 1024 * 1024,
 							externalMemoryBytes: 1024,
 						},
+						hasPendingAsyncWork: false,
+						isSettled: true,
+						todoPhases: [],
 					},
 				};
 			}
@@ -575,12 +577,11 @@ describe("RpcCommandDispatcher", () => {
 		const disconnectMessage = "RPC client disconnected before extension UI response completed";
 		const pendingExtensionRequests = new RpcPendingExtensionRequests();
 		const started: string[] = [];
-		let depsRef: RpcCommandDeps;
-		const { deps, outputs } = makeDeps(
+		const setup: { deps: RpcCommandDeps; outputs: OutputFrame[] } = makeDeps(
 			async command => {
 				if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);
 				started.push(command.id ?? "");
-				await requestExtensionInput(depsRef, `${command.id}-dialog`, command.message);
+				await requestExtensionInput(setup.deps, `${command.id}-dialog`, command.message);
 				return {
 					id: command.id,
 					type: "response",
@@ -591,7 +592,7 @@ describe("RpcCommandDispatcher", () => {
 			},
 			{ pendingExtensionRequests },
 		);
-		depsRef = deps;
+		const { deps, outputs } = setup;
 		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "active", type: "prompt", message: "active dialog" });

@@ -1,19 +1,15 @@
-@use "tokens/primitives";
-@use "tokens/semantic";
-@use "tokens/layout";
-@use "foundation";
-@use "atoms/dropdown";
+@use "@gradivus/chat/styles/chat.scss" as shared-chat;
+
 @use "templates/workspaceshell";
 @use "organisms/addressform";
 @use "organisms/browsertoolbar";
 @use "organisms/browserpane";
 @use "organisms/selectionqueue";
-@use "organisms/sessionrail";
-@use "organisms/contextmeter";
-@use "organisms/runinspector";
-@use "organisms/todoinspector";
-@use "organisms/planreview";
-@use "organisms/composer";
 @use "pages/workspace";
-@use "pages/chat";
-@use "pages/settings";
+@use "pages/chat-desktop";
+@use "pages/accounts";
+
+body {
+	min-width: 720px;
+	min-height: 520px;
+}

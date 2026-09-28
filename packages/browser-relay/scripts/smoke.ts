@@ -87,18 +87,10 @@ class BunWebSocketTransport {
 
 coreBundle.server.WebSocketTransport.connect = BunWebSocketTransport.connect;
 
-import backgroundJs from "../../coding-agent/src/tools/browser/relay/extension-assets/background.js.txt" with {
-	type: "text",
-};
-import manifestJson from "../../coding-agent/src/tools/browser/relay/extension-assets/manifest.json.txt" with {
-	type: "text",
-};
-import optionsHtml from "../../coding-agent/src/tools/browser/relay/extension-assets/options.html.txt" with {
-	type: "text",
-};
-import optionsJs from "../../coding-agent/src/tools/browser/relay/extension-assets/options.js.txt" with {
-	type: "text",
-};
+import backgroundJs from "../../coding-agent/src/tools/browser/relay/extension-assets/background.js.txt" with { type: "text" };
+import manifestJson from "../../coding-agent/src/tools/browser/relay/extension-assets/manifest.json.txt" with { type: "text" };
+import optionsHtml from "../../coding-agent/src/tools/browser/relay/extension-assets/options.html.txt" with { type: "text" };
+import optionsJs from "../../coding-agent/src/tools/browser/relay/extension-assets/options.js.txt" with { type: "text" };
 import { type RelayServer, startRelayServer } from "../../coding-agent/src/tools/browser/relay/server";
 
 const DEFAULT_RELAY_URL = "http://127.0.0.1:9224";

@@ -16,29 +16,14 @@
  *
  * ## What is routed
  *
- * The byte-write that `write`, `edit` and `apply_patch` perform on an ordinary
- * file path goes through the same two-line primitive
- * (`file ? file.write(content) : Bun.write(dst, content)`). It has four call
- * sites, and all of them route here:
+ * Ordinary file writes from `write` and the native `edit` tool cross this seam
+ * through the LSP writethrough (`lsp/writethrough.ts`) or the native
+ * `EditTool.#write` adapter (`edit/index.ts`). The adapter also uses
+ * `mkdirAllowingFallback` before create and move operations; deletes and move
+ * source removals use {@link deleteFileWithFallback}.
  *
- * - `writethroughNoop` and `runLspWritethrough`'s `writeContent` (`lsp/writethrough.ts`),
- *   the `WritethroughCallback` that `write` and `edit` both write through.
- *   `apply_patch` reaches it too: `LspFileSystem.write` (`edit/modes/patch.ts`),
- *   which it always injects, delegates to the same callback.
- * - `HashlineFilesystem.move` (`edit/hashline/filesystem.ts`) — a hashline `MV`
- *   destination, the one `edit` write that does not pass through the writethrough.
- * - `defaultFileSystem.write` (`edit/modes/patch.ts`), only the default parameter
- *   for external `applyPatch` callers and tests.
- *
- * `apply_patch` also creates a missing parent directory before writing, via its
- * filesystem's `mkdir`. That `mkdir` consults {@link hasFileWriteFallback} so a
- * denial there falls through to the write and reaches a handler, instead of
- * throwing before the seam is ever consulted.
- *
- * The unlink that `edit` and `apply_patch` perform routes to the separate delete
- * seam ({@link deleteFileWithFallback}) at four sites: `HashlineFilesystem.delete`
- * (`edit`'s `REM`) and `HashlineFilesystem.move`'s source unlink, plus
- * `LspFileSystem.delete` and `defaultFileSystem.delete` for `apply_patch`.
+ * The Rust-backed edit session owns patch, replacement, hashline, and sloppy
+ * semantics. This module only brokers the resulting filesystem mutations.
  *
  * ## What is NOT routed
  *
@@ -109,10 +94,10 @@
  * Handlers live in one process-wide list, and a process can host several sessions
  * (a subagent gets its own `ExtensionRunner`). A handler is therefore consulted
  * for denied mutations from ANY session in the process, not only the one whose
- * extension registered it. Filtering by session here would be wrong: a subagent
- * spawned with `restrictToolNames` loads no extensions of its own, so scoping
- * would leave its denied writes with nothing to broker them, and a host that
- * registers once in its top-level session expects subagent writes covered.
+ * extension registered it. A host that registers once in its top-level session
+ * expects subagent writes covered, including sessions without inherited
+ * extension factories. Restricted children may rebind parent hooks, but that
+ * does not make each session responsible for registering its own broker.
  *
  * So the request names its origin instead, and the policy stays with the party
  * that owns it. `req.sessionId` is the session that issued the mutation (see
@@ -148,7 +133,7 @@ export interface FileWriteFallbackRequest {
 	dst: string;
 	/**
 	 * Session the denied write was issued from, or `undefined` when the mutation
-	 * did not happen inside a tool call (an external `applyPatch` caller, a test).
+	 * did not happen inside a tool call (a direct helper call or test).
 	 *
 	 * The registry is process-wide, so a handler can be consulted for a write from
 	 * a session other than the one whose extension registered it. Compare this with
@@ -285,8 +270,8 @@ const mutationSessionStorage = new AsyncLocalStorage<string>();
  * still attributed to the session that issued it.
  *
  * Deliberately NOT a general "current session" accessor: nothing else enters this
- * scope, so outside a tool call it is empty by design — an external `applyPatch`
- * caller reports `undefined` rather than borrowing someone else's identity.
+ * scope, so outside a tool call it is empty by design rather than borrowing
+ * another session's identity.
  */
 export function withFileMutationSession<T>(sessionId: string | undefined, fn: () => T): T {
 	// With nothing registered no scope is entered, keeping the seam's inertness
@@ -344,7 +329,7 @@ export async function deleteFileWithFallback(dst: string, file?: BunFile): Promi
 		const sessionId = mutationSessionStorage.getStore();
 		// Snapshot: a concurrent session shutdown splices the live array, and
 		// iterating it directly would skip whichever handler shifted into the hole.
-		for (const handler of [...deleteFallbackHandlers]) {
+		for (const handler of Array.from(deleteFallbackHandlers)) {
 			try {
 				if (await handler({ dst: target, cause: error, confirmedFile, sessionId })) return;
 			} catch (handlerError) {
@@ -441,7 +426,7 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 					// The process-wide registry can hand this to a handler from another
 					// session, so the request names the one that issued it.
 					const sessionId = mutationSessionStorage.getStore();
-					for (const handler of [...fallbackHandlers]) {
+					for (const handler of Array.from(fallbackHandlers)) {
 						try {
 							if (await handler({ dst: target, content, cause: failure.cause, sessionId })) return;
 						} catch (handlerError) {

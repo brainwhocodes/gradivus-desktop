@@ -1,0 +1,48 @@
+{
+  "name": "@gradivus/chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted Gradivus coding chat client and shared chat workspace",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/lib/index.ts",
+    "./attachment-display": "./src/lib/attachment-display.ts",
+    "./chat-api": "./src/lib/chat-api.ts",
+    "./control-types": "./src/lib/control-types.ts",
+    "./protocol": "./src/lib/protocol.ts",
+    "./contracts": "./src/lib/contracts.ts",
+    "./projection": "./src/lib/projection.ts",
+    "./transcript-limits": "./src/lib/transcript-limits.ts",
+    "./ui": "./src/lib/ui/index.ts",
+    "./styles/chat.scss": "./src/styles/chat.scss"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5190 --strictPort",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit && bun ../../scripts/check-svelte.ts --tsconfig ./tsconfig.json --tsgo"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-tui": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@solar-icons/svelte": "catalog:",
+    "highlight.js": "catalog:",
+    "svelte": "catalog:"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "catalog:",
+    "@gradivus/svelte-check": "catalog:",
+    "@playwright/test": "catalog:",
+    "@sveltejs/vite-plugin-svelte": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "sass": "catalog:",
+    "svelte-check": "catalog:",
+    "typescript": "npm:typescript@~6.0.0",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

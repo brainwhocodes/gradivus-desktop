@@ -80,9 +80,9 @@ export function reconcileWorkspaceAgents(
 		const workspace = agentWorkspaceId ? workspaceMap.get(agentWorkspaceId) : undefined;
 		const deliverable = Boolean(
 			session &&
-				session.actorId === docAgent.id &&
-				session.status === "active" &&
-				(!workspace || session.locationId === workspace.locationId),
+			session.actorId === docAgent.id &&
+			session.status === "active" &&
+			(!workspace || session.locationId === workspace.locationId),
 		);
 
 		mappedAgents.push({

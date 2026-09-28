@@ -7,6 +7,7 @@ function ownedHeadlessHandle(pid: number): BrowserHandle {
 		key: "headless:1",
 		kind: { kind: "headless", headless: true },
 		refCount: 1,
+		browser: { isConnected: () => false, close: async () => undefined },
 		cdpEndpoint: "http://127.0.0.1:9222",
 		ownedProcess: { pid },
 	} as unknown as BrowserHandle;
@@ -30,9 +31,10 @@ describe("browser process ownership", () => {
 			key: "connected:http://127.0.0.1:9222",
 			kind: { kind: "connected", cdpUrl: "http://127.0.0.1:9222" },
 			refCount: 1,
+			browser: { isConnected: () => false, close: async () => undefined },
 			cdpEndpoint: "http://127.0.0.1:9222",
 			pid: 9999,
-		} as BrowserHandle;
+		} as unknown as BrowserHandle;
 		try {
 			await releaseBrowser(attached, { kill: true, timeoutMs: 100 });
 			expect(killSpy).not.toHaveBeenCalled();

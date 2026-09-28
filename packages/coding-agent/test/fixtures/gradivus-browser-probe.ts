@@ -1,6 +1,7 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 
 const paneName = process.argv[2];
 const probeValue = process.argv[3];
@@ -20,19 +21,22 @@ const session: ToolSession = {
 		"browser.relayUrl": "http://127.0.0.1:1",
 	}),
 };
-const tool = new BrowserTool(session);
+const browserTool = createBrowserPrelude(session);
+const invokeBrowser = (toolCallId: string, parameters: unknown) =>
+	browserTool.invoke(parameters, { session, toolCallId });
 let browser: string | undefined;
 try {
-	const opened = await tool.execute("gradivus-probe-open", {
+	const opened = await invokeBrowser("gradivus-probe-open", {
 		action: "open",
 		name: paneName,
 		app: { relay: true },
 	});
-	browser = opened.details?.browser;
+	const browserDetail = isRecord(opened.details) ? opened.details.browser : undefined;
+	browser = typeof browserDetail === "string" ? browserDetail : undefined;
 	if (browser !== "connected") {
 		throw new Error(`Expected connected Gradivus browser, received ${browser ?? "unknown"}`);
 	}
-	await tool.execute("gradivus-probe-run", {
+	await invokeBrowser("gradivus-probe-run", {
 		action: "run",
 		name: paneName,
 		code: `
@@ -46,7 +50,7 @@ try {
 		`,
 	});
 } finally {
-	await tool.execute("gradivus-probe-close", { action: "close", name: paneName });
+	await invokeBrowser("gradivus-probe-close", { action: "close", name: paneName });
 }
 
 process.stdout.write(`${JSON.stringify({ browser, name: paneName, probeValue })}\n`);

@@ -46,8 +46,20 @@ export type WorkerInitPayload =
 	| {
 			mode: "headless";
 			cdpEndpoint: string;
+			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
+			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
+			/** Hostname patterns allowed for every page request. */
+			allowedDomains?: string[];
+			/** Document-start JavaScript sources registered before navigation. */
+			initScripts?: string[];
+			/** Absolute directory enabled for completed downloads. */
+			downloadsPath?: string;
+			/** Explicit tab user agent applied during worker initialization. */
+			userAgent?: string;
+			/** Ignore invalid HTTPS certificates for this page. */
+			ignoreHttpsErrors?: boolean;
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
@@ -57,14 +69,27 @@ export type WorkerInitPayload =
 			cdpEndpoint: string;
 			targetId: string;
 			dialogs?: "accept" | "dismiss";
+			/** Hostname patterns allowed for every page request. */
+			allowedDomains?: string[];
+			/** Document-start JavaScript sources registered before navigation. */
+			initScripts?: string[];
+			/** Absolute directory enabled for completed downloads. */
+			downloadsPath?: string;
+			/** Explicit tab user agent applied during worker initialization. */
+			userAgent?: string;
+			/** Ignore invalid HTTPS certificates for this page. */
+			ignoreHttpsErrors?: boolean;
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
 			/**
-			 * Post-timeout recycle: stop pending page work before exact adoption.
-			 * Never set for first-time attached-browser acquisition.
+			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
+			 * stop a pending navigation so a blocked target cannot stall worker init (which
+			 * previously force-killed the tab). Never set for first-time Electron attach.
 			 */
 			recover?: boolean;
+			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
+			emulateFocus?: boolean;
 			/**
 			 * Whether the worker may raise this tab before capturing a screenshot. Unset
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
@@ -72,6 +97,7 @@ export type WorkerInitPayload =
 			activateForScreenshot?: boolean;
 	  };
 
+/** Result of one host tool requested by browser-run JavaScript. */
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =
@@ -107,7 +133,7 @@ export interface RunErrorPayload {
 export type WorkerOutbound =
 	| {
 			/**
-			 * Puppeteer loaded, browser connected. Sent before page acquisition so the supervisor's cold-start budget
+			 * Playwright loaded, browser connected. Sent before page acquisition so the supervisor's cold-start budget
 			 * bounds only the realm setup (cold import + connect); page creation and the first navigation run under the
 			 * ready wait.
 			 */

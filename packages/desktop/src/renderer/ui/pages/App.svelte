@@ -12,8 +12,7 @@
 		UpdateGradivusSettingsInput,
 		WorkspaceEvent,
 	} from "../../../shared/contracts";
-	import ModalShell from "../molecules/ModalShell.svelte";
-	import Toast from "../molecules/Toast.svelte";
+	import { ModalShell, Toast } from "@gradivus/chat";
 	import BrowserPane from "../organisms/BrowserPane.svelte";
 	import WorkspaceShell from "../templates/WorkspaceShell.svelte";
 	import OmpChat from "./OmpChat.svelte";
@@ -946,14 +945,9 @@
 				{chatPresentationReady}
 				onPlanReviewCountChange={(count) => { chatAttentionCount = count; }}
 				onActiveSessionChange={(sessionId) => { activeSessionId = sessionId; }}
-				settingsRoute={settingsRoute}
 				onOpenSettings={openSettings}
-				onSettingsRouteChange={updateSettingsRoute}
 				onCloseSettings={closeSettings}
 				onUpdateAppSetting={updateAppSetting}
-				onResetAppSettings={resetAppSettings}
-				appSettingsBusy={appSettingsBusy}
-				appSettingsStatus={appSettingsStatus}
 			/>
 		</div>
 

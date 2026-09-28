@@ -112,6 +112,28 @@ delivery within a stream. Clients must not add another byte-stream wrapper.
 Large payloads are sent as normal protobuf messages and must stay within the
 advertised `maxMessageBytes` limit.
 
+### Outbound frame categories (gRPC stream)
+
+1. Ready frame (`{ type: "ready" }`)
+2. `RpcResponse` (`{ type: "response", ... }`)
+3. `AgentSessionEvent` objects (`agent_start`, `message_update`, etc.)
+4. `RpcExtensionUIRequest` (`{ type: "extension_ui_request", ... }`)
+5. Host tool requests/cancellations (`host_tool_call`, `host_tool_cancel`)
+6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
+7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
+8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
+9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), one per accepted prompt; see [`prompt` payload](#prompt-payload)
+10. Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
+11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+
+### Inbound frame categories (gRPC stream)
+
+1. `RpcCommand`
+2. `RpcExtensionUIResponse` (`{ type: "extension_ui_response", ... }`)
+3. Host tool updates/results (`host_tool_update`, `host_tool_result`)
+4. Host URI results (`host_uri_result`)
+
 ## Request/Response Correlation
 
 All commands accept optional `id?: string`.
@@ -149,16 +171,20 @@ are JSON-encoded into `Command.payload_json`.
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
+- `{ id?, type: "open_session", sessionDir: string }`
 
 ### State
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "get_entries", since?: string }`
+- `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
+- `{ id?, type: "set_event_filter", events: string[] | null }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
 - `{ id?, type: "get_agent_hub" }`
@@ -227,6 +253,7 @@ through either command.
 
 - `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
+- `{ id?, type: "get_available_thinking_levels" }`
 
 ### Queue Modes
 
@@ -286,6 +313,11 @@ human-readable error text.
 - `{ id?, type: "set_oauth_account_lock", providerId: string, credentialId?: number }`
 - `{ id?, type: "set_oauth_account_failover", enabled: boolean }`
 - `{ id?, type: "remove_oauth_account", providerId: string, credentialId: number }`
+
+Login forwards ordinary OAuth input prompts only after the provider emits an
+authorization URL. Prompts marked `secret: true` are always rejected with a
+failed `login` response directing the user to the terminal UI; no ordinary
+`input` request is emitted. RPC does not negotiate secret-input support.
 
 ## Response Schema
 

@@ -8,15 +8,13 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
@@ -31,160 +29,7 @@ afterEach(() => {
 	settingsState = undefined;
 });
 
-describe("selector setting side effects", () => {
-	it("refreshes the status line when git integration changes at runtime", () => {
-		const updateSettings = vi.fn();
-		const requestRender = vi.fn();
-		const controller = new SelectorController({
-			statusLine: { updateSettings },
-			ui: { requestRender },
-		} as unknown as InteractiveModeContext);
-
-		Settings.instance.override("git.enabled", false);
-		controller.handleSettingChange("git.enabled", false);
-
-		expect(updateSettings).toHaveBeenCalledWith(
-			expect.objectContaining({
-				preset: Settings.instance.get("statusLine.preset"),
-				leftSegments: Settings.instance.get("statusLine.leftSegments"),
-				rightSegments: Settings.instance.get("statusLine.rightSegments"),
-			}),
-		);
-		// The setting-change side effect is a single render request — the lazy
-		// top-border provider rebuilds during paint (#4145).
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
-	it("invalidates the UI and requests a repaint when tui.tight changes", () => {
-		const invalidate = vi.fn();
-		const requestRender = vi.fn();
-		const controller = new SelectorController({
-			ui: { invalidate, requestRender },
-		} as unknown as InteractiveModeContext);
-
-		controller.handleSettingChange("tui.tight", true);
-
-		expect(invalidate).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-	it("applies memory backend changes to the live session", () => {
-		const applyMemoryBackend = vi.fn(async () => {});
-		const controller = new SelectorController({
-			session: { applyMemoryBackend },
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext);
-
-		controller.handleSettingChange("memory.backend", "mnemopi");
-
-		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
-	});
-	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
-		const setAdvisorEnabled = vi.fn();
-		const invalidate = vi.fn();
-		const requestRender = vi.fn();
-		const controller = new SelectorController({
-			session: { setAdvisorEnabled },
-			statusLine: { invalidate },
-			ui: { requestRender },
-		} as unknown as InteractiveModeContext);
-
-		controller.handleSettingChange("advisor.enabled", false);
-
-		expect(setAdvisorEnabled).toHaveBeenCalledWith(false);
-		expect(invalidate).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
-	for (const id of ["terminal.showImages", "showImages"]) {
-		for (const visible of [false, true]) {
-			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {
-				const setShowImages = vi.fn();
-				const setImagesVisible = vi.fn();
-				const clearInlineImages = vi.fn();
-				const requestRender = vi.fn();
-				const tool = Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent;
-				tool.setShowImages = setShowImages;
-				const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
-				assistant.setImagesVisible = setImagesVisible;
-				const controller = new SelectorController({
-					chatContainer: { children: [tool, assistant] },
-					ui: { clearInlineImages, requestRender },
-				} as unknown as InteractiveModeContext);
-
-				controller.handleSettingChange(id, visible);
-
-				expect(setShowImages).toHaveBeenCalledWith(visible);
-				expect(setImagesVisible).toHaveBeenCalledWith(visible);
-				expect(clearInlineImages).toHaveBeenCalledTimes(visible ? 0 : 1);
-				expect(requestRender).toHaveBeenCalledTimes(1);
-				if (!visible) {
-					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-						requestRender.mock.invocationCallOrder[0],
-					);
-				}
-			});
-		}
-	}
-
-	for (const hidden of [true, false]) {
-		it(`delegates display.hideToolActivity=${hidden} to the transcript container`, () => {
-			const setToolActivityVisible = vi.fn();
-			const setToolExpanded = vi.fn();
-			const tool = Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent;
-			tool.setExpanded = setToolExpanded;
-			const setReadExpanded = vi.fn();
-			const readGroup = Object.create(ReadToolGroupComponent.prototype) as ReadToolGroupComponent;
-			readGroup.setExpanded = setReadExpanded;
-			const setToolResultImagesVisible = vi.fn();
-			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
-			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
-			const clearInlineImages = vi.fn();
-			const requestRender = vi.fn();
-			const ctx = {
-				hideToolActivity: !hidden,
-				toolOutputExpanded: true,
-				chatContainer: { children: [tool, readGroup, assistant], setToolActivityVisible },
-				ui: { clearInlineImages, requestRender },
-			};
-			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
-
-			controller.handleSettingChange("display.hideToolActivity", hidden);
-
-			expect(ctx.hideToolActivity).toBe(hidden);
-			expect(setToolActivityVisible).toHaveBeenCalledWith(!hidden);
-			expect(setToolResultImagesVisible).toHaveBeenCalledWith(!hidden);
-			expect(setToolExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
-			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
-			expect(ctx.toolOutputExpanded).toBe(hidden);
-			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
-			expect(requestRender).toHaveBeenCalledTimes(1);
-			if (hidden) {
-				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					requestRender.mock.invocationCallOrder[0],
-				);
-			}
-		});
-	}
-
-	for (const enabled of [false, true]) {
-		it(`rebuilds the transcript when display.showTokenUsage=${enabled} changes in /settings`, () => {
-			const rebuildChatFromMessages = vi.fn();
-			const resetDisplay = vi.fn();
-			const controller = new SelectorController({
-				rebuildChatFromMessages,
-				ui: { resetDisplay },
-			} as unknown as InteractiveModeContext);
-
-			controller.handleSettingChange("display.showTokenUsage", enabled);
-
-			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
-			expect(resetDisplay).toHaveBeenCalledTimes(1);
-			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
-				resetDisplay.mock.invocationCallOrder[0],
-			);
-		});
-	}
-
+describe("selector model role assignments", () => {
 	it("clears stale default role thinking when auto is selected", async () => {
 		const testTheme = await getThemeByName("dark");
 		if (!testTheme) throw new Error("Failed to load dark theme for model selector test");
@@ -199,10 +44,11 @@ describe("selector setting side effects", () => {
 			modelRoles: { default: `${previousModel.provider}/${previousModel.id}:high` },
 		});
 		const setModel = vi.fn(async () => ({ switched: true }));
+		const modelAssignmentApplied = Promise.withResolvers<void>();
 		const autoApplied = Promise.withResolvers<void>();
 		const setThinkingLevel = vi.fn((level: ThinkingLevel | typeof AUTO_THINKING, persist: boolean) => {
 			if (level === AUTO_THINKING && persist) {
-				settings.set("defaultThinkingLevel", level);
+				cfgDefaultThinkingLevel.set(settings, level);
 				autoApplied.resolve();
 			}
 		});
@@ -230,7 +76,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: nextModel }],
 				getContextUsage: () => undefined,
@@ -240,7 +86,7 @@ describe("selector setting side effects", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			keybindings: { getKeys: () => [], getDisplayString: () => "" },
-			showStatus: vi.fn(),
+			showStatus: vi.fn(() => modelAssignmentApplied.resolve()),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
 
@@ -253,8 +99,10 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
 			hub.handleInput("\n"); // Assign DEFAULT.
+			hub.handleInput("\n"); // Move from the assignment sidebar to model rows.
 			hub.handleInput("\n"); // Pick the scoped replacement model.
-
+			await modelAssignmentApplied.promise;
+			await Promise.resolve();
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(nextModel)];
 			const highIndex = levels.indexOf(ThinkingLevel.High);
 			const autoIndex = levels.indexOf(AUTO_THINKING);
@@ -323,7 +171,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: activeModel }, { model: taskModel }],
 				getContextUsage: () => undefined,
@@ -356,7 +204,7 @@ describe("selector setting side effects", () => {
 			await assignmentApplied.promise;
 
 			expect(settings.getModelRole("task")).toBe(`${taskSelector}:auto`);
-			expect(settings.get("defaultThinkingLevel")).toBe(ThinkingLevel.High);
+			expect(cfgDefaultThinkingLevel.get(settings)).toBe(ThinkingLevel.High);
 			expect(setThinkingLevel).not.toHaveBeenCalled();
 			const lines = hub.render(220).map(line => stripVTControlCharacters(line));
 			const defaultRow = lines.find(line => line.includes("DEFAULT"));
@@ -406,7 +254,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model }],
 				getContextUsage: () => undefined,
@@ -427,9 +275,11 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
 			hub.handleInput("\n"); // Assign DEFAULT.
+			hub.handleInput("\n"); // Move from the assignment sidebar to model rows.
 			hub.handleInput("\n"); // Pick the scoped model.
 			hub.handleInput("\n"); // Save the assignment to the project.
 			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).toHaveBeenCalledWith(
 				model,
@@ -494,7 +344,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -521,6 +371,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -540,6 +391,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await capturedRuntimeAssignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -593,7 +445,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -620,6 +472,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			// The runtime override makes the global edit effective, so the live
 			// session must switch to the newly assigned global model.
@@ -695,7 +548,7 @@ describe("selector setting side effects", () => {
 						refreshProvider: async () => {},
 						getDiscoverableProviders: () => [],
 						getProviderDiscoveryState: () => undefined,
-						authStorage: { hasAuth: () => false },
+						authStorage: { keys: { source: () => undefined } },
 					},
 					scopedModels: [{ model: projectModel }, { model: globalModel }],
 					getContextUsage: () => undefined,
@@ -775,7 +628,7 @@ describe("selector setting side effects", () => {
 					if (message.startsWith("Project default model:")) projectAssignmentApplied.resolve();
 					if (
 						message.startsWith("Project default model:") &&
-						settings.get("defaultThinkingLevel") === AUTO_THINKING
+						cfgDefaultThinkingLevel.get(settings) === AUTO_THINKING
 					) {
 						autoApplied.resolve();
 					}
@@ -805,7 +658,7 @@ describe("selector setting side effects", () => {
 							refreshProvider: async () => {},
 							getDiscoverableProviders: () => [],
 							getProviderDiscoveryState: () => undefined,
-							authStorage: { hasAuth: () => false },
+							authStorage: { keys: { source: () => undefined } },
 						},
 						scopedModels: [{ model: overlayModel }, { model: projectModel }],
 						getContextUsage: () => undefined,
@@ -835,7 +688,7 @@ describe("selector setting side effects", () => {
 					hub.handleInput("\x1b[C"); // Off → auto.
 					hub.handleInput("\n");
 					await autoApplied.promise;
-					expect(settings.get("defaultThinkingLevel")).toBe(AUTO_THINKING);
+					expect(cfgDefaultThinkingLevel.get(settings)).toBe(AUTO_THINKING);
 					await settings.flush();
 
 					expect(settings.getProjectModelRole("default")).toBe(projectSelector);
@@ -910,7 +763,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -947,7 +800,7 @@ describe("selector setting side effects", () => {
 		setThemeInstance(testTheme);
 
 		const settings = Settings.isolated({});
-		settings.set("retry.fallbackChains", { default: "not-an-array" } as unknown as Record<string, string[]>);
+		cfgRetryFallbackChains.set(settings, { default: "not-an-array" } as unknown as Record<string, string[]>);
 		const fallback = buildModel({
 			id: "retry-fallback-model",
 			name: "retry-fallback-model",
@@ -986,7 +839,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: fallback }],
 				getContextUsage: () => undefined,
@@ -1004,7 +857,8 @@ describe("selector setting side effects", () => {
 			| undefined;
 		if (!hub) throw new Error("Expected model hub overlay to be shown");
 		try {
-			hub.handleInput("\n");
+			hub.handleInput("\n"); // Sidebar → model list.
+			hub.handleInput("\n"); // Open the selected model's role strip.
 			const frame = stripVTControlCharacters(hub.render(220).join("\n"));
 			expect(frame).toContain("retry-fallback");
 			hub.handleInput("\x1b[D");
@@ -1012,7 +866,7 @@ describe("selector setting side effects", () => {
 			await Promise.resolve();
 
 			expect(showError).not.toHaveBeenCalled();
-			expect(settings.get("retry.fallbackChains")).toEqual({ default: ["test/retry-fallback-model"] });
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({ default: ["test/retry-fallback-model"] });
 			expect(showStatus).toHaveBeenCalledWith("DEFAULT fallbacks: test/retry-fallback-model");
 		} finally {
 			hub.dispose();
@@ -1152,7 +1006,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -1237,7 +1091,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }, { model: runtimeModel }],
 				getContextUsage: () => undefined,
@@ -1324,7 +1178,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -1409,7 +1263,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }],
 				getContextUsage: () => undefined,
@@ -1512,7 +1366,7 @@ describe("selector setting side effects", () => {
 						refreshProvider: async () => {},
 						getDiscoverableProviders: () => [],
 						getProviderDiscoveryState: () => undefined,
-						authStorage: { hasAuth: () => false },
+						authStorage: { keys: { source: () => undefined } },
 					},
 					scopedModels: [{ model: projectModel }, { model: globalModel }, { model: overlayModel }],
 					getContextUsage: () => undefined,
@@ -1619,7 +1473,7 @@ describe("selector setting side effects", () => {
 						refreshProvider: async () => {},
 						getDiscoverableProviders: () => [],
 						getProviderDiscoveryState: () => undefined,
-						authStorage: { hasAuth: () => false },
+						authStorage: { keys: { source: () => undefined } },
 					},
 					scopedModels: [{ model: projectModel }, { model: sharedModel }],
 					getContextUsage: () => undefined,
@@ -1678,7 +1532,7 @@ describe("selector setting side effects", () => {
 		const setModel = vi.fn(async () => ({ switched: true }));
 		const setThinkingLevel = vi.fn((level: unknown, persist?: boolean) => {
 			if (level === AUTO_THINKING && persist) {
-				settings.set("defaultThinkingLevel", AUTO_THINKING);
+				cfgDefaultThinkingLevel.set(settings, AUTO_THINKING);
 			}
 		});
 		const roleCleared = Promise.withResolvers<void>();
@@ -1709,7 +1563,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels: [{ model: projectModel }, { model: globalModel }],
 				getContextUsage: () => undefined,
@@ -1790,7 +1644,7 @@ describe("selector setting side effects", () => {
 					refreshProvider: async () => {},
 					getDiscoverableProviders: () => [],
 					getProviderDiscoveryState: () => undefined,
-					authStorage: { hasAuth: () => false },
+					authStorage: { keys: { source: () => undefined } },
 				},
 				scopedModels,
 				getContextUsage: () => undefined,

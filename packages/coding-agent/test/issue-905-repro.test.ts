@@ -206,17 +206,17 @@ test.skipIf(process.platform === "win32")(
 		let observedAvailable: boolean | undefined;
 		let observedFailover: boolean | undefined;
 		let observedAccessToken: string | undefined;
-		const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async function (
-			this: ModelRegistry,
-		): Promise<void> {
-			const selection = this.authStorage.getOAuthAccountSelection("anthropic");
-			observedIdentityHash = selection?.identityHash;
-			observedCredentialId = selection?.credentialId;
-			observedAvailable = selection?.available;
-			observedFailover = selection?.allowSiblingFailover;
-			observedAccessToken = (await this.authStorage.getOAuthAccess("anthropic"))?.accessToken;
-			throw stopAfterFirstRefresh;
-		});
+		const refreshSpy = vi
+			.spyOn(ModelRegistry.prototype, "refresh")
+			.mockImplementation(async function (this: ModelRegistry): Promise<void> {
+				const selection = this.authStorage.getOAuthAccountSelection("anthropic");
+				observedIdentityHash = selection?.identityHash;
+				observedCredentialId = selection?.credentialId;
+				observedAvailable = selection?.available;
+				observedFailover = selection?.allowSiblingFailover;
+				observedAccessToken = (await this.authStorage.oauth.access("anthropic"))?.accessToken;
+				throw stopAfterFirstRefresh;
+			});
 
 		resetSettingsForTest();
 		setAgentDir(agentDir);

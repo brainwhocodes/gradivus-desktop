@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -18,6 +19,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 describe.skipIf(process.platform === "win32")("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
 	let fixtureDir: string;
@@ -187,7 +189,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 	test("defers online runtime discovery until the UI starts it after first paint", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("missing bundled startup model");
@@ -247,6 +249,61 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 	});
 
+	test("preserves an explicit model when a reused registry already finished discovery", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.refreshInBackground("offline");
+		await modelRegistry.awaitInitialBackgroundRefresh();
+
+		const catalogModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!catalogModel) throw new Error("missing bundled registry model");
+		const explicitModel = buildModel({
+			id: catalogModel.id,
+			name: "Explicit Claude endpoint",
+			api: catalogModel.api,
+			provider: catalogModel.provider,
+			baseUrl: "https://explicit-sdk-endpoint.example/v1",
+			reasoning: catalogModel.reasoning,
+			input: [...catalogModel.input],
+			cost: catalogModel.cost,
+			contextWindow: 321_000,
+			maxTokens: 12_345,
+		});
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			model: explicitModel,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			// Flush a reconciler armed against the already-settled refresh; an
+			// incorrect explicit-model opt-in would replace the model here.
+			await Promise.resolve();
+			expect(session.model?.baseUrl).toBe("https://explicit-sdk-endpoint.example/v1");
+			expect(session.model?.contextWindow).toBe(321_000);
+			expect(session.model?.maxTokens).toBe(12_345);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("hydrates credential-scoped model caches before fallback validation", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -255,11 +312,11 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			{ id: "opencode-zen", apiKey: "zen-test-key", baseUrl: "https://opencode.ai/zen/v1" },
 			{ id: "github-copilot", apiKey: "copilot-test-key", baseUrl: "https://api.githubcopilot.com" },
 		];
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 		const modelsPath = path.join(tempDir, "models.yml");
 		const fallbackSelectors: string[] = [];
 		for (const provider of providers) {
-			authStorage.setRuntimeApiKey(provider.id, provider.apiKey);
+			authStorage.keys.setRuntime(provider.id, provider.apiKey);
 			const cachedModel = buildModel({
 				id: "discovered-only-model",
 				name: "Discovered Only Model",
@@ -334,7 +391,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			contextWindow: 128_000,
 			maxTokens: 16_384,
 		});
-		authStorage.setRuntimeApiKey(provider, "first-key");
+		authStorage.keys.setRuntime(provider, "first-key");
 		writeModelCache(
 			resolveModelCacheProviderId(provider, { apiKey: "first-key" }),
 			Date.now(),
@@ -353,7 +410,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			id: "second-credential-model",
 			name: "Second Credential Model",
 		});
-		authStorage.setRuntimeApiKey(provider, "second-key");
+		authStorage.keys.setRuntime(provider, "second-key");
 		writeModelCache(
 			resolveModelCacheProviderId(provider, { apiKey: "second-key" }),
 			Date.now(),
@@ -380,6 +437,90 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 	});
 
+	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
+		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings,
+			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+		});
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("advances past a disabled first selector to an enabled discovery-backed model", async () => {
+		// A disabled provider's model already sits in the static catalog, so
+		// resolveCliModel resolves the first selector against the full registry. If
+		// that match short-circuited the deferred discovery refresh, the enabled
+		// second selector (only reachable after a models.yml discovery fetch) would
+		// never be discovered and dispatch would report it as not found.
+		const disabledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!disabledModel) {
+			throw new Error("Expected bundled anthropic model");
+		}
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, "disabled-first-models.yml");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					gateway: {
+						baseUrl: "http://127.0.0.1:9995",
+						api: "openai-completions",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				modelListCalls++;
+				return Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ disabledProviders: [disabledModel.provider] }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: [`${disabledModel.provider}/${disabledModel.id}`, "gateway/dynamic-model"],
+		});
+
+		try {
+			expect(modelListCalls).toBeGreaterThan(0);
+			expect(session.model?.provider).toBe("gateway");
+			expect(session.model?.id).toBe("dynamic-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!parentModel) {
@@ -387,7 +528,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(parentModel.provider, "test-key");
+		authStorage.keys.setRuntime(parentModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fallback-models.yml"));
 		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested => {
 			if (requested.provider === "runtime-provider") return undefined;
@@ -580,7 +721,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		});
 		settings.setModelRole("task", "missing-provider/missing-model,gpt-4o-mini");
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "ambiguous-role-models.yml"));
 		const parsed = parseArgs(["--model", "task"]);
@@ -637,7 +778,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		});
 		settings.setModelRole("slow", "missing-provider/missing-model");
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("runtime-provider", "test-key");
+		authStorage.keys.setRuntime("runtime-provider", "test-key");
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "missing-role-models.yml"));
 		const parsed = parseArgs(["--model", "slow:low"]);
@@ -704,7 +845,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 			expect(modelFallbackMessage).toBeUndefined();
@@ -713,19 +854,22 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 	});
 
-	test("skips a depleted coding-plan model before creating a noninteractive subagent session", async () => {
+	test.each([
+		["depleted", "runtime-model"],
+		["reserve", "runtime-provider/runtime-m*"],
+	] as const)("resolves the source selector when skipping a %s startup model", async (state, pattern) => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "confirm",
 		});
-		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		settings.setModelRole("task", `${pattern},runtime-provider/runtime-fallback-model`);
 		const options = buildSessionOptions("task");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, healthOptions) =>
+		vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) =>
 			healthOptions.modelId === "runtime-model"
-				? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
+				? { state, accounts: [{ credentialId: 1, credentialType: "oauth", state }] }
 				: { state: "healthy", accounts: [{ credentialId: 2, credentialType: "oauth", state: "healthy" }] },
 		);
-		const { session } = await createAgentSession({
+		const { session, modelFallbackMessage } = await createAgentSession({
 			...options,
 			modelPatternFallbackRole: "subagent:usage-aware",
 			settings,
@@ -734,6 +878,11 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(modelFallbackMessage).toContain(
+				"runtime-provider/runtime-model -> runtime-provider/runtime-fallback-model",
+			);
+			expect(modelFallbackMessage).toMatch(/preflight/i);
+			expect(modelFallbackMessage).toMatch(/no request.*source model/i);
 		} finally {
 			await session.dispose();
 		}
@@ -746,7 +895,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		});
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
 		const options = buildSessionOptions("task");
-		const usageHealth = vi.spyOn(options.authStorage, "getModelUsageHealth").mockResolvedValue({
+		const usageHealth = vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
 			state: "depleted",
 			accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
 		});
@@ -773,7 +922,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		});
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
 		const options = buildSessionOptions("task");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, healthOptions) =>
+		vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) =>
 			healthOptions.modelId === "runtime-model"
 				? {
 						state: "reserve",
@@ -809,7 +958,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			"retry.usageReservePolicy": "fail-closed",
 		});
 		const options = buildSessionOptions("runtime-provider/runtime-model");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockResolvedValue({
+		vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
 			state: "reserve",
 			accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
 		});
@@ -833,7 +982,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -859,7 +1008,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred-default"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -877,7 +1026,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -886,7 +1035,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 	});
 
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {
-		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
+		const settings = Settings.isolated({ defaultThinkingLevel: Effort.Low });
 		settings.setModelRole("smol", "runtime-provider/runtime-fallback-model");
 		settings.setModelRole("default", "@smol:high");
 
@@ -898,7 +1047,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
-			expect(session.thinkingLevel).toBe("off");
+			expect(session.thinkingLevel).toBe(Effort.Low);
 		} finally {
 			await session.dispose();
 		}
@@ -930,7 +1079,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
@@ -1061,7 +1210,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(savedModel.provider, "test-key");
+		authStorage.keys.setRuntime(savedModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const targetSessionFile = path.join(tempDir, "resume-saved-model.jsonl");
@@ -1140,7 +1289,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		authStoragesToClose.push(authStorage);
 		// A resolvable default role gives the buggy path a concrete model to wrongly
 		// fall back to (mirrors a real config with Claude as the default role).
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 
 		const modelsPath = path.join(tempDir, "models.yml");
 		await Bun.write(
@@ -1238,9 +1387,8 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		// Regression: with an Anthropic key but no configured `default` role and no
 		// session/CLI model, the step-4 startup fallback used to pick the first
 		// anthropic model in models.json catalog order (claude-3-5-sonnet-20240620)
-		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER
-		// (claude-opus-4-8).
-		const providerDefault = getBundledModel("anthropic", "claude-opus-4-8");
+		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER.
+		const providerDefault = getBundledModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic);
 		const catalogFirst = getBundledModel("anthropic", "claude-3-5-sonnet-20240620");
 		if (!providerDefault || !catalogFirst) {
 			throw new Error("Expected bundled anthropic models for fallback regression");
@@ -1248,7 +1396,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		// No `default` model role configured: forces the step-4 startup fallback.
 		const settings = Settings.isolated({ enabledModels: ["anthropic/*"] });
@@ -1291,8 +1439,8 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai", "sk-or-v1-invalid-openai-key");
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("openai", "sk-or-v1-invalid-openai-key");
+		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const { session } = await createAgentSession({
@@ -1327,7 +1475,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 	test("caps premium Codex context before a new session starts", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -1371,7 +1519,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		);
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -1409,7 +1557,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const targetSessionFile = path.join(tempDir, "resume-extension.jsonl");
@@ -1478,7 +1626,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(settingsDefaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(settingsDefaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		// Saved default points at a provider that has no usable credentials. The
@@ -1554,7 +1702,7 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		authStoragesToClose.push(authStorage);
 		// The extension provider carries an inline apiKey; the "normally
 		// configured" provider needs credentials so it lands in the startup scope.
-		authStorage.setRuntimeApiKey(configuredModel.provider, "test-key");
+		authStorage.keys.setRuntime(configuredModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "scope-6694-models.yml"));
 
 		const enabledModels = ["runtime-provider/runtime-model", `${configuredModel.provider}/${configuredModel.id}`];
@@ -1629,8 +1777,8 @@ describe.skipIf(process.platform === "win32")("createAgentSession deferred model
 		}
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(scopedTarget.provider, "test-key");
-		authStorage.setRuntimeApiKey(savedDefault.provider, "test-key");
+		authStorage.keys.setRuntime(scopedTarget.provider, "test-key");
+		authStorage.keys.setRuntime(savedDefault.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "cli-scope-models.yml"));
 		const settings = Settings.isolated({});
 		settings.setModelRole("default", `${savedDefault.provider}/${savedDefault.id}`);

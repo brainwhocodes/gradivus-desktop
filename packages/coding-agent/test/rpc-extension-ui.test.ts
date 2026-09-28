@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type PendingExtensionRequest,
 	requestRpcDialog,

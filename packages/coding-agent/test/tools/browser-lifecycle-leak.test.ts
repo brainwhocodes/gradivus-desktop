@@ -1,5 +1,5 @@
 /**
- * Regression tests for issue #3963: the browser tool leaks Chromium/Puppeteer
+ * Regression tests for issue #3963: the browser tool leaks Chromium/Playwright
  * resources at two termination boundaries.
  *
  * 1. An aborted `open` observes abort only in its `untilAborted` wrapper — the
@@ -13,12 +13,13 @@
  *
  * The tests below cover both by driving `acquireBrowser` / `acquireTab` /
  * `releaseTabsForOwner` directly, with `CmuxSocketClient` prototype methods
- * spied so no real cmux socket / puppeteer process is needed.
+ * so no real cmux socket / browser process is needed.
  */
 
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
 	acquireTab,
@@ -42,7 +43,7 @@ function makeSession(sessionId: string): ToolSession {
 		getSessionFile: () => null,
 		getSessionId: () => sessionId,
 		getAgentId: () => sessionId,
-		settings: { get: () => undefined },
+		settings: Settings.isolated(),
 	} as unknown as ToolSession;
 }
 

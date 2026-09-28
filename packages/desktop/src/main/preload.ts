@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { contextBridge, ipcRenderer } from "electron";
+import { isAgentSettingValue } from "../shared/contracts";
 import type {
 	AgentHubMessagePage,
 	AgentHubSnapshot,
@@ -59,6 +60,11 @@ import {
 	MAX_PROMPT_ATTACHMENT_COUNT,
 	MAX_TEMP_PROMPT_BYTES,
 } from "../shared/contracts";
+import type {
+	LocalChatConnectionView,
+	LocalChatConsentDecision,
+	LocalChatConsentRequest,
+} from "../shared/local-chat-consent";
 
 const MAX_BYTES = MAX_INLINE_PROMPT_BYTES;
 
@@ -341,12 +347,7 @@ const credentialId = (value: unknown): number => {
 	return value as number;
 };
 const agentSettingValue = (value: unknown): AgentSettingValue => {
-	if (
-		typeof value !== "boolean" &&
-		typeof value !== "string" &&
-		!(typeof value === "number" && Number.isFinite(value))
-	)
-		throw new TypeError("invalid agent setting value");
+	if (!isAgentSettingValue(value)) throw new TypeError("invalid agent setting value");
 	return value;
 };
 const thinkingLevel = (value: unknown): ThinkingLevel => {
@@ -443,6 +444,30 @@ const todoPhaseList = (value: unknown): TodoPhase[] => {
 		return { id: candidate.id, name: candidate.name, tasks };
 	});
 };
+
+function localChatConsentDecision(value: unknown): LocalChatConsentDecision {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new TypeError("local chat consent decision must be an object");
+	}
+	const input = value as Record<string, unknown>;
+	if (
+		Object.keys(input).length !== 2 ||
+		typeof input.requestId !== "string" ||
+		input.requestId.length < 8 ||
+		input.requestId.length > 128 ||
+		(input.decision !== "allow" && input.decision !== "deny" && input.decision !== "unavailable")
+	) {
+		throw new TypeError("local chat consent decision is invalid");
+	}
+	return { requestId: input.requestId, decision: input.decision };
+}
+
+function localChatGrantId(value: unknown): string {
+	if (typeof value !== "string" || value.length < 8 || value.length > 128) {
+		throw new TypeError("local chat grant id is invalid");
+	}
+	return value;
+}
 const api: GradivusApi = {
 	platform: process.platform,
 	getAuthStatus: () => ipcRenderer.invoke("gradivus:auth-status") as Promise<AuthAccountView[]>,
@@ -468,6 +493,31 @@ const api: GradivusApi = {
 	logoutProvider: provider =>
 		ipcRenderer.invoke("gradivus:auth-logout", authProvider(provider)) as Promise<AuthAccountView[]>,
 	respondAuthPrompt: value => ipcRenderer.invoke("gradivus:auth-prompt", text(value, "auth prompt")) as Promise<void>,
+	getLocalChatConnections: () =>
+		ipcRenderer.invoke("gradivus:local-chat-connections") as Promise<LocalChatConnectionView[]>,
+	revokeLocalChatConnection: grantId =>
+		ipcRenderer.invoke("gradivus:local-chat-revoke", localChatGrantId(grantId)) as Promise<LocalChatConnectionView[]>,
+	respondLocalChatConsent: response =>
+		ipcRenderer.invoke(
+			"gradivus:local-chat-consent-response",
+			localChatConsentDecision(response),
+		) as Promise<boolean>,
+	onLocalChatConsentRequest: listener => {
+		const handler = (_event: Electron.IpcRendererEvent, request: LocalChatConsentRequest) => listener(request);
+		ipcRenderer.on("gradivus:local-chat-consent-request", handler);
+		return () => ipcRenderer.removeListener("gradivus:local-chat-consent-request", handler);
+	},
+	onLocalChatConnectionsChanged: listener => {
+		const handler = (_event: Electron.IpcRendererEvent, connections: LocalChatConnectionView[]) =>
+			listener(connections);
+		ipcRenderer.on("gradivus:local-chat-connections-changed", handler);
+		return () => ipcRenderer.removeListener("gradivus:local-chat-connections-changed", handler);
+	},
+	onOpenDesktopAccounts: listener => {
+		const handler = () => listener();
+		ipcRenderer.on("gradivus:open-accounts", handler);
+		return () => ipcRenderer.removeListener("gradivus:open-accounts", handler);
+	},
 	getAppSettings: () => ipcRenderer.invoke("gradivus:settings-get") as Promise<GradivusSettings>,
 	updateAppSettings: updates =>
 		ipcRenderer.invoke(

@@ -1,38 +1,10 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { getProjectDir, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Browser, Page } from "playwright-core";
-import { applyStealthPatches, applyViewport, BROWSER_PROTOCOL_TIMEOUT_MS } from "../../../tools/browser/launch";
+import type { Page } from "playwright-core";
+import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
-import { connectOverCdp } from "../../../tools/browser/tab-worker";
 import { buildBrowserNavigationHeaders } from "./browser-headers";
 import { SEARCH_HARD_TIMEOUT_MS } from "./utils";
-
-const browserConnections = new Map<string, Promise<Browser>>();
-
-/**
- * Playwright intentionally has no public disconnect API. Keep one CDP
- * connection per registry endpoint and let a shared browser's disconnect event
- * retire it; calling Browser.close() here could terminate a broker-owned or
- * otherwise attached browser.
- */
-function connectBrowser(cdpEndpoint: string): Promise<Browser> {
-	const existing = browserConnections.get(cdpEndpoint);
-	if (existing) return existing;
-
-	const pending = connectOverCdp(cdpEndpoint, BROWSER_PROTOCOL_TIMEOUT_MS);
-	browserConnections.set(cdpEndpoint, pending);
-	void pending.then(
-		browser => {
-			browser.once("disconnected", () => {
-				if (browserConnections.get(cdpEndpoint) === pending) browserConnections.delete(cdpEndpoint);
-			});
-		},
-		() => {
-			if (browserConnections.get(cdpEndpoint) === pending) browserConnections.delete(cdpEndpoint);
-		},
-	);
-	return pending;
-}
 
 /** HTML plus the response status and final URL after redirects or browser navigation. */
 export interface LoadedHtmlPage {
@@ -64,7 +36,7 @@ export interface BrowserFetchOptions {
 
 /**
  * Upper bound on `page.close()` during teardown. A dead CDP session leaves
- * puppeteer's close pending forever; `.catch()` only covers rejection, not a
+ * Playwright's close pending forever; a rejection handler alone cannot stop a
  * hang, so cleanup needs its own deadline (issue #8865).
  */
 const PAGE_CLOSE_TIMEOUT_MS = 5_000;
@@ -107,10 +79,8 @@ async function browseHtmlPage(
 	holdBrowser(handle);
 	let page: Page | undefined;
 	try {
-		const browser = await untilAborted(signal, () => connectBrowser(handle.cdpEndpoint));
-		const context = browser.contexts()[0];
-		if (!context) throw new Error("Headless browser CDP endpoint has no default context");
-		const activePage = await untilAborted(signal, () => context.newPage());
+		const browser = handle.browser;
+		const activePage = await untilAborted(signal, () => browser.newPage());
 		page = activePage;
 		// Viewport and stealth setup talk to the same CDP session as the
 		// navigations below; wrap them so a dead shared daemon or target cannot
@@ -131,9 +101,7 @@ async function browseHtmlPage(
 			if (options.afterNavigation) await options.afterNavigation(activePage, signal);
 			if (ready) {
 				await untilAborted(signal, () =>
-					activePage
-						.waitForSelector(ready.selector, { state: "attached", timeout: ready.timeoutMs })
-						.catch(() => null),
+					activePage.waitForSelector(ready.selector, { timeout: ready.timeoutMs }).catch(() => null),
 				);
 			}
 			const loaded = {

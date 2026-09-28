@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { afterEach, describe, expect, it } from "vitest";
 import { PromptAttachmentStore, promptAttachmentDisplayText } from "../src/main/prompt-attachments";
 import type { PromptCompositionPart } from "../src/shared/contracts";
@@ -42,6 +43,26 @@ describe("PromptAttachmentStore", () => {
 		const stagedPath = resolved.text.match(/@"([^"]+)"/)?.[1];
 		expect(stagedPath).toBeDefined();
 		expect(await fs.readFile(stagedPath!, "utf8")).toBe("secret notes");
+	});
+
+	it("moves streamed temporary files into store ownership without retaining caller buffers", async () => {
+		using uploadDir = await TempDir.create("@gradivus-upload-test-");
+		const source = uploadDir.join("streamed.png");
+		await fs.writeFile(source, PNG_BYTES);
+		const store = new PromptAttachmentStore();
+		stores.push(store);
+		const [view] = await store.stageTemporaryFiles([
+			{ name: "streamed.png", mimeType: "image/png", size: PNG_BYTES.byteLength, path: source },
+		]);
+		await expect(fs.access(source)).rejects.toMatchObject({ code: "ENOENT" });
+
+		const resolved = await store.resolve(
+			composition({ type: "text", text: "Inspect " }, { type: "attachment", id: view!.id }),
+		);
+		expect(view).toMatchObject({ name: "streamed.png", kind: "image", size: PNG_BYTES.byteLength });
+		expect(resolved.images).toEqual([
+			{ type: "image", data: Buffer.from(PNG_BYTES).toString("base64"), mimeType: "image/png" },
+		]);
 	});
 
 	it("keeps resolved files until the admission owner explicitly releases them", async () => {

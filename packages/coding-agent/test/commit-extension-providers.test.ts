@@ -71,24 +71,24 @@ async function expectCommitRefreshToSeePersistedPolicy(legacy: boolean): Promise
 	const expected = await persistTwoOAuthAccounts();
 	const sentinel = new Error(`commit-refresh-policy-${legacy ? "legacy" : "agentic"}`);
 	let ownedAuthStorage: AuthStorage | undefined;
-	const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async function (
-		this: ModelRegistry,
-	): Promise<void> {
-		ownedAuthStorage = this.authStorage;
-		expect(this.authStorage.listStoredOAuthAccounts(OAUTH_PROVIDER)).toHaveLength(2);
-		expect(this.authStorage.getOAuthAccountSelection(OAUTH_PROVIDER)).toEqual({
-			identityHash: expected.identityHash,
-			credentialId: expected.credentialId,
-			available: true,
-			allowSiblingFailover: true,
+	const refreshSpy = vi
+		.spyOn(ModelRegistry.prototype, "refresh")
+		.mockImplementation(async function (this: ModelRegistry): Promise<void> {
+			ownedAuthStorage = this.authStorage;
+			expect(this.authStorage.oauth.accounts(OAUTH_PROVIDER)).toHaveLength(2);
+			expect(this.authStorage.getOAuthAccountSelection(OAUTH_PROVIDER)).toEqual({
+				identityHash: expected.identityHash,
+				credentialId: expected.credentialId,
+				available: true,
+				allowSiblingFailover: true,
+			});
+			const access = await this.authStorage.oauth.access(OAUTH_PROVIDER, "commit-startup-policy");
+			expect(access).toMatchObject({
+				accessToken: "commit-selected-access",
+				credentialId: expected.credentialId,
+			});
+			throw sentinel;
 		});
-		const access = await this.authStorage.getOAuthAccess(OAUTH_PROVIDER, "commit-startup-policy");
-		expect(access).toMatchObject({
-			accessToken: "commit-selected-access",
-			credentialId: expected.credentialId,
-		});
-		throw sentinel;
-	});
 	try {
 		await expect(
 			runCommitCommand({

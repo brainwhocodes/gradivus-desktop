@@ -1,3 +1,4 @@
+import { cfgProvidersOpenrouterIgnoredProviders } from "../session/settings";
 import type { Settings } from "./settings";
 
 const ROUTING_VARIANT_SUFFIX = /:(?:nitro|floor|online|exacto)$/i;
@@ -23,6 +24,6 @@ export function isOpenRouterProviderId(value: string): boolean {
 
 export function getOpenRouterIgnoredProviders(settings: Settings, modelIdInput: string): string[] {
 	const modelId = normalizeOpenRouterModelId(modelIdInput);
-	const configured = settings.get("providers.openrouterIgnoredProviders")[modelId] ?? [];
+	const configured = cfgProvidersOpenrouterIgnoredProviders.get(settings)[modelId] ?? [];
 	return [...new Set(configured.filter(isOpenRouterProviderId))];
 }

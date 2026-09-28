@@ -2,6 +2,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
+import { cfgCommitChangelogMaxDiffChars } from "./settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 
 import { runAgenticCommit } from "./agentic";
@@ -69,12 +70,11 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
-	const authStorage = await discoverAuthStorage();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	const registry = new ModelRegistry(authStorage);
 	await registry.refresh();
 	await loadCliExtensionProviders(registry, settings, cwd);
 	const primary = await resolvePrimaryModel(args.model, settings, registry);
-	const commitSettings = settings.getGroup("commit");
 	await runChangelogFlow({
 		cwd,
 		model: primary.model,
@@ -82,7 +82,7 @@ async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<vo
 		thinkingLevel: primary.thinkingLevel,
 		stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
 		dryRun: false,
-		maxDiffChars: commitSettings.changelogMaxDiffChars,
+		maxDiffChars: cfgCommitChangelogMaxDiffChars.get(settings),
 		onProgress: message => process.stdout.write(`${message}\n`),
 	});
 }

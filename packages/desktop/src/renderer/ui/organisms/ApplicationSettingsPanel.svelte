@@ -1,7 +1,6 @@
 <script lang="ts">
 	import type { GradivusSettings, UpdateGradivusSettingsInput } from "../../../shared/contracts";
-	import LabeledSelect from "../molecules/LabeledSelect.svelte";
-	import ToggleField from "../molecules/ToggleField.svelte";
+	import { LabeledSelect, ToggleField } from "@gradivus/chat";
 	import type {
 		ApplicationSettingsCategoryId,
 		ApplicationSettingsStatus,
@@ -124,7 +123,7 @@
 						description="Limit interface animation in addition to the operating system preference."
 						checked={settings.ui.reduceMotion}
 						disabled={busy("reduceMotion")}
-						onchange={(checked) => update("reduceMotion", { ui: { reduceMotion: checked } }, "Reduce motion")}
+						onchange={(checked: boolean) => update("reduceMotion", { ui: { reduceMotion: checked } }, "Reduce motion")}
 					/>
 				{/if}
 			</div>
@@ -139,7 +138,7 @@
 						description="Prompt before closing a tab containing active panes."
 						checked={settings.confirmCloseTab}
 						disabled={busy("confirmCloseTab")}
-						onchange={(checked) => update("confirmCloseTab", { confirmCloseTab: checked }, "Tab close confirmation")}
+						onchange={(checked: boolean) => update("confirmCloseTab", { confirmCloseTab: checked }, "Tab close confirmation")}
 					/>
 				{/if}
 				{#if visible("showToolDetails")}
@@ -148,7 +147,7 @@
 						description="Show tool previews and argument badges in the transcript."
 						checked={settings.ui.showToolDetails}
 						disabled={busy("showToolDetails")}
-						onchange={(checked) => update("showToolDetails", { ui: { showToolDetails: checked } }, "Tool details")}
+						onchange={(checked: boolean) => update("showToolDetails", { ui: { showToolDetails: checked } }, "Tool details")}
 					/>
 				{/if}
 			</div>
@@ -185,7 +184,7 @@
 						description="Animate the terminal cursor while focused."
 						checked={settings.terminal.cursorBlink}
 						disabled={busy("terminal.cursorBlink")}
-						onchange={(checked) => update("terminal.cursorBlink", { terminal: { cursorBlink: checked } }, "Cursor blink")}
+						onchange={(checked: boolean) => update("terminal.cursorBlink", { terminal: { cursorBlink: checked } }, "Cursor blink")}
 					/>
 				{/if}
 				{#if visible("terminal.scrollback")}

@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { applyPatch } from "../src/edit/modes/patch";
 import { editMutationCoordinator, withMutation } from "../src/edit/mutation";
 import { applyWorkspaceEdit } from "../src/lsp/edits";
 
@@ -56,19 +55,6 @@ describe("first-party edit mutation coordination", () => {
 			expect(ran).toBe(false);
 		} finally {
 			held.release();
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
-
-	it("holds patch read-modify-write through the shared coordinator", async () => {
-		const root = await makeTempDir();
-		const file = path.join(root, "patch.ts");
-		await Bun.write(file, "before\nkeep\n");
-		try {
-			const result = await applyPatch({ path: file, op: "update", diff: "@@\n-before\n+after" }, { cwd: root });
-			expect(result.change.oldContent).toBe("before\nkeep\n");
-			expect(await Bun.file(file).text()).toBe("after\nkeep\n");
-		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});

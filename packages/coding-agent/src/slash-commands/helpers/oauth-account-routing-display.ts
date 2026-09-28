@@ -13,36 +13,33 @@ export interface OAuthAccountRoutingDisplay {
 
 export type OAuthAccountRoutingDisplayResolver = (provider: string) => OAuthAccountRoutingDisplay | undefined;
 
+type OAuthAccountRoutingStorage = Pick<AuthStorage, "getOAuthAccountSelection"> & {
+	oauth: Pick<AuthStorage["oauth"], "accounts" | "identity">;
+};
+
 /** Resolve configured OAuth routing intent and the account that served this session. */
 export function buildOAuthAccountRoutingDisplay(
-	authStorage: Pick<AuthStorage, "getOAuthAccountSelection" | "listStoredOAuthAccounts" | "getOAuthAccountIdentity">,
+	authStorage: OAuthAccountRoutingStorage,
 	provider: string,
 	sessionId: string,
 ): OAuthAccountRoutingDisplay {
 	const selection = authStorage.getOAuthAccountSelection(provider);
-	const storedAccounts = authStorage.listStoredOAuthAccounts(provider, sessionId);
-	const actualAccount = authStorage.getOAuthAccountIdentity(provider, sessionId);
-	const selectedAccount =
+	const accounts = authStorage.oauth.accounts(provider, sessionId);
+	const selected =
 		selection?.credentialId === undefined
 			? undefined
-			: storedAccounts.find(account => account.credentialId === selection.credentialId);
-	const activeAccount = storedAccounts.find(account => account.active);
-	const selectionUnavailable = selection !== undefined && (!selection.available || selectedAccount === undefined);
-	const allowSiblingFailover = selection?.allowSiblingFailover ?? false;
-	const actualAccountIsFailover =
-		selection !== undefined &&
-		allowSiblingFailover &&
-		actualAccount !== undefined &&
-		activeAccount !== undefined &&
-		activeAccount.credentialId !== selection.credentialId;
-
+			: accounts.find(account => account.credentialId === selection.credentialId);
+	const activeAccount = accounts.find(account => account.active);
+	const actualAccount = authStorage.oauth.identity(provider, sessionId);
 	return {
 		automaticRouting: selection === undefined,
-		selectedAccountLabel: selectedAccount ? toSessionPinAccounts([selectedAccount])[0]?.label : undefined,
-		selectionUnavailable,
-		allowSiblingFailover,
+		selectedAccountLabel: selected ? toSessionPinAccounts([selected])[0]?.label : undefined,
+		selectionUnavailable: selection !== undefined && (!selection.available || selected === undefined),
+		allowSiblingFailover: selection?.allowSiblingFailover ?? false,
 		actualAccount,
-		actualAccountIsFailover,
+		actualAccountIsFailover: Boolean(
+			selection?.allowSiblingFailover && activeAccount && activeAccount.credentialId !== selection.credentialId,
+		),
 	};
 }
 

@@ -6,5 +6,6 @@ Creates or edits provider-generated raster images. This is the canonical tool fo
 - Provide a single detailed `subject` prompt for generation or editing.
 - For image-generation requests, return the provider-generated raster output. Do not substitute handcrafted SVG/vector markup, HTML/canvas output, or browser screenshots unless the user explicitly requests vector/SVG or deterministic programmatic graphics.
 - When using multiple `input`, describe each image's role in `subject` (e.g. `Image 1` for composition, `Image 2` for lighting).
+- Specific catalog model required? Set `model`; otherwise omit it.
 - For text: add "sharp, legible, correctly spelled"; keep text short.
 </instructions>

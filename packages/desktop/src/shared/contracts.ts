@@ -1,4 +1,5 @@
 import type { PlanReviewAnnotationState } from "@oh-my-pi/pi-utils/plan-review";
+import type { LocalChatConnectionView, LocalChatConsentDecision, LocalChatConsentRequest } from "./local-chat-consent";
 
 export type SessionSurface = "chat" | "browser-selection";
 export type SessionKind = "work" | "code";
@@ -19,6 +20,13 @@ export interface PromptAttachmentUpload {
 	name: string;
 	mimeType?: string;
 	data: Uint8Array;
+}
+
+export interface PromptAttachmentTempFile {
+	name: string;
+	mimeType?: string;
+	size: number;
+	path: string;
 }
 
 export type PromptCompositionPart = { type: "text"; text: string } | { type: "attachment"; id: string };
@@ -118,19 +126,75 @@ export interface OpenRouterModelRouting {
 	providers: OpenRouterProviderOption[];
 }
 
-export type AgentSettingValue = boolean | string | number | string[];
+export type AgentSettingJsonValue =
+	| null
+	| boolean
+	| number
+	| string
+	| AgentSettingJsonValue[]
+	| { [key: string]: AgentSettingJsonValue };
+export type AgentSettingValue = boolean | string | number | string[] | Record<string, AgentSettingJsonValue>;
+const MAX_AGENT_SETTING_VALUE_ENTRIES = 1_000;
+const MAX_AGENT_SETTING_VALUE_DEPTH = 16;
+const MAX_AGENT_SETTING_VALUE_TEXT = 2_048;
+
+function isAgentSettingJsonValue(value: unknown, depth: number): value is AgentSettingJsonValue {
+	if (depth > MAX_AGENT_SETTING_VALUE_DEPTH) return false;
+	if (value === null || typeof value === "boolean") return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value === "string") return value.length <= MAX_AGENT_SETTING_VALUE_TEXT;
+	if (Array.isArray(value)) {
+		return (
+			value.length <= MAX_AGENT_SETTING_VALUE_ENTRIES &&
+			value.every(item => isAgentSettingJsonValue(item, depth + 1))
+		);
+	}
+	if (typeof value !== "object") return false;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return false;
+	const entries = Object.entries(value);
+	return (
+		entries.length <= MAX_AGENT_SETTING_VALUE_ENTRIES &&
+		entries.every(
+			([key, nested]) => key.length <= MAX_AGENT_SETTING_VALUE_TEXT && isAgentSettingJsonValue(nested, depth + 1),
+		)
+	);
+}
+
+export function isAgentSettingValue(value: unknown): value is AgentSettingValue {
+	if (typeof value === "boolean") return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value === "string") return value.length <= MAX_AGENT_SETTING_VALUE_TEXT;
+	if (Array.isArray(value)) {
+		return (
+			value.length <= MAX_AGENT_SETTING_VALUE_ENTRIES &&
+			value.every(item => typeof item === "string" && item.length <= MAX_AGENT_SETTING_VALUE_TEXT)
+		);
+	}
+	if (typeof value !== "object" || value === null) return false;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return false;
+	const entries = Object.entries(value);
+	return (
+		entries.length <= MAX_AGENT_SETTING_VALUE_ENTRIES &&
+		entries.every(([key, nested]) => key.length <= MAX_AGENT_SETTING_VALUE_TEXT && isAgentSettingJsonValue(nested, 1))
+	);
+}
 export type AgentSettingTab =
 	| "appearance"
 	| "model"
 	| "interaction"
 	| "context"
+	| "memory"
 	| "files"
 	| "shell"
 	| "tools"
-	| "tasks";
+	| "tasks"
+	| "providers";
+export type AgentSettingOptionValue = string | number;
 
 export interface AgentSettingOption {
-	value: AgentSettingValue;
+	value: AgentSettingOptionValue;
 	label: string;
 	description?: string;
 }
@@ -141,11 +205,11 @@ export interface AgentSettingView {
 	group?: string;
 	label: string;
 	description: string;
-	control: "toggle" | "select" | "multiselect";
+	warning?: string;
+	control: "toggle" | "select" | "multiselect" | "text" | "json" | "provider-limits";
 	value: AgentSettingValue;
 	options?: AgentSettingOption[];
 	ordered?: boolean;
-	apply: "immediate" | "next-session";
 }
 
 export type AgentPromptScope = "project" | "user";
@@ -951,6 +1015,12 @@ export interface GradivusApi {
 		scope: AgentPromptScope,
 		expectedRevision: string,
 	): Promise<AgentPromptView>;
+	getLocalChatConnections(): Promise<LocalChatConnectionView[]>;
+	revokeLocalChatConnection(grantId: string): Promise<LocalChatConnectionView[]>;
+	respondLocalChatConsent(decision: LocalChatConsentDecision): Promise<boolean>;
+	onLocalChatConsentRequest(listener: (request: LocalChatConsentRequest) => void): () => void;
+	onLocalChatConnectionsChanged(listener: (connections: LocalChatConnectionView[]) => void): () => void;
+	onOpenDesktopAccounts(listener: () => void): () => void;
 	bootstrap(): Promise<BootstrapSnapshot>;
 	reconnectRuntime(): Promise<void>;
 	chooseAndCreate(kind: SessionKind, cwd?: string): Promise<SessionSnapshot | null>;

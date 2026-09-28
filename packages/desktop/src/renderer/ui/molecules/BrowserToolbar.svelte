@@ -10,7 +10,7 @@
 	import type { BrowserNavigationAction } from "../../../shared/contracts";
 	import type { WorkspaceLayout } from "../../workspace-types";
 	import AddressForm from "./AddressForm.svelte";
-	import IconButton from "./IconButton.svelte";
+	import { IconButton } from "@gradivus/chat";
 
 	interface Props {
 		canGoBack?: boolean;

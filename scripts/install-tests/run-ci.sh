@@ -33,6 +33,7 @@ smoke_cli() {
    # probe for #1011/#1027 worker loading and for npm/compiled distributions
    # missing the dashboard assets that `stats --summary` never touches.
    XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --smoke-test
+   bun "$ROOT_DIR/scripts/install-tests/settings-session.ts" "$omp_bin"
 }
 
 find_tarball() {
@@ -165,7 +166,6 @@ browser_runtime_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-browser-runtime-*
 omptype_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omptype-*.tgz)"
 natives_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-[0-9]*.tgz)"
 natives_leaf_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-"$host_tag"-*.tgz)"
-hashline_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-hashline-*.tgz)"
 catalog_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-catalog-*.tgz)"
 ai_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-ai-*.tgz)"
 mnemopi_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-mnemopi-*.tgz)"
@@ -195,7 +195,6 @@ mkdir -p "$TARBALL_APP_DIR"
 			'@oh-my-pi/omptype': '$omptype_tgz',
 			'@oh-my-pi/pi-natives': '$natives_tgz',
 			'@oh-my-pi/pi-natives-$host_tag': '$natives_leaf_tgz',
-			'@oh-my-pi/hashline': '$hashline_tgz',
 			'@oh-my-pi/pi-ai': '$ai_tgz',
 			'@oh-my-pi/pi-catalog': '$catalog_tgz',
 			'@oh-my-pi/pi-mnemopi': '$mnemopi_tgz',

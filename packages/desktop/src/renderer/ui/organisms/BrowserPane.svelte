@@ -14,7 +14,7 @@
 	import BrowserToolbar from "../molecules/BrowserToolbar.svelte";
 	import BrowserFindBar from "../molecules/BrowserFindBar.svelte";
 	import BrowserAutomationPane from "./BrowserAutomationPane.svelte";
-	import IconButton from "../molecules/IconButton.svelte";
+	import { IconButton } from "@gradivus/chat";
 	import SelectionQueuePane from "./SelectionQueuePane.svelte";
 	import type { WorkspaceAgent, WorkspaceLayout, WorkspacePane } from "../../workspace-types";
 

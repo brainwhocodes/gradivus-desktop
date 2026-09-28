@@ -11,7 +11,7 @@
     "start": "bun run backend:build && electron-forge start",
     "backend:build": "bun scripts/build-backend.ts",
     "check": "biome check . && bun run check:types && bun run check:styles",
-    "check:types": "tsgo -p tsconfig.json --noEmit && bun scripts/check-svelte.ts --tsconfig ./tsconfig.json --tsgo",
+    "check:types": "tsgo -p tsconfig.json --noEmit && bun ../../scripts/check-svelte.ts --tsconfig ./tsconfig.json --tsgo",
     "check:styles": "bun scripts/check-styles.ts",
     "test": "vitest run",
     "build:e2e": "bun run backend:build && electron-forge package",
@@ -26,9 +26,15 @@
     "make:contained": "bun scripts/build-contained.ts"
   },
   "dependencies": {
+    "@gradivus/chat": "workspace:*",
+    "@elysia/cors": "catalog:",
+    "@elysia/node": "catalog:",
+    "@jmondi/oauth2-server": "catalog:",
+    "@mjackson/form-data-parser": "catalog:",
     "@oh-my-pi/pi-browser-runtime": "catalog:",
     "@oh-my-pi/pi-grpc": "catalog:",
-    "@oh-my-pi/pi-workspace-runtime": "catalog:"
+    "@oh-my-pi/pi-workspace-runtime": "catalog:",
+    "elysia": "catalog:"
   },
   "devDependencies": {
     "@axe-core/playwright": "catalog:",

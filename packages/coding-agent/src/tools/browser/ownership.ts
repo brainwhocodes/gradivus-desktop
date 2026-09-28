@@ -1,5 +1,5 @@
 import type { ToolSession } from "../index";
-import { ToolError } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** The main agent retains the historical process-global default tab. */
 export const DEFAULT_TAB_NAME = "main";

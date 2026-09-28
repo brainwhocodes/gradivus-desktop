@@ -12,8 +12,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
-	type AgentProgress,
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -397,7 +397,9 @@ describe("RpcClient subagent frames", () => {
 		try {
 			await client.start();
 			expect(await client.setSubagentSubscription("events")).toBe("events");
-			await client.promptAndWait("Trigger subagent frames");
+			const eventsPromise = client.collectEvents();
+			await client.prompt("Trigger subagent frames");
+			await eventsPromise;
 			expect(await client.getSubagents()).toHaveLength(1);
 			expect(await client.getSubagentMessages({ sessionFile: "/tmp/subagent.jsonl" })).toMatchObject({
 				sessionFile: "/tmp/subagent.jsonl",

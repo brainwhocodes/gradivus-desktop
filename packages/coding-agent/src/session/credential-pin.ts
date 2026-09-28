@@ -17,10 +17,12 @@
  * stick or re-rank.
  */
 
+import type { OAuthAccountSelectionTarget } from "@oh-my-pi/pi-ai/auth-storage";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 import type { SessionManager } from "./session-manager";
+import { cfgProvidersOauthAccountFailover, cfgProvidersOauthAccountLocks } from "./settings";
 
 export const GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE =
 	"This provider has a global account lock. Change it in /settings > Providers > Accounts, or choose Automatic before using /session pin.";
@@ -65,35 +67,27 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
  * runtime credential ID.
  */
 export function installOAuthAccountSelectionFromSettings(settings: Settings, authStorage: AuthStorage): void {
-	const storageProviders = new Set(
-		authStorage.list().filter(provider => authStorage.listStoredOAuthAccounts(provider).length > 0),
+	const providers = new Set(
+		Object.keys(authStorage.credentials.all()).filter(provider =>
+			authStorage.credentials.list(provider).some(row => row.credential.type === "oauth"),
+		),
 	);
-	for (const provider of getOAuthProviders()) {
-		storageProviders.add(provider.storeCredentialsAs ?? provider.id);
-	}
-	const configuredLocks: unknown = settings.get("providers.oauthAccountLocks");
-	const lockEntries =
-		configuredLocks !== null && typeof configuredLocks === "object" && !Array.isArray(configuredLocks)
-			? Object.entries(configuredLocks as Record<string, unknown>)
-			: [];
+	for (const provider of getOAuthProviders()) providers.add(provider.storeCredentialsAs ?? provider.id);
 
-	const selections = Object.create(null) as Record<string, { identityHash: string; credentialId?: number }>;
-	for (const [provider, identityHash] of lockEntries) {
-		if (typeof identityHash !== "string" || !storageProviders.has(provider) || !/^[0-9a-f]{64}$/.test(identityHash)) {
-			continue;
-		}
-		const matches = authStorage
-			.listStoredOAuthAccounts(provider)
+	const selections = Object.create(null) as Record<string, OAuthAccountSelectionTarget>;
+	for (const [provider, identityHash] of Object.entries(cfgProvidersOauthAccountLocks.get(settings))) {
+		if (!/^[0-9a-f]{64}$/.test(identityHash) || !providers.has(provider)) continue;
+		const matches = authStorage.oauth
+			.accounts(provider)
 			.filter(account => credentialPinHash(provider, account) === identityHash);
 		selections[provider] = {
 			identityHash,
-			credentialId: matches.length === 1 ? matches[0].credentialId : undefined,
+			...(matches.length === 1 ? { credentialId: matches[0]!.credentialId } : {}),
 		};
 	}
-
 	authStorage.setOAuthAccountSelectionPolicy({
 		selections,
-		allowSiblingFailover: settings.get("providers.oauthAccountFailover") === true,
+		allowSiblingFailover: cfgProvidersOauthAccountFailover.get(settings),
 	});
 }
 
@@ -110,7 +104,7 @@ export function recordCredentialPin(
 	sessionId: string,
 	provider: string,
 ): void {
-	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
+	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
 	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
@@ -127,12 +121,12 @@ export function recordCredentialPin(
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
 		if (authStorage.getOAuthAccountSelection(provider)) continue;
-		const accounts = authStorage.listOAuthAccounts(provider, sessionId);
+		const accounts = authStorage.oauth.accounts(provider, sessionId);
 		if (accounts.length === 0 || accounts.some(account => account.active)) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
 		if (!match) continue;
-		authStorage.pinSessionOAuthAccount(provider, sessionId, match.credentialId, {
-			lastUsedAtMs: pin.lastUsedAt,
+		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
+			restoredAtMs: pin.lastUsedAt,
 		});
 	}
 }

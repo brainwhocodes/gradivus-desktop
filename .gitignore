@@ -18,6 +18,7 @@ target/
 
 # Environment
 .env
+.venv
 
 # Editors
 .vscode/
@@ -64,6 +65,7 @@ pi-*.html
 .gradivus-fixture.jsonl
 
 # Generated files
+**/.svelte-check/
 packages/coding-agent/src/export/html/tool-views.generated.js
 packages/natives/npm/
 /runs/
@@ -89,3 +91,5 @@ packages/coding-agent/bench/boot-baseline.json
 # Bazel
 /bazel-*
 /.bazelrc.user
+
+.parity/

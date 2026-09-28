@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgProvidersOpenrouterIgnoredProviders } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	getRpcOpenRouterModelRouting,
 	setRpcOpenRouterProviderEnabled,
@@ -51,7 +52,7 @@ describe("OpenRouter model routing RPC", () => {
 			{ id: "azure", name: "Azure", enabled: false },
 			{ id: "openai", name: "OpenAI", enabled: true },
 		]);
-		expect(settings.get("providers.openrouterIgnoredProviders")).toEqual({
+		expect(cfgProvidersOpenrouterIgnoredProviders.get(settings)).toEqual({
 			"acme/routing-test": ["azure"],
 		});
 		await expect(setRpcOpenRouterProviderEnabled(settings, "acme/routing-test", "openai", false)).rejects.toThrow(

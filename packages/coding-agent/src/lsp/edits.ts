@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { withMutation } from "../edit/mutation";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
 	CreateFile,
 	CreateFileOptions,
@@ -291,7 +291,7 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 	}
 
 	// Flush text edits not followed by a resource op.
-	for (const uri of [...pending.keys()]) {
+	for (const uri of Array.from(pending.keys())) {
 		flushUri(uri);
 	}
 

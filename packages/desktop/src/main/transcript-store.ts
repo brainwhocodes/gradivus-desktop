@@ -1,5 +1,6 @@
+import { promptAttachmentDisplayText } from "@gradivus/chat/attachment-display";
+import { TRANSCRIPT_PRESENTATION_LIMITS } from "@gradivus/chat/transcript-limits";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
-import { promptAttachmentDisplayText } from "../shared/attachment-display";
 import type {
 	FileChangeDisposition,
 	TimelineEvalCellDetail,
@@ -8,7 +9,6 @@ import type {
 	TimelineItem,
 	TimelineToolActivity,
 } from "../shared/contracts";
-import { TRANSCRIPT_PRESENTATION_LIMITS } from "../shared/transcript-limits";
 import { presentAssistantOutcome, presentEvent, presentMessage, stableMessageKey } from "./transcript-presentation";
 
 export interface BranchMessageCandidate {

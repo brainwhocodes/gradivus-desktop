@@ -10,10 +10,10 @@ import {
 	OAuthAccountManagerComponent,
 	type OAuthAccountRemovalResult,
 } from "@oh-my-pi/pi-coding-agent/modes/components/oauth-account-manager";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	AuthStorage,
-	type OAuthAccountSummary,
+	type StoredAuthCredential,
 	type OAuthCredential,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -21,6 +21,10 @@ import {
 	credentialPinHash,
 	installOAuthAccountSelectionFromSettings,
 } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
+import {
+	cfgProvidersOauthAccountFailover,
+	cfgProvidersOauthAccountLocks,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import type { SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
@@ -93,15 +97,14 @@ async function createHarness(options: HarnessOptions = {}): Promise<ManagerHarne
 		credentials.push(account.credential);
 		accountsByProvider.set(account.provider, credentials);
 	}
-	for (const [provider, credentials] of accountsByProvider) {
-		store.replaceAuthCredentialsForProvider(provider, credentials);
-	}
 	const authStorage = new AuthStorage(store);
 	openStorages.add(authStorage);
-	await authStorage.reload();
+	for (const [provider, credentials] of accountsByProvider) {
+		await authStorage.credentials.set(provider, credentials);
+	}
 	const settings = Settings.isolated();
-	settings.set("providers.oauthAccountLocks", { ...options.locks });
-	settings.set("providers.oauthAccountFailover", options.failover ?? false);
+	cfgProvidersOauthAccountLocks.set(settings, { ...options.locks });
+	cfgProvidersOauthAccountFailover.set(settings, options.failover ?? false);
 	const installPolicy = vi.fn(() => installOAuthAccountSelectionFromSettings(settings, authStorage));
 	installPolicy();
 	const invalidate = vi.fn((): void => {});
@@ -211,7 +214,7 @@ describe("OAuthAccountManagerComponent routing state", () => {
 
 		expect(rendered(harness.component)).toContain("Anthropic");
 		expect(rendered(harness.component)).toContain("Automatic");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 		const installsAfterOpen = harness.installPolicy.mock.calls.length;
 
@@ -219,7 +222,7 @@ describe("OAuthAccountManagerComponent routing state", () => {
 
 		expect(rendered(harness.component)).toContain("Automatic routing");
 		expect(rendered(harness.component)).toContain("a@example.com");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 		expect(harness.installPolicy).toHaveBeenCalledTimes(installsAfterOpen);
 		expect(harness.onChange).not.toHaveBeenCalled();
@@ -259,7 +262,7 @@ describe("OAuthAccountManagerComponent routing state", () => {
 			available: false,
 			allowSiblingFailover: false,
 		});
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: staleHash });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: staleHash });
 	});
 
 	it("makes selecting one unique row the sole opt-in and persists only its hash", async () => {
@@ -272,7 +275,7 @@ describe("OAuthAccountManagerComponent routing state", () => {
 		pressDown(harness.component);
 		enter(harness.component);
 
-		const locks = harness.settings.get("providers.oauthAccountLocks");
+		const locks = cfgProvidersOauthAccountLocks.get(harness.settings);
 		expect(locks).toEqual({ anthropic: hashA });
 		expect(locks.anthropic).toMatch(/^[0-9a-f]{64}$/);
 		expect(locks.anthropic).not.toContain("account-a");
@@ -292,10 +295,10 @@ describe("OAuthAccountManagerComponent routing state", () => {
 			failover: true,
 			methods: [anthropicMethod],
 		});
-		const rows = harness.authStorage.listStoredOAuthAccounts("anthropic");
+		const rows = harness.authStorage.oauth.accounts("anthropic");
 		const rowB = rows.find(row => row.accountId === "account-b");
 		if (!rowB) throw new Error("Expected account B");
-		expect(harness.authStorage.pinSessionOAuthAccount("anthropic", "manager-session", rowB.credentialId)).toBe(true);
+		expect(harness.authStorage.sessions.pin("anthropic", "manager-session", rowB.credentialId)).toBe(true);
 
 		openAnthropicDetail(harness);
 		const detail = rendered(harness.component);
@@ -304,7 +307,7 @@ describe("OAuthAccountManagerComponent routing state", () => {
 		expect(detail).not.toMatch(/a@example\.com\s+[^\n]*active/);
 
 		enter(harness.component);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 	});
 
 	it("Automatic deletes only this provider lock, reinstalls policy, and restores session pinning", async () => {
@@ -319,14 +322,14 @@ describe("OAuthAccountManagerComponent routing state", () => {
 		pressUp(harness.component);
 		enter(harness.component);
 
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ "google-gemini-cli": googleHash });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ "google-gemini-cli": googleHash });
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 		expect(harness.authStorage.getOAuthAccountSelection("google-gemini-cli")?.identityHash).toBe(googleHash);
 		expect(harness.onChange.mock.calls).toEqual([[{ "google-gemini-cli": googleHash }]]);
-		const rowB = harness.authStorage.listStoredOAuthAccounts("anthropic").find(row => row.accountId === "account-b");
+		const rowB = harness.authStorage.oauth.accounts("anthropic").find(row => row.accountId === "account-b");
 		if (!rowB) throw new Error("Expected account B");
-		expect(harness.authStorage.pinSessionOAuthAccount("anthropic", "manager-session", rowB.credentialId)).toBe(true);
-		expect(harness.authStorage.getOAuthAccountIdentity("anthropic", "manager-session")?.accountId).toBe("account-b");
+		expect(harness.authStorage.sessions.pin("anthropic", "manager-session", rowB.credentialId)).toBe(true);
+		expect(harness.authStorage.oauth.identity("anthropic", "manager-session")?.accountId).toBe("account-b");
 	});
 });
 
@@ -334,8 +337,7 @@ describe("OAuthAccountManagerComponent identity eligibility", () => {
 	it("disables missing and duplicate hashes with the exact reason while keeping every row removable", async () => {
 		const missing = oauthCredential("missing", { accountId: undefined, email: undefined });
 		const duplicateOne = oauthCredential("duplicate-one", { accountId: "same-account", email: "same@example.com" });
-		let visibleRows: OAuthAccountSummary[] = [];
-		let harness: ManagerHarness | undefined;
+		let visibleRows: StoredAuthCredential[] = [];
 		const remove = vi.fn(
 			async (
 				provider: string,
@@ -346,23 +348,26 @@ describe("OAuthAccountManagerComponent identity eligibility", () => {
 			): Promise<OAuthAccountRemovalResult> => {
 				if (!harness) throw new Error("Harness not ready");
 				expect(provider).toBe("anthropic");
-				const remaining = visibleRows.filter(row => row.credentialId !== credentialId);
+				const remaining = visibleRows.filter(row => row.id !== credentialId);
 				if (remaining.length === visibleRows.length) return { status: "missing" };
 				visibleRows = remaining;
 				afterRemoved?.();
 				return { status: "removed" };
 			},
 		);
-		harness = await createHarness({
+		const harness = await createHarness({
 			accounts: anthropicAccounts(missing, duplicateOne),
 			methods: [anthropicMethod],
 			remove,
 		});
-		const storedRows = harness.authStorage.listStoredOAuthAccounts("anthropic");
-		const storedDuplicate = storedRows.find(row => row.accountId === "same-account");
-		if (!storedDuplicate) throw new Error("Expected stored duplicate-identity row");
-		visibleRows = [...storedRows, { ...storedDuplicate, credentialId: storedDuplicate.credentialId + 1 }];
-		vi.spyOn(harness.authStorage, "listStoredOAuthAccounts").mockImplementation(provider =>
+		const storedRows = harness.authStorage.credentials.list("anthropic");
+		const storedDuplicate = storedRows.find(
+			row => row.credential.type === "oauth" && row.credential.accountId === "same-account",
+		);
+		if (!storedDuplicate || storedDuplicate.credential.type !== "oauth")
+			throw new Error("Expected stored duplicate-identity row");
+		visibleRows = [...storedRows, { ...storedDuplicate, id: storedDuplicate.id + 1 }];
+		vi.spyOn(harness.authStorage.credentials, "list").mockImplementation(provider =>
 			provider === "anthropic" ? visibleRows : [],
 		);
 		openAnthropicDetail(harness);
@@ -373,7 +378,7 @@ describe("OAuthAccountManagerComponent identity eligibility", () => {
 		pressDown(harness.component);
 		enter(harness.component);
 		expect(rendered(harness.component)).toContain("Identity unavailable for persistent lock");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 
 		pressEscape(harness.component);
 		enter(harness.component);
@@ -382,30 +387,33 @@ describe("OAuthAccountManagerComponent identity eligibility", () => {
 		const removeScreen = rendered(harness.component);
 		expect(removeScreen).toContain("Credential #");
 		expect(removeScreen).toContain("same@example.com");
-		const missingRow = harness.authStorage
-			.listStoredOAuthAccounts("anthropic")
-			.find(row => row.accountId === undefined && row.email === undefined);
+		const missingRow = visibleRows.find(
+			row =>
+				row.credential.type === "oauth" &&
+				row.credential.accountId === undefined &&
+				row.credential.email === undefined,
+		);
 		if (!missingRow) throw new Error("Expected identity-free row");
 		enter(harness.component);
 		expect(rendered(harness.component)).toContain(
-			`Press Enter again to remove OAuth credential #${missingRow.credentialId}; Esc to cancel`,
+			`Press Enter again to remove OAuth credential #${missingRow.id}; Esc to cancel`,
 		);
 		enter(harness.component);
 		await settle();
-		expect(remove.mock.calls[0]?.[1]).toBe(missingRow.credentialId);
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic")).toHaveLength(2);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
-		const duplicateRow = harness.authStorage
-			.listStoredOAuthAccounts("anthropic")
-			.find(row => row.accountId === "same-account");
+		expect(remove.mock.calls[0]?.[1]).toBe(missingRow.id);
+		expect(harness.authStorage.credentials.list("anthropic")).toHaveLength(2);
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
+		const duplicateRow = visibleRows.find(
+			row => row.credential.type === "oauth" && row.credential.accountId === "same-account",
+		);
 		if (!duplicateRow) throw new Error("Expected duplicate-identity row");
 		pressDown(harness.component, 4);
 		enter(harness.component);
 		enter(harness.component);
 		enter(harness.component);
 		await settle();
-		expect(remove.mock.calls[1]?.[1]).toBe(duplicateRow.credentialId);
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic")).toHaveLength(1);
+		expect(remove.mock.calls[1]?.[1]).toBe(duplicateRow.id);
+		expect(harness.authStorage.credentials.list("anthropic")).toHaveLength(1);
 	});
 
 	it("org-qualifies duplicate emails and gives different organizations different hashes", async () => {
@@ -433,34 +441,37 @@ describe("OAuthAccountManagerComponent identity eligibility", () => {
 
 		pressDown(harness.component, 2);
 		enter(harness.component);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: teamHash });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: teamHash });
 	});
 });
 
 describe("OAuthAccountManagerComponent adding accounts", () => {
 	it("uses the only matching login method, reloads accounts, reinstalls, and never implicitly locks", async () => {
-		let harness: ManagerHarness | undefined;
 		const login = vi.fn(async (provider: OAuthProviderInfo): Promise<OAuthAccountLoginResult> => {
 			if (!harness) throw new Error("Harness not ready");
 			expect(provider.id).toBe("anthropic");
 			harness.store.saveOAuth("anthropic", oauthCredential("added"));
-			await harness.authStorage.reload();
+			await harness.authStorage.credentials.reload();
 			return { status: "completed", identity: { type: "oauth", email: "added@example.com" } };
 		});
-		harness = await createHarness({
+		const accountAdded = Promise.withResolvers<void>();
+		const harness = await createHarness({
 			accounts: anthropicAccounts(accountA),
 			methods: [anthropicMethod],
 			login,
 		});
+		harness.invalidate.mockImplementation(() => {
+			if (harness && rendered(harness.component).includes("OAuth account added.")) accountAdded.resolve();
+		});
 		const installsBefore = harness.installPolicy.mock.calls.length;
 		openAddFromAutomatic(harness, 1);
-		await settle();
+		await accountAdded.promise;
 
 		expect(login).toHaveBeenCalledTimes(1);
 		expect(rendered(harness.component)).toContain("OAuth account added.");
 		expect(rendered(harness.component)).toContain("added@example.com");
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic")).toHaveLength(2);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(harness.authStorage.oauth.accounts("anthropic")).toHaveLength(2);
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 		expect(harness.installPolicy).toHaveBeenCalledTimes(installsBefore + 1);
 		expect(harness.onChange).not.toHaveBeenCalled();
@@ -498,7 +509,7 @@ describe("OAuthAccountManagerComponent adding accounts", () => {
 		const selectedMethod = login.mock.calls[0]?.[0];
 		if (!selectedMethod) throw new Error("Expected selected login method");
 		expect(selectedMethod.id).toBe("anthropic-claude-code");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 	});
 
 	it.each([
@@ -532,7 +543,7 @@ describe("OAuthAccountManagerComponent adding accounts", () => {
 		await settle();
 
 		expect(rendered(harness.component)).toContain(message);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")?.identityHash).toBe(hashA);
 		expect(harness.onChange).not.toHaveBeenCalled();
 	});
@@ -557,14 +568,13 @@ describe("OAuthAccountManagerComponent adding accounts", () => {
 		pressEscape(harness.component);
 		await settle();
 		expect(rendered(harness.component)).toContain("Login cancelled.");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(harness.onChange).not.toHaveBeenCalled();
 	});
 });
 
 describe("OAuthAccountManagerComponent exact removal", () => {
 	it("arms on the first Enter, disarms on Escape or paging, and removes the moved-to durable credential ID", async () => {
-		let harness: ManagerHarness | undefined;
 		const remove = vi.fn(
 			async (
 				provider: string,
@@ -576,18 +586,18 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 				if (!harness) throw new Error("Harness not ready");
 				expect(provider).toBe("anthropic");
 				expect(refreshProviderId).toBe("anthropic");
-				expect(await harness.authStorage.removeCredential(provider, credentialId)).toBe(true);
+				expect(await harness.authStorage.credentials.removeById(provider, credentialId)).toBe(true);
 				afterRemoved?.();
 				return { status: "removed" };
 			},
 		);
-		harness = await createHarness({
+		const harness = await createHarness({
 			accounts: anthropicAccounts(accountA, accountB),
 			locks: { anthropic: hashA },
 			methods: [anthropicMethod],
 			remove,
 		});
-		const rowB = harness.authStorage.listStoredOAuthAccounts("anthropic").find(row => row.accountId === "account-b");
+		const rowB = harness.authStorage.oauth.accounts("anthropic").find(row => row.accountId === "account-b");
 		if (!rowB) throw new Error("Expected account B");
 		openRemoveFromFirstConfigured(harness, 2);
 		pressDown(harness.component);
@@ -608,8 +618,8 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 
 		expect(remove).toHaveBeenCalledTimes(1);
 		expect(remove.mock.calls[0]?.[1]).toBe(rowB.credentialId);
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic").map(row => row.accountId)).toEqual(["account-a"]);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(harness.authStorage.oauth.accounts("anthropic").map(row => row.accountId)).toEqual(["account-a"]);
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(rendered(harness.component)).toContain("OAuth account removed.");
 	});
 
@@ -617,7 +627,6 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		const storageProvider = "zai";
 		const account = oauthCredential("alias");
 		const hash = hashFor(storageProvider, account);
-		let harness: ManagerHarness | undefined;
 		const remove = vi.fn(
 			async (
 				provider: string,
@@ -629,12 +638,12 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 				if (!harness) throw new Error("Harness not ready");
 				expect(provider).toBe(storageProvider);
 				expect(refreshProviderId).toBe("zai-coding-plan");
-				expect(await harness.authStorage.removeCredential(provider, credentialId)).toBe(true);
+				expect(await harness.authStorage.credentials.removeById(provider, credentialId)).toBe(true);
 				afterRemoved?.();
 				return { status: "removed" };
 			},
 		);
-		harness = await createHarness({
+		const harness = await createHarness({
 			accounts: [{ provider: storageProvider, credential: account }],
 			locks: { [storageProvider]: hash },
 			methods: [loginMethod("zai-coding-plan", "Z.AI Coding Plan", storageProvider)],
@@ -646,11 +655,10 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		await settle();
 
 		expect(remove).toHaveBeenCalledTimes(1);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 	});
 
 	it("clears a selected lock only after confirmed removal succeeds", async () => {
-		let harness: ManagerHarness | undefined;
 		const remove = vi.fn(
 			async (
 				provider: string,
@@ -660,20 +668,20 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 				afterRemoved: (() => void) | undefined,
 			): Promise<OAuthAccountRemovalResult> => {
 				if (!harness) throw new Error("Harness not ready");
-				expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
-				expect(await harness.authStorage.removeCredential(provider, credentialId)).toBe(true);
-				expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+				expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
+				expect(await harness.authStorage.credentials.removeById(provider, credentialId)).toBe(true);
+				expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 				afterRemoved?.();
 				return { status: "removed" };
 			},
 		);
-		harness = await createHarness({
+		const harness = await createHarness({
 			accounts: anthropicAccounts(accountA, accountB),
 			locks: { anthropic: hashA },
 			methods: [anthropicMethod],
 			remove,
 		});
-		const rowA = harness.authStorage.listStoredOAuthAccounts("anthropic").find(row => row.accountId === "account-a");
+		const rowA = harness.authStorage.oauth.accounts("anthropic").find(row => row.accountId === "account-a");
 		if (!rowA) throw new Error("Expected account A");
 		openRemoveFromFirstConfigured(harness, 2);
 		enter(harness.component);
@@ -682,7 +690,7 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		await settle();
 
 		expect(remove.mock.calls[0]?.[1]).toBe(rowA.credentialId);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({});
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({});
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 		expect(harness.onChange.mock.calls).toEqual([[{}]]);
 	});
@@ -708,13 +716,12 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		await settle();
 
 		expect(rendered(harness.component)).toContain(message);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")?.identityHash).toBe(hashA);
 		expect(harness.onChange).not.toHaveBeenCalled();
 	});
 
 	it("restores the prior selected hash as stale when refresh fails after durable removal", async () => {
-		let harness: ManagerHarness | undefined;
 		const remove = vi.fn(
 			async (
 				provider: string,
@@ -724,12 +731,12 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 				afterRemoved: (() => void) | undefined,
 			): Promise<OAuthAccountRemovalResult> => {
 				if (!harness) throw new Error("Harness not ready");
-				expect(await harness.authStorage.removeCredential(provider, credentialId)).toBe(true);
+				expect(await harness.authStorage.credentials.removeById(provider, credentialId)).toBe(true);
 				afterRemoved?.();
 				return { status: "error", phase: "refresh", error: new Error("refresh offline") };
 			},
 		);
-		harness = await createHarness({
+		const harness = await createHarness({
 			accounts: anthropicAccounts(accountA),
 			locks: { anthropic: hashA },
 			methods: [anthropicMethod],
@@ -741,8 +748,8 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		await settle();
 
 		expect(rendered(harness.component)).toContain("Account refresh failed: refresh offline");
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic")).toHaveLength(0);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(harness.authStorage.oauth.accounts("anthropic")).toHaveLength(0);
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(harness.authStorage.getOAuthAccountSelection("anthropic")).toEqual({
 			identityHash: hashA,
 			credentialId: undefined,
@@ -760,9 +767,9 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 			locks: { anthropic: hashA },
 			methods: [anthropicMethod],
 		});
-		const rowA = harness.authStorage.listStoredOAuthAccounts("anthropic")[0];
+		const rowA = harness.authStorage.oauth.accounts("anthropic")[0];
 		if (!rowA) throw new Error("Expected account A");
-		expect(await harness.authStorage.removeCredential("anthropic", rowA.credentialId)).toBe(true);
+		expect(await harness.authStorage.credentials.removeById("anthropic", rowA.credentialId)).toBe(true);
 		harness.installPolicy();
 		const reopened = new OAuthAccountManagerComponent(
 			{
@@ -780,7 +787,7 @@ describe("OAuthAccountManagerComponent exact removal", () => {
 		);
 
 		expect(rendered(reopened)).toContain("Locked account unavailable");
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 	});
 });
 
@@ -803,12 +810,10 @@ describe("OAuthAccountManagerComponent input and streaming guards", () => {
 		"blocks the %s mutation while streaming with exact copy and no mutation",
 		async action => {
 			const locks: Record<string, string> = action === "automatic" ? { anthropic: hashA } : {};
-			const login = vi.fn(
-				async (): Promise<OAuthAccountLoginResult> => ({
-					status: "completed",
-					identity: { type: "oauth" },
-				}),
-			);
+			const login = vi.fn(async (): Promise<OAuthAccountLoginResult> => ({
+				status: "completed",
+				identity: { type: "oauth" },
+			}));
 			const remove = vi.fn(async (): Promise<OAuthAccountRemovalResult> => ({ status: "removed" }));
 			const harness = await createHarness({
 				accounts: anthropicAccounts(accountA),
@@ -827,7 +832,7 @@ describe("OAuthAccountManagerComponent input and streaming guards", () => {
 			await settle();
 
 			expect(rendered(harness.component)).toContain(OAUTH_ACCOUNT_STREAMING_MESSAGE);
-			expect(harness.settings.get("providers.oauthAccountLocks")).toEqual(locks);
+			expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual(locks);
 			expect(harness.onChange).not.toHaveBeenCalled();
 			expect(login).not.toHaveBeenCalled();
 			expect(remove).not.toHaveBeenCalled();
@@ -851,8 +856,8 @@ describe("OAuthAccountManagerComponent input and streaming guards", () => {
 
 		expect(rendered(harness.component)).toContain(OAUTH_ACCOUNT_STREAMING_MESSAGE);
 		expect(remove).not.toHaveBeenCalled();
-		expect(harness.authStorage.listStoredOAuthAccounts("anthropic")).toHaveLength(1);
-		expect(harness.settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: hashA });
+		expect(harness.authStorage.oauth.accounts("anthropic")).toHaveLength(1);
+		expect(cfgProvidersOauthAccountLocks.get(harness.settings)).toEqual({ anthropic: hashA });
 		expect(harness.onChange).not.toHaveBeenCalled();
 	});
 });

@@ -298,7 +298,7 @@ describe("ImageUrlService", () => {
 		expect(served.status).toBe(200);
 		const bytes = new Uint8Array(await served.arrayBuffer());
 		expect(bytes.byteLength).toBeGreaterThan(8);
-		expect([...bytes.slice(1, 4)]).toEqual([0x50, 0x4e, 0x47]); // "PNG"
+		expect(Array.from(bytes.slice(1, 4))).toEqual([0x50, 0x4e, 0x47]); // "PNG"
 
 		// Inline retry: placeholder frames gain data and lose their urls.
 		const context: Context = {
@@ -441,7 +441,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "done", reason: "stop", message: done },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);
@@ -468,7 +468,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "error", reason: "error", error: errorMessage("mid-stream failure") },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);

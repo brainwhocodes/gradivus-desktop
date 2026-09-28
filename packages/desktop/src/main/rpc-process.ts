@@ -478,7 +478,6 @@ async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: num
 	if (timeoutMs <= 0) return false;
 	const gate = Promise.withResolvers<boolean>();
 	let settled = false;
-	let timer: NodeJS.Timeout;
 	const onExit = (): void => finish(true);
 	const finish = (value: boolean): void => {
 		if (settled) return;
@@ -487,7 +486,7 @@ async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: num
 		child.off("exit", onExit);
 		gate.resolve(value);
 	};
-	timer = setTimeout(() => finish(false), timeoutMs);
+	const timer = setTimeout(() => finish(false), timeoutMs);
 	child.once("exit", onExit);
 	return gate.promise;
 }

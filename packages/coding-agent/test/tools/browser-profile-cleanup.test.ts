@@ -52,6 +52,7 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 		const handle = {
 			key: "headless:1",
 			kind: { kind: "headless", headless: true },
+			browser: { isConnected: () => false, close: async () => undefined },
 			refCount: 1,
 			cdpEndpoint: "http://127.0.0.1:9222",
 			userDataDir: dir,
@@ -70,6 +71,7 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 			key: "spawned:/fixture/chrome",
 			kind: { kind: "spawned", path: "/fixture/chrome" },
 			refCount: 1,
+			browser: { isConnected: () => false, close: async () => undefined },
 			cdpEndpoint: "http://127.0.0.1:9222",
 			userDataDir: dir,
 			ownsUserDataDir: false,

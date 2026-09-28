@@ -6,12 +6,11 @@ import { isRecord, logger, type PlanReviewAnnotationState, prompt, writeTextFile
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
-import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
-	type: "text",
-};
+import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentSession, ResolvedRoleModel } from "../session/agent-session";
+import { cfgCycleOrder } from "../config/model-settings";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "./approved-plan";
 import { listPlanFiles, readPlanFile } from "./plan-files";
 import { planSaveFileName, planSaveTitleExcerpt } from "./plan-save";
@@ -769,7 +768,7 @@ export class PlanModeReviewController {
 
 	#refreshExecutionModels(): { rows: PlanReviewExecutionModel[]; defaultRole?: string } {
 		this.#resolvedExecutionModels.clear();
-		const cycle = this.#session.getRoleModelCycle(this.#session.settings.get("cycleOrder"));
+		const cycle = this.#session.getRoleModelCycle(cfgCycleOrder.get(this.#session.settings));
 		if (!cycle) return { rows: [] };
 		for (const entry of cycle.models) this.#resolvedExecutionModels.set(entry.role, entry);
 		const defaultRole =

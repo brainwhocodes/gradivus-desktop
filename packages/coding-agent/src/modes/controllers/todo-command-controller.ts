@@ -139,7 +139,7 @@ export class TodoCommandController {
 
 		switch (verb) {
 			case "expand":
-				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				this.ctx.setTodoExpanded(true);
 				return;
 			case "collapse":
 				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();

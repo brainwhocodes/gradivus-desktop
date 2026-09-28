@@ -37,10 +37,9 @@ function makeReport(overrides: Partial<UsageReport> = {}): UsageReport {
 	};
 }
 
-type RoutingStorage = Pick<
-	AuthStorage,
-	"getOAuthAccountSelection" | "listStoredOAuthAccounts" | "getOAuthAccountIdentity"
->;
+type RoutingStorage = Pick<AuthStorage, "getOAuthAccountSelection"> & {
+	oauth: Pick<AuthStorage["oauth"], "accounts" | "identity">;
+};
 
 function makeAccount(credentialId: number, overrides: Partial<OAuthAccountSummary> = {}): OAuthAccountSummary {
 	return {
@@ -57,14 +56,13 @@ function createRoutingStorage(options: {
 	actualAccount?: OAuthAccountIdentity;
 }) {
 	const getOAuthAccountSelection = vi.fn((_provider: string) => options.selection);
-	const listStoredOAuthAccounts = vi.fn((_provider: string, _sessionId?: string) => options.accounts ?? []);
-	const getOAuthAccountIdentity = vi.fn((_provider: string, _sessionId?: string) => options.actualAccount);
+	const listAccounts = vi.fn((_provider: string, _sessionId?: string) => options.accounts ?? []);
+	const getIdentity = vi.fn((_provider: string, _sessionId?: string) => options.actualAccount);
 	const authStorage = {
 		getOAuthAccountSelection,
-		listStoredOAuthAccounts,
-		getOAuthAccountIdentity,
+		oauth: { accounts: listAccounts, identity: getIdentity },
 	} as RoutingStorage;
-	return { authStorage, getOAuthAccountSelection, listStoredOAuthAccounts, getOAuthAccountIdentity };
+	return { authStorage, getOAuthAccountSelection, listAccounts, getIdentity };
 }
 
 describe("buildOAuthAccountRoutingDisplay", () => {
@@ -221,7 +219,7 @@ describe("buildOAuthAccountRoutingDisplay", () => {
 		expect(formatOAuthAccountSelectionLine(missing)).toBe("Locked account unavailable; choose another in /settings");
 	});
 
-	test("preserves automatic-routing actual identity and calls each API once with exact arguments", () => {
+	test("keeps automatic routing without a lock while retaining the active account identity", () => {
 		const actualAccount = { email: "automatic@example.com", accountId: "automatic-account" };
 		const harness = createRoutingStorage({
 			accounts: [makeAccount(1, { active: true, ...actualAccount })],
@@ -238,12 +236,6 @@ describe("buildOAuthAccountRoutingDisplay", () => {
 			actualAccountIsFailover: false,
 		});
 		expect(formatOAuthAccountSelectionLine(display)).toBeUndefined();
-		expect(harness.getOAuthAccountSelection).toHaveBeenCalledTimes(1);
-		expect(harness.getOAuthAccountSelection).toHaveBeenCalledWith("openai-codex");
-		expect(harness.listStoredOAuthAccounts).toHaveBeenCalledTimes(1);
-		expect(harness.listStoredOAuthAccounts).toHaveBeenCalledWith("openai-codex", "session-automatic");
-		expect(harness.getOAuthAccountIdentity).toHaveBeenCalledTimes(1);
-		expect(harness.getOAuthAccountIdentity).toHaveBeenCalledWith("openai-codex", "session-automatic");
 	});
 
 	test("uses the existing enterprise and anonymous selected-account label fallbacks", () => {

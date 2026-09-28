@@ -1,5 +1,5 @@
 import { type OAuthLoginIdentity, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthPrompt, OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	Container,
 	matchesKey,
@@ -12,12 +12,15 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import type { Settings } from "../../config/settings";
-import type { AuthStorage } from "../../session/auth-storage";
+import type { AuthStorage, OAuthCredential, StoredAuthCredential } from "../../session/auth-storage";
+import { cfgProvidersOauthAccountFailover, cfgProvidersOauthAccountLocks } from "../../session/settings";
 import { credentialPinHash } from "../../session/credential-pin";
-import { type SessionPinAccount, toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
-import { getSelectListTheme, theme } from "../theme/theme";
-import { matchesSelectCancel } from "../utils/keybinding-matchers";
-import { LoginDialogComponent } from "./login-dialog";
+import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { matchesSelectCancel } from "@oh-my-pi/pi-tui/keybinding-matchers";
+import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
+import { openPath } from "../../utils/open";
 
 export const OAUTH_ACCOUNT_STREAMING_MESSAGE = "Cannot change accounts while the session is streaming.";
 export const OAUTH_MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -25,7 +28,7 @@ export const OAUTH_MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full 
 export interface OAuthAccountLoginDialogPort {
 	readonly signal: AbortSignal;
 	showAuth(url: string, instructions?: string, launchUrl?: string): void;
-	showPrompt(message: string, placeholder?: string): Promise<string>;
+	showPrompt(prompt: OAuthPrompt): Promise<string>;
 	showProgress(message: string): void;
 	showManualInput(prompt: string): Promise<string>;
 }
@@ -93,10 +96,10 @@ export async function loginOAuthAccount(
 
 	let identity: OAuthLoginIdentity | undefined;
 	try {
-		identity = await host.authStorage.login(provider.id, {
+		identity = await host.authStorage.oauth.login(provider.id, {
 			signal: dialog.signal,
 			onAuth: info => dialog.showAuth(info.url, info.instructions, info.launchUrl),
-			onPrompt: prompt => dialog.showPrompt(prompt.message, prompt.placeholder),
+			onPrompt: prompt => dialog.showPrompt(prompt),
 			onProgress: message => dialog.showProgress(message),
 			onManualCodeInput: PASTE_CODE_LOGIN_PROVIDERS.has(provider.id)
 				? () => dialog.showManualInput(OAUTH_MANUAL_LOGIN_PROMPT)
@@ -127,7 +130,7 @@ export async function removeOAuthAccountCredential(
 
 	let removed: boolean;
 	try {
-		removed = await host.authStorage.removeCredential(storageProvider, credentialId);
+		removed = await host.authStorage.credentials.removeById(storageProvider, credentialId);
 		if (!removed) return { status: "missing" };
 		afterRemoved?.();
 	} catch (error: unknown) {
@@ -185,7 +188,7 @@ export class OAuthAccountManagerComponent extends Container {
 	}
 
 	#locks(): Record<string, string> {
-		return readLockMap(this.options.settings.get("providers.oauthAccountLocks"));
+		return readLockMap(cfgProvidersOauthAccountLocks.get(this.options.settings));
 	}
 
 	#loginMethods(provider?: string): OAuthProviderInfo[] {
@@ -196,12 +199,12 @@ export class OAuthAccountManagerComponent extends Container {
 
 	#providerIds(): string[] {
 		const ids = new Set<string>();
-		for (const provider of this.options.authStorage.list()) {
-			if (this.options.authStorage.listStoredOAuthAccounts(provider).length > 0) ids.add(provider);
+		for (const provider of Object.keys(this.options.authStorage.credentials.all())) {
+			if (this.options.authStorage.credentials.list(provider).some(row => row.credential.type === "oauth")) {
+				ids.add(provider);
+			}
 		}
-		for (const provider of Object.keys(this.#locks())) {
-			if (this.options.authStorage.getOAuthAccountSelection(provider)) ids.add(provider);
-		}
+		for (const provider of Object.keys(this.#locks())) ids.add(provider);
 		return [...ids].sort((a, b) => a.localeCompare(b));
 	}
 
@@ -217,20 +220,35 @@ export class OAuthAccountManagerComponent extends Container {
 	}
 
 	#accountRows(provider: string): AccountRow[] {
-		const accounts = toSessionPinAccounts(
-			this.options.authStorage.listStoredOAuthAccounts(provider, this.options.sessionId),
-		);
-		const hashes = accounts.map(account => credentialPinHash(provider, account));
+		const activeAccounts = this.options.authStorage.oauth.accounts(provider, this.options.sessionId);
+		const activeIds = new Set(activeAccounts.filter(account => account.active).map(account => account.credentialId));
+		const accounts = this.options.authStorage.credentials
+			.list(provider)
+			.filter(
+				(row): row is StoredAuthCredential & { credential: OAuthCredential } => row.credential.type === "oauth",
+			)
+			.map((row, position) => ({
+				position,
+				credentialId: row.id,
+				accountId: row.credential.accountId,
+				email: row.credential.email,
+				projectId: row.credential.projectId,
+				enterpriseUrl: row.credential.enterpriseUrl,
+				orgId: row.credential.orgId,
+				orgName: row.credential.orgName,
+				active: activeIds.has(row.id),
+			}));
+		const rows = toSessionPinAccounts(accounts);
+		const hashes = rows.map(account => credentialPinHash(provider, account));
 		const counts = new Map<string, number>();
 		for (const hash of hashes) {
 			if (hash) counts.set(hash, (counts.get(hash) ?? 0) + 1);
 		}
-		return accounts.map((account, index) => {
+		return rows.map((account, index) => {
 			const hash = hashes[index];
 			return { ...account, hash, lockable: hash !== undefined && counts.get(hash) === 1 };
 		});
 	}
-
 	#configuredAccount(provider: string, rows = this.#accountRows(provider)): AccountRow | undefined {
 		const hash = this.#locks()[provider];
 		if (!hash) return undefined;
@@ -243,7 +261,7 @@ export class OAuthAccountManagerComponent extends Container {
 		if (!lockedHash) return "Automatic";
 		const configured = this.#configuredAccount(provider);
 		if (!configured) return "Locked account unavailable";
-		return `Locked: ${configured.label} (${this.options.settings.get("providers.oauthAccountFailover") ? "failover on" : "strict"})`;
+		return `Locked: ${configured.label} (${cfgProvidersOauthAccountFailover.get(this.options.settings) ? "failover on" : "strict"})`;
 	}
 
 	#blockedReason(): string | undefined {
@@ -307,13 +325,11 @@ export class OAuthAccountManagerComponent extends Container {
 			"Choose a provider to configure automatic routing, add accounts, or remove stored credentials.",
 		);
 		const providers = this.#providerIds();
-		const items = providers.map(
-			(provider): SelectItem => ({
-				value: provider,
-				label: this.#providerName(provider),
-				description: this.#providerStatus(provider),
-			}),
-		);
+		const items = providers.map((provider): SelectItem => ({
+			value: provider,
+			label: this.#providerName(provider),
+			description: this.#providerStatus(provider),
+		}));
 		const list = this.#mountList(items, selectedProvider, "  Enter to manage provider · Esc to go back");
 		list.onSelect = item => this.#showDetail(item.value);
 		list.onCancel = this.callbacks.onClose;
@@ -411,9 +427,11 @@ export class OAuthAccountManagerComponent extends Container {
 			return;
 		}
 		this.#beginScreen("loginMethods", `Add account to ${this.#providerName(provider)}`, "Choose a login method.");
-		const items = methods.map(
-			(method): SelectItem => ({ value: method.id, label: method.name, description: `Login method: ${method.id}` }),
-		);
+		const items = methods.map((method): SelectItem => ({
+			value: method.id,
+			label: method.name,
+			description: `Login method: ${method.id}`,
+		}));
 		const list = this.#mountList(items, undefined, "  Enter to continue · Esc to go back");
 		list.onSelect = item => {
 			const method = methods.find(candidate => candidate.id === item.value);
@@ -426,7 +444,7 @@ export class OAuthAccountManagerComponent extends Container {
 		const provider = this.#provider;
 		if (!provider || !this.#guardMutation()) return;
 		this.#beginScreen("loginDialog", `Add account to ${this.#providerName(provider)}`);
-		const dialog = new LoginDialogComponent(this.options.tui, method.id, () => this.options.invalidate());
+		const dialog = new LoginDialogComponent(this.options.tui, method.id, () => this.options.invalidate(), openPath);
 		this.#loginDialog = dialog;
 		this.addChild(dialog);
 		this.options.invalidate();
@@ -485,13 +503,11 @@ export class OAuthAccountManagerComponent extends Container {
 			`Remove account from ${this.#providerName(provider)}`,
 			"Choose the exact stored OAuth credential to remove.",
 		);
-		const items = rows.map(
-			(row): SelectItem => ({
-				value: `remove:${row.credentialId}`,
-				label: row.label,
-				description: `Credential #${row.credentialId}`,
-			}),
-		);
+		const items = rows.map((row): SelectItem => ({
+			value: `remove:${row.credentialId}`,
+			label: row.label,
+			description: `Credential #${row.credentialId}`,
+		}));
 		const configured = this.#configuredAccount(provider, rows);
 		const preferred = configured ? `remove:${configured.credentialId}` : undefined;
 		const list = this.#mountList(items, preferred, "  Enter to arm removal · Esc to go back");
@@ -575,7 +591,7 @@ export class OAuthAccountManagerComponent extends Container {
 
 	#writeLocks(locks: Readonly<Record<string, string>>): void {
 		const copy = { ...locks };
-		this.options.settings.set("providers.oauthAccountLocks", copy);
+		cfgProvidersOauthAccountLocks.set(this.options.settings, copy);
 		this.options.installPolicy();
 		this.callbacks.onChange(copy);
 		this.options.invalidate();

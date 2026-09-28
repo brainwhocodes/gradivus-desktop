@@ -1,7 +1,7 @@
+import { changedFiles, projectTimeline } from "@gradivus/chat/projection";
 import { describe, expect, it } from "vitest";
 import { TranscriptStore } from "../src/main/transcript-store";
 import type { TimelineItem } from "../src/shared/contracts";
-import { changedFiles, projectTimeline } from "../src/shared/projection";
 
 describe("TranscriptStore", () => {
 	it("pairs tool results with streamed tool calls and preserves unknown events", () => {

@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const authStorages: AuthStorage[] = [];
 const tempDirs: TempDir[] = [];
@@ -67,9 +68,7 @@ it("installs the complete locked-account policy before refreshing an owned regis
 		email: "b@example.com",
 	});
 	if (!selectedHash) throw new Error("Expected account B to have a durable identity");
-	const selectedAccount = authStorage
-		.listStoredOAuthAccounts("anthropic")
-		.find(account => account.accountId === "account-b");
+	const selectedAccount = authStorage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 	if (!selectedAccount) throw new Error("Expected account B to be stored");
 	const settings = Settings.isolated({
 		"providers.oauthAccountLocks": { anthropic: selectedHash },
@@ -97,7 +96,7 @@ it("installs the complete locked-account policy before refreshing an owned regis
 			available: true,
 			allowSiblingFailover: true,
 		});
-		const access = await options.authStorage.getOAuthAccess("anthropic", "owned-registry-startup");
+		const access = await options.authStorage.oauth.access("anthropic", "owned-registry-startup");
 		expect(access).toMatchObject({
 			accessToken: "access-b",
 			credentialId: selectedAccount.credentialId,
@@ -125,9 +124,7 @@ it("preserves a supplied parent registry policy without reinstalling or refreshi
 		email: "b@example.com",
 	});
 	if (!parentHash || !childHash) throw new Error("Expected both accounts to have durable identities");
-	const parentAccount = authStorage
-		.listStoredOAuthAccounts("anthropic")
-		.find(account => account.accountId === "account-a");
+	const parentAccount = authStorage.oauth.accounts("anthropic").find(account => account.accountId === "account-a");
 	if (!parentAccount) throw new Error("Expected account A to be stored");
 	authStorage.setOAuthAccountSelectionPolicy({
 		selections: {
@@ -156,7 +153,7 @@ it("preserves a supplied parent registry policy without reinstalling or refreshi
 			available: true,
 			allowSiblingFailover: false,
 		});
-		const access = await options.authStorage.getOAuthAccess("anthropic", "parent-registry-startup");
+		const access = await options.authStorage.oauth.access("anthropic", "parent-registry-startup");
 		expect(access).toMatchObject({
 			accessToken: "access-a",
 			credentialId: parentAccount.credentialId,
@@ -196,6 +193,7 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	let sessionCreated = false;
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const session = {
+		...createSessionDefaults(),
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -203,7 +201,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {};
@@ -219,14 +216,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 				} as AgentSessionEvent);
 			}
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 		sessionCreationStarted.resolve();

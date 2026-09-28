@@ -4,6 +4,7 @@ import {
 	isOpenRouterProviderId,
 	normalizeOpenRouterModelId,
 } from "../../config/openrouter-routing";
+import { cfgProvidersOpenrouterIgnoredProviders } from "../../session/settings";
 import type { Settings } from "../../config/settings";
 
 const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
@@ -64,11 +65,11 @@ export async function setRpcOpenRouterProviderEnabled(
 		ignored.add(providerId);
 	}
 
-	const configured = settings.get("providers.openrouterIgnoredProviders");
+	const configured = cfgProvidersOpenrouterIgnoredProviders.get(settings);
 	const next = { ...configured };
 	if (ignored.size > 0) next[modelId] = [...ignored].sort();
 	else delete next[modelId];
-	settings.set("providers.openrouterIgnoredProviders", next);
+	cfgProvidersOpenrouterIgnoredProviders.set(settings, next);
 	return toRoutingView(settings, modelId, providers);
 }
 

@@ -1,0 +1,125 @@
+@use "chat";
+
+:root {
+	min-width: 0;
+	min-height: 100dvh;
+}
+
+html,
+body,
+#app {
+	min-width: 0;
+	min-height: 100dvh;
+	overscroll-behavior: none;
+}
+
+body {
+	overflow: hidden;
+}
+
+.hosted-connect {
+	display: grid;
+	min-height: 100dvh;
+	padding: clamp(20px, 5vw, 64px);
+	place-items: center;
+	background:
+		linear-gradient(var(--line-soft) 1px, transparent 1px),
+		linear-gradient(90deg, var(--line-soft) 1px, transparent 1px),
+		var(--window-background);
+	background-size: 56px 56px;
+}
+
+.hosted-connect__panel {
+	display: grid;
+	width: min(100%, 680px);
+	gap: clamp(28px, 5vw, 56px);
+	padding: clamp(28px, 6vw, 72px);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-large);
+	background: var(--shell);
+	box-shadow: 0 24px 80px var(--shadow-color);
+}
+
+.hosted-connect__brand {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	font-size: 14px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+}
+
+.hosted-connect__copy {
+	display: grid;
+	gap: var(--space-3);
+}
+
+.hosted-connect__eyebrow,
+.hosted-connect__copy h1,
+.hosted-connect__copy p,
+.hosted-connect__privacy {
+	margin: 0;
+}
+
+.hosted-connect__eyebrow {
+	color: var(--accent-boundary);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.hosted-connect__copy h1 {
+	max-width: 16ch;
+	font-size: clamp(30px, 7vw, 54px);
+	font-weight: 500;
+	letter-spacing: -0.055em;
+	line-height: 1.04;
+}
+
+.hosted-connect__copy > p:last-child {
+	max-width: 58ch;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1.65;
+}
+
+.hosted-connect__action {
+	min-height: 48px;
+	padding: 0 var(--space-4);
+	border: 1px solid var(--accent-boundary);
+	border-radius: var(--radius-medium);
+	color: var(--accent-foreground);
+	background: var(--accent);
+	cursor: pointer;
+	font-weight: 700;
+	transition:
+		background 140ms var(--ease-standard),
+		transform 140ms var(--ease-standard);
+}
+
+.hosted-connect__action:not(:disabled):hover {
+	background: var(--accent-hover);
+	transform: translateY(-1px);
+}
+
+.hosted-connect__privacy {
+	color: var(--foreground-muted);
+	font-size: 11px;
+	line-height: 1.5;
+}
+
+@media (max-width: 520px) {
+	.hosted-connect {
+		padding: 0;
+		place-items: stretch;
+	}
+
+	.hosted-connect__panel {
+		align-content: center;
+		min-height: 100dvh;
+		border: 0;
+		border-radius: 0;
+		box-shadow: none;
+	}
+}

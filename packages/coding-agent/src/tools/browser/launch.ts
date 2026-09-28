@@ -1,17 +1,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getBrowserCacheDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, getBrowserCacheDir, logger, removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	chromiumExecutablePath,
 	detectChromiumPlatform,
 	installChromium,
 	PLAYWRIGHT_CHROMIUM_VERSION,
 } from "@oh-my-pi/pi-utils/chromium";
-import type { Subprocess } from "bun";
-import type { Browser, CDPSession, Page } from "playwright-core";
-import { ToolAbortError, ToolError, throwIfAborted } from "../tool-errors";
-import { gracefulKillTreeOnce, waitForCdp } from "./attach";
+import { chromium, devices, selectors } from "playwright-core";
+import type { Browser, CDPSession, JSHandle, Page } from "playwright-core";
 import stealthTamperingScript from "./stealth/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "./stealth/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "./stealth/02_stealth_hairline.txt" with { type: "text" };
@@ -26,23 +24,133 @@ import stealthPluginsScript from "./stealth/10_stealth_plugins.txt" with { type:
 import stealthHardwareScript from "./stealth/11_stealth_hardware.txt" with { type: "text" };
 import stealthCodecsScript from "./stealth/12_stealth_codecs.txt" with { type: "text" };
 import stealthWorkerScript from "./stealth/13_stealth_worker.txt" with { type: "text" };
+import type { Subprocess } from "bun";
+import { gracefulKillTreeOnce, waitForCdp } from "./attach";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { withDownload } from "../../downloads/activity";
+type PlaywrightModule = { chromium: typeof chromium; devices: typeof devices; selectors: typeof selectors };
+type PlaywrightDevices = typeof devices;
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
-/** Per-CDP operation ceiling; caller tool timeouts remain authoritative. */
+/** Maximum wait used for browser protocol setup and exact-target discovery. */
 export const BROWSER_PROTOCOL_TIMEOUT_MS = 60_000;
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
+const playwrightModule: PlaywrightModule = { chromium, devices, selectors };
+
+export interface BrowserNetworkConditions {
+	download: number;
+	upload: number;
+	latency: number;
+}
+
+const NETWORK_CONDITIONS: Readonly<Record<string, BrowserNetworkConditions>> = Object.freeze({
+	"Slow 3G": Object.freeze({ download: 50_000, upload: 50_000, latency: 2_000 }),
+	"Fast 3G": Object.freeze({ download: 180_000, upload: 84_375, latency: 562.5 }),
+});
+
+/** Identify Playwright handles by their public surface without depending on private runtime classes. */
+export function isPlaywrightHandle(value: unknown): value is JSHandle {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<JSHandle>;
+	return (
+		typeof candidate.asElement === "function" &&
+		typeof candidate.evaluate === "function" &&
+		typeof candidate.jsonValue === "function" &&
+		typeof candidate.dispose === "function"
+	);
+}
+
+export async function loadPlaywright(): Promise<PlaywrightModule> {
+	return playwrightModule;
+}
+
+export async function loadPlaywrightInWorker(): Promise<PlaywrightModule> {
+	return loadPlaywright();
+}
+
+/** Return Playwright device descriptors. */
+export function loadedKnownDevices(): PlaywrightDevices {
+	return devices;
+}
+
+/** Return the network presets supported by the browser emulation API. */
+export function loadedNetworkConditions(): Readonly<Record<string, BrowserNetworkConditions>> {
+	return NETWORK_CONDITIONS;
+}
+
+/** Resolve visible page target ids through page-scoped Playwright sessions. */
+export async function visibleTargetIdsForCdpEndpoint(cdpEndpoint: string, timeoutMs: number): Promise<Set<string>> {
+	let browser: Browser | undefined;
+	try {
+		const playwright = await loadPlaywright();
+		browser = await playwright.chromium.connectOverCDP(cdpEndpoint, {
+			noDefaults: true,
+			timeout: timeoutMs,
+		});
+		const pages = browser.contexts().flatMap(context => context.pages());
+		const targetIds = await Promise.all(
+			pages.map(async page => {
+				const session = await page
+					.context()
+					.newCDPSession(page)
+					.catch(() => null);
+				if (!session) return undefined;
+				try {
+					const { targetInfo } = await session.send("Target.getTargetInfo");
+					const visible = await withTimeout(
+						page.evaluate(() => document.visibilityState === "visible"),
+						timeoutMs,
+						"Timed out checking browser page visibility",
+					);
+					return visible ? targetInfo?.targetId : undefined;
+				} catch {
+					return undefined;
+				} finally {
+					await session.detach().catch(() => undefined);
+				}
+			}),
+		);
+		return new Set(targetIds.filter((targetId): targetId is string => targetId !== undefined));
+	} catch {
+		return new Set();
+	} finally {
+		if (browser) {
+			await withTimeout(browser.close(), timeoutMs, "Timed out closing temporary Playwright connection").catch(
+				() => undefined,
+			);
+		}
+	}
+}
+
 /**
- * Resolve Chromium without loading Playwright or consulting private package
- * internals. The pinned Chrome-for-Testing version is owned by pi-utils.
+ * Resolve the Chromium executable used by Playwright.
+ *
+ * `OMP_BROWSER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
+ * Testing binary is preferred over a detected system Chrome: a headless
+ * daemon launched from a system `Google Chrome.app` bundle shares its
+ * LaunchServices bundle identity (`com.google.Chrome`), so macOS can deliver
+ * the user's open-URL Apple Events to the daemon and silently swallow their
+ * link clicks (#8673). Chrome for Testing uses a dedicated bundle id
+ * (`com.google.chrome.for.testing`) that is never a user's default handler;
+ * system Chrome is used on macOS only when Chrome for Testing cannot be
+ * obtained. Other platforms keep the download-avoiding system Chrome
+ * preference and fall back to Chrome for Testing. The managed browser is
+ * cached under ~/.omp/browser (getBrowserCacheDir). Returns undefined when
+ * platform detection fails.
+ * Exported so real-browser callers can probe launchability and skip on hosts
+ * missing Chrome's system libraries.
  */
 let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
 	const envPath = process.env.OMP_BROWSER_EXECUTABLE_PATH;
 	if (envPath) return envPath;
-	const sysChrome = await resolveSystemChromium();
-	if (sysChrome) return sysChrome;
+	const preferManagedChromium = process.platform === "darwin";
+	if (!preferManagedChromium) {
+		const sysChrome = await resolveSystemChromium();
+		if (sysChrome) return sysChrome;
+	}
 	if (chromiumExecutablePromise) return chromiumExecutablePromise;
 
 	chromiumExecutablePromise = (async () => {
@@ -52,43 +160,51 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			return undefined;
 		}
 		const cacheDir = getBrowserCacheDir();
-		const executablePath = chromiumExecutablePath({
-			version: PLAYWRIGHT_CHROMIUM_VERSION,
-			cacheDir,
-			platform,
-		});
+		const options = { version: PLAYWRIGHT_CHROMIUM_VERSION, cacheDir, platform };
+		const executablePath = chromiumExecutablePath(options);
 		if (fs.existsSync(executablePath)) return executablePath;
-
-		logger.warn("Downloading OMP Chromium (first browser use)", {
+		logger.warn("Downloading managed Chromium (first browser use)", {
 			version: PLAYWRIGHT_CHROMIUM_VERSION,
 			platform,
 			cacheDir,
 		});
-		let lastReportedPercent = -1;
-		const installation = await installChromium({
-			version: PLAYWRIGHT_CHROMIUM_VERSION,
-			cacheDir,
-			platform,
-			onProgress: ({ downloadedBytes, totalBytes }) => {
-				if (totalBytes <= 0) return;
-				const percent = Math.floor((downloadedBytes / totalBytes) * 100);
-				if (percent >= lastReportedPercent + 10 || downloadedBytes === totalBytes) {
-					lastReportedPercent = percent;
-					logger.debug(
-						`Chromium download: ${percent}% (${Math.round(downloadedBytes / 1_000_000)} / ${Math.round(totalBytes / 1_000_000)} MB)`,
+		await withDownload("Chromium", tracker =>
+			installChromium({
+				...options,
+				onProgress: ({ downloadedBytes, totalBytes }) => {
+					if (totalBytes <= 0) {
+						tracker.update({ loaded: downloadedBytes });
+						return;
+					}
+					tracker.update(
+						downloadedBytes >= totalBytes
+							? { loaded: downloadedBytes, total: totalBytes, detail: "extracting" }
+							: { loaded: downloadedBytes, total: totalBytes },
 					);
-				}
-			},
-		});
-		return installation.executablePath;
-	})().catch(error => {
+				},
+			}),
+		);
+		return executablePath;
+	})().catch(async err => {
+		const message = err instanceof Error ? err.message : String(err);
+		if (preferManagedChromium) {
+			const sysChrome = await resolveSystemChromium();
+			if (sysChrome) {
+				logger.warn("Chrome for Testing unavailable; falling back to the system Chrome bundle", {
+					path: sysChrome,
+					error: message,
+				});
+				return sysChrome;
+			}
+		}
 		chromiumExecutablePromise = undefined;
 		throw new ToolError(
-			`Failed to install OMP Chromium: ${(error as Error).message}. ` +
+			`Failed to install Chromium: ${message}. ` +
 				"Set OMP_BROWSER_EXECUTABLE_PATH to use an existing Chrome/Chromium binary, or install one manually.",
 		);
 	});
-	return chromiumExecutablePromise;
+
+	return await chromiumExecutablePromise;
 }
 
 let resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found
@@ -222,7 +338,16 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 	return undefined;
 }
 
-export interface BrowserLaunchOptions {
+/** Per-process launch features controlled by browser.open options. */
+export interface HeadlessLaunchFeatures {
+	/** Trust invalid HTTPS certificates in this Chromium process. */
+	ignoreHttpsErrors?: boolean;
+	/** Permit file: documents to read other local files. */
+	allowFileAccess?: boolean;
+}
+
+/** Options shared by headless Chromium consumers. */
+export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 	headless: boolean;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	executablePath?: string;
@@ -230,20 +355,6 @@ export interface BrowserLaunchOptions {
 	args?: readonly string[];
 	signal?: AbortSignal;
 	timeoutMs?: number;
-}
-
-/** Fully resolved, source-owned Chromium process specification. */
-export interface BrowserLaunchSpec {
-	executablePath: string;
-	args: string[];
-	userDataDir: string;
-	ownsUserDataDir: boolean;
-}
-
-/** An OMP-owned Chromium process after its dynamic CDP port is verified. */
-export interface LaunchedBrowserProcess extends BrowserLaunchSpec {
-	subprocess: Subprocess;
-	cdpEndpoint: string;
 }
 
 const BASE_CHROMIUM_ARGS = [
@@ -262,8 +373,6 @@ const BASE_CHROMIUM_ARGS = [
 	"--force-color-profile=srgb",
 	"--no-first-run",
 	"--no-default-browser-check",
-	"--password-store=basic",
-	"--use-mock-keychain",
 	"--disable-search-engine-choice-screen",
 ] as const;
 
@@ -290,11 +399,11 @@ function withoutRemoteDebuggingPort(args: readonly string[]): string[] {
 			index++;
 			continue;
 		}
-		if (arg.startsWith("--remote-debugging-port=")) continue;
-		result.push(arg);
+		if (!arg.startsWith("--remote-debugging-port=")) result.push(arg);
 	}
 	return result;
 }
+
 function withoutUserDataDir(args: readonly string[]): string[] {
 	const result: string[] = [];
 	for (let index = 0; index < args.length; index++) {
@@ -303,45 +412,92 @@ function withoutUserDataDir(args: readonly string[]): string[] {
 			index++;
 			continue;
 		}
-		if (arg.startsWith("--user-data-dir=")) continue;
-		result.push(arg);
+		if (!arg.startsWith("--user-data-dir=")) result.push(arg);
 	}
 	return result;
 }
 
-/**
- * Build the only Chromium launch argv used by process-local and broker-owned
- * browsers. No Playwright launch defaults or private APIs participate.
- */
-export async function buildBrowserLaunchSpec(opts: BrowserLaunchOptions): Promise<BrowserLaunchSpec> {
-	const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
-	if (!executablePath) throw new ToolError("No Chrome or Chromium executable is available");
-	const viewport = opts.viewport ?? DEFAULT_VIEWPORT;
-	const requestedArgs = withoutRemoteDebuggingPort(opts.args ?? []);
-	const suppliedProfile = opts.userDataDir ?? commandLineValue(requestedArgs, "--user-data-dir");
-	const suppliedArgs = withoutUserDataDir(requestedArgs);
-	const ownsUserDataDir = suppliedProfile === undefined;
-	const userDataDir = suppliedProfile
-		? path.resolve(suppliedProfile)
-		: await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-browser-profile-"));
-	await fs.promises.mkdir(userDataDir, { recursive: true });
+export interface BrowserLaunchSpec {
+	executablePath: string;
+	args: string[];
+	userDataDir: string;
+	ownsUserDataDir: boolean;
+}
 
-	const args = [
-		...BASE_CHROMIUM_ARGS,
-		`--window-size=${viewport.width},${viewport.height}`,
-		...(opts.headless ? ["--headless=new", "--hide-scrollbars", "--mute-audio"] : []),
-		...suppliedArgs,
-		`--user-data-dir=${userDataDir}`,
-		"--remote-debugging-address=127.0.0.1",
-		"--remote-debugging-port=0",
-	];
+export interface LaunchedBrowserProcess extends BrowserLaunchSpec {
+	subprocess: Subprocess;
+	cdpEndpoint: string;
+}
+
+export interface LaunchHeadlessResult {
+	browser: Browser;
+	cdpEndpoint: string;
+	subprocess: Subprocess;
+	userDataDir?: string;
+}
+
+/** Chromium flags shared by process-local Playwright and broker-owned launches. */
+export function buildHeadlessLaunchArgs(
+	viewport: { width: number; height: number },
+	features: HeadlessLaunchFeatures = {},
+): string[] {
+	const args = [...BASE_CHROMIUM_ARGS, "--hide-scrollbars", "--enable-features=WebMCPTesting,DevToolsWebMCPSupport"];
+	args.push(`--window-size=${viewport.width},${viewport.height}`);
+	if (features.ignoreHttpsErrors) args.push("--ignore-certificate-errors");
+	if (features.allowFileAccess) args.push("--allow-file-access-from-files");
 	const proxy = process.env.OMP_BROWSER_PROXY;
 	if (proxy) {
 		args.push(`--proxy-server=${proxy}`);
 		if (enabledEnv("OMP_BROWSER_PROXY_BYPASS_LOOPBACK")) args.push("--proxy-bypass-list=<-loopback>");
 	}
-	if (enabledEnv("OMP_BROWSER_PROXY_IGNORE_CERT_ERRORS")) args.push("--ignore-certificate-errors");
-	if (!args.some(arg => !arg.startsWith("-"))) args.push("about:blank");
+	if (enabledEnv("OMP_BROWSER_PROXY_IGNORE_CERT_ERRORS") && !args.includes("--ignore-certificate-errors")) {
+		args.push("--ignore-certificate-errors");
+	}
+	return args;
+}
+
+export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<LaunchHeadlessResult> {
+	if (opts.signal?.aborted) throw new ToolError("Browser launch aborted");
+	const launched = await launchBrowserProcess(opts);
+	try {
+		const playwright = await loadPlaywright();
+		const browser = await playwright.chromium.connectOverCDP(launched.cdpEndpoint, {
+			isLocal: true,
+			noDefaults: true,
+			timeout: opts.timeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
+		});
+		return {
+			browser,
+			cdpEndpoint: launched.cdpEndpoint,
+			subprocess: launched.subprocess,
+			...(launched.ownsUserDataDir ? { userDataDir: launched.userDataDir } : {}),
+		};
+	} catch (error) {
+		await gracefulKillTreeOnce(launched.subprocess.pid).catch(() => undefined);
+		if (launched.ownsUserDataDir) await removeUserDataDir(launched.userDataDir);
+		throw error;
+	}
+}
+
+export async function buildBrowserLaunchSpec(opts: LaunchHeadlessOptions): Promise<BrowserLaunchSpec> {
+	const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
+	if (!executablePath) throw new ToolError("No Chrome or Chromium executable is available");
+	const requestedProfile = opts.userDataDir ?? commandLineValue(opts.args ?? [], "--user-data-dir");
+	const ownsUserDataDir = requestedProfile === undefined;
+	const userDataDir = requestedProfile
+		? path.resolve(requestedProfile)
+		: await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-browser-profile-"));
+	await fs.promises.mkdir(userDataDir, { recursive: true });
+	const viewport = opts.viewport ?? DEFAULT_VIEWPORT;
+	const args = [
+		...buildHeadlessLaunchArgs(viewport, opts),
+		...(opts.headless ? ["--headless=new", "--mute-audio"] : []),
+		...withoutRemoteDebuggingPort(withoutUserDataDir(opts.args ?? [])),
+		`--user-data-dir=${userDataDir}`,
+		...(ownsUserDataDir ? ["--password-store=basic", "--use-mock-keychain"] : []),
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-debugging-port=0",
+	];
 	return { executablePath, args: [...new Set(args)], userDataDir, ownsUserDataDir };
 }
 
@@ -353,34 +509,24 @@ async function waitForDevToolsActivePort(
 ): Promise<string> {
 	const activePortPath = path.join(userDataDir, "DevToolsActivePort");
 	const deadline = Date.now() + timeoutMs;
-	let lastError: unknown;
 	while (Date.now() < deadline) {
-		throwIfAborted(signal);
+		if (signal?.aborted) throw new ToolError("Browser launch aborted");
 		try {
 			const stat = await fs.promises.stat(activePortPath);
-			if (stat.mtimeMs < startedAt) throw new Error("stale DevToolsActivePort");
-			const text = await fs.promises.readFile(activePortPath, "utf8");
-			const [rawPort] = text.split(/\r?\n/);
-			const port = Number.parseInt(rawPort ?? "", 10);
-			if (!Number.isFinite(port) || port <= 0 || port > 65_535) {
-				throw new Error(`invalid DevTools port ${JSON.stringify(rawPort)}`);
+			if (stat.mtimeMs >= startedAt) {
+				const [rawPort] = (await fs.promises.readFile(activePortPath, "utf8")).split(/\r?\n/);
+				const port = Number.parseInt(rawPort ?? "", 10);
+				if (Number.isFinite(port) && port > 0 && port <= 65_535) {
+					return `http://127.0.0.1:${port}`;
+				}
 			}
-			const cdpEndpoint = `http://127.0.0.1:${port}`;
-			await waitForCdp(cdpEndpoint, Math.max(1, deadline - Date.now()), signal);
-			return cdpEndpoint;
-		} catch (error) {
-			if (signal?.aborted) throwIfAborted(signal);
-			lastError = error;
-		}
+		} catch {}
 		await Bun.sleep(100);
 	}
-	throw new ToolError(
-		`Timed out waiting for Chromium DevToolsActivePort${lastError instanceof Error ? `: ${lastError.message}` : ""}`,
-	);
+	throw new ToolError("Timed out waiting for Chromium DevToolsActivePort");
 }
 
-/** Spawn an OMP-owned Chromium and verify its plain HTTP CDP endpoint. */
-export async function launchBrowserProcess(opts: BrowserLaunchOptions): Promise<LaunchedBrowserProcess> {
+export async function launchBrowserProcess(opts: LaunchHeadlessOptions): Promise<LaunchedBrowserProcess> {
 	const spec = await buildBrowserLaunchSpec(opts);
 	const startedAt = Date.now();
 	const subprocess = Bun.spawn([spec.executablePath, ...spec.args], {
@@ -396,16 +542,15 @@ export async function launchBrowserProcess(opts: BrowserLaunchOptions): Promise<
 			opts.timeoutMs ?? 30_000,
 			opts.signal,
 		);
+		await waitForCdp(cdpEndpoint, opts.timeoutMs ?? 30_000, opts.signal);
 		return { ...spec, subprocess, cdpEndpoint };
 	} catch (error) {
 		await gracefulKillTreeOnce(subprocess.pid).catch(() => undefined);
 		if (spec.ownsUserDataDir) await removeUserDataDir(spec.userDataDir);
-		if (opts.signal?.aborted) throw new ToolAbortError("Browser launch aborted");
 		throw error;
 	}
 }
 
-/** Broker boundary retaining its nullable unavailable-host contract. */
 export async function resolveSharedBrowserLaunchSpec(opts: {
 	headless: boolean;
 	userDataDir: string;
@@ -413,17 +558,19 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 }): Promise<BrowserLaunchSpec | null> {
 	const executablePath = await ensureChromiumExecutable();
 	if (!executablePath) return null;
-	return await buildBrowserLaunchSpec({ ...opts, executablePath });
+	const viewport = opts.viewport ?? DEFAULT_VIEWPORT;
+	const args = [
+		...buildHeadlessLaunchArgs(viewport),
+		...(opts.headless ? ["--headless=new", "--mute-audio"] : []),
+		"--password-store=basic",
+		"--use-mock-keychain",
+		`--user-data-dir=${opts.userDataDir}`,
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-debugging-port=0",
+	];
+	return { executablePath, args, userDataDir: opts.userDataDir, ownsUserDataDir: false };
 }
 
-/**
- * Remove an OMP-owned headless Chromium profile directory, tolerating the brief
- * window on Windows in which Chromium (or an orphaned browser subprocess) still
- * holds the profile lock. The shared temp remover centralizes retry handling
- * for EBUSY/EPERM/ENOTEMPTY; if the directory is still busy afterwards we warn
- * and leave it for a later cleanup pass rather than throwing — a shutdown cleanup
- * failure must never crash the process (issue #7058).
- */
 export async function removeUserDataDir(dir: string): Promise<void> {
 	try {
 		await removeWithRetries(dir);
@@ -435,14 +582,39 @@ export async function removeUserDataDir(dir: string): Promise<void> {
 	}
 }
 
+// Emulation overrides are cleared by Chromium when their CDP session detaches.
+// Keep one page-scoped session alive until the page closes.
+const pageCdpSessions = new WeakMap<Page, Promise<CDPSession>>();
+
+export function getPageCDPSession(page: Page): Promise<CDPSession> {
+	const existing = pageCdpSessions.get(page);
+	if (existing) return existing;
+	const pending = page.context().newCDPSession(page);
+	pageCdpSessions.set(page, pending);
+	page.once("close", () => {
+		pageCdpSessions.delete(page);
+		void pending.then(session => session.detach()).catch(() => undefined);
+	});
+	void pending.catch(() => {
+		if (pageCdpSessions.get(page) === pending) pageCdpSessions.delete(page);
+	});
+	return pending;
+}
+
 export async function applyViewport(
 	page: Page,
 	viewport?: { width: number; height: number; deviceScaleFactor?: number },
 ): Promise<void> {
 	const resolved = viewport ?? DEFAULT_VIEWPORT;
 	await page.setViewportSize({ width: resolved.width, height: resolved.height });
+	const session = await getPageCDPSession(page);
+	await session.send("Emulation.setDeviceMetricsOverride", {
+		width: resolved.width,
+		height: resolved.height,
+		deviceScaleFactor: resolved.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
+		mobile: false,
+	});
 }
-
 // =====================================================================
 // Stealth patches
 // =====================================================================
@@ -481,8 +653,9 @@ async function resolveUserAgentOverride(browser: Browser, page: Page): Promise<U
 		userAgent = userAgent.replace(/\(([^)]+)\)/, "(Windows NT 10.0; Win64; x64)");
 	}
 
+	const browserVersion = await browser.version();
+	const browserVersionMatch = browserVersion.match(/([\d.]+)/);
 	const uaVersionMatch = userAgent.match(/Chrome\/([\d.]+)/);
-	const browserVersionMatch = browser.version().match(/([\d.]+)/);
 	const legacyVersion = uaVersionMatch?.[1] ?? browserVersionMatch?.[1] ?? "0";
 	const fullVersion = browserVersionMatch?.[1] ?? legacyVersion;
 	const majorVersion = Number.parseInt(legacyVersion.split(".")[0] ?? "0", 10) || 0;
@@ -685,7 +858,7 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 }
 
 async function injectStealthScripts(page: Page): Promise<void> {
-	await page.addInitScript({ content: buildStealthInjectionScript() });
+	await page.addInitScript(buildStealthInjectionScript());
 }
 
 /** Builds the browser-page stealth bootstrap source for regression tests. */
@@ -693,15 +866,11 @@ export function buildStealthInjectionScriptForTest(scripts: readonly string[] = 
 	return buildStealthInjectionScript(scripts);
 }
 
-/** Apply stealth patches and a page-scoped UA override without retaining CDP resources. */
+/** Apply stealth patches + UA override to a headless page. Idempotent within a tab. */
 export async function applyStealthPatches(browser: Browser, page: Page): Promise<void> {
 	const override = await resolveUserAgentOverride(browser, page);
-	const session = await page.context().newCDPSession(page);
-	try {
-		await sendUserAgentOverride(session, override);
-	} finally {
-		await session.detach().catch(() => undefined);
-	}
+	const session = await getPageCDPSession(page).catch(() => null);
+	if (session) await sendUserAgentOverride(session, override);
 	await injectStealthScripts(page);
 }
 

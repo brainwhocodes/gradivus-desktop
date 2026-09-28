@@ -62,11 +62,11 @@ describe("credential pins", () => {
 		}
 		tempDir = TempDir.createSync("@pi-credential-pin-");
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		store.saveOAuth("anthropic", mintOAuthCredential("a"));
-		store.saveOAuth("anthropic", mintOAuthCredential("b"));
+		await store.saveOAuth("anthropic", mintOAuthCredential("a"));
+		await store.saveOAuth("anthropic", mintOAuthCredential("b"));
 		store.saveApiKey("definitely-not-a-provider", "api-key-only");
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 	});
 
 	afterEach(() => {
@@ -122,7 +122,7 @@ describe("credential pins", () => {
 			}),
 		);
 		const identityStorage = new AuthStorage(identityStore);
-		await identityStorage.reload();
+		await identityStorage.credentials.reload();
 		const projectHash = credentialPinHash("google-gemini-cli", { projectId: "project-only" })!;
 		const orgHash = credentialPinHash("anthropic", { orgId: "org-only" })!;
 
@@ -136,8 +136,8 @@ describe("credential pins", () => {
 			identityStorage,
 		);
 
-		const projectAccount = identityStorage.listStoredOAuthAccounts("google-gemini-cli")[0];
-		const orgAccount = identityStorage.listStoredOAuthAccounts("anthropic")[0];
+		const projectAccount = identityStorage.oauth.accounts("google-gemini-cli")[0];
+		const orgAccount = identityStorage.oauth.accounts("anthropic")[0];
 		expect(identityStorage.getOAuthAccountSelection("google-gemini-cli")).toEqual({
 			identityHash: projectHash,
 			credentialId: projectAccount?.credentialId,
@@ -184,9 +184,7 @@ describe("credential pins", () => {
 
 		installOAuthAccountSelectionFromSettings(settings, storage);
 
-		const selectedAccount = storage
-			.listStoredOAuthAccounts("anthropic")
-			.find(account => account.accountId === "account-b");
+		const selectedAccount = storage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 		expect(storage.getOAuthAccountSelection("anthropic")).toEqual({
 			identityHash: anthropicHash,
 			credentialId: selectedAccount?.credentialId,
@@ -218,11 +216,9 @@ describe("credential pins", () => {
 			accountId: "account-b",
 			email: "b@example.com",
 		})!;
-		const storedAccount = storage
-			.listStoredOAuthAccounts("anthropic")
-			.find(account => account.accountId === "account-b");
+		const storedAccount = storage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 		if (!storedAccount) throw new Error("Expected stored account");
-		vi.spyOn(storage, "listStoredOAuthAccounts").mockReturnValue([
+		vi.spyOn(storage.oauth, "accounts").mockReturnValue([
 			storedAccount,
 			{ ...storedAccount, credentialId: storedAccount.credentialId + 1 },
 		]);
@@ -263,16 +259,15 @@ describe("credential pins", () => {
 		installOAuthAccountSelectionFromSettings(settings, storage);
 		seedCredentialPins(storage, manager, sessionId);
 
-		expect(storage.listOAuthAccounts("anthropic", sessionId).some(account => account.active)).toBe(false);
-		expect(storage.getOAuthAccountIdentity("anthropic", sessionId)?.accountId).toBe("account-b");
+		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+		expect(storage.oauth.identity("anthropic", sessionId)?.accountId).toBe("account-b");
 
-		settings.override("providers.oauthAccountLocks", {});
-		settings.override("providers.oauthAccountFailover", true);
-		installOAuthAccountSelectionFromSettings(settings, storage);
+		const automaticSettings = Settings.isolated({ "providers.oauthAccountFailover": true });
+		installOAuthAccountSelectionFromSettings(automaticSettings, storage);
 		expect(storage.getOAuthAccountSelection("anthropic")).toBeUndefined();
 
 		seedCredentialPins(storage, manager, sessionId);
-		expect(storage.listOAuthAccounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
+		expect(storage.oauth.accounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
 			"account-a",
 		);
 	});
@@ -301,7 +296,7 @@ describe("credential pins", () => {
 			available: false,
 			allowSiblingFailover: true,
 		});
-		expect(storage.listOAuthAccounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 	});
 	test("pin entries survive a session reload and the latest pin per provider wins", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
@@ -349,20 +344,20 @@ describe("credential pins", () => {
 		manager.appendCredentialPin("anthropic", hash);
 
 		// Fresh process: no sticky exists yet (the broker-mode resume scenario).
-		expect(storage.listOAuthAccounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 
 		seedCredentialPins(storage, manager, sessionId);
 
-		const active = storage.listOAuthAccounts("anthropic", sessionId).find(account => account.active);
+		const active = storage.oauth.accounts("anthropic", sessionId).find(account => account.active);
 		expect(active?.accountId).toBe("account-b");
 	});
 
 	test("pins are org-scoped: the same account in two orgs re-pins the matching org credential", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		store.saveOAuth("anthropic", mintOAuthCredential("x", { orgId: "org-1" }));
-		store.saveOAuth("anthropic", mintOAuthCredential("x", { orgId: "org-2" }));
+		await store.saveOAuth("anthropic", mintOAuthCredential("x", { orgId: "org-1" }));
+		await store.saveOAuth("anthropic", mintOAuthCredential("x", { orgId: "org-2" }));
 		const orgStorage = new AuthStorage(store);
-		await orgStorage.reload();
+		await orgStorage.credentials.reload();
 
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();
@@ -374,22 +369,22 @@ describe("credential pins", () => {
 
 		seedCredentialPins(orgStorage, manager, sessionId);
 
-		const active = orgStorage.listOAuthAccounts("anthropic", sessionId).find(account => account.active);
+		const active = orgStorage.oauth.accounts("anthropic", sessionId).find(account => account.active);
 		expect(active?.orgId).toBe("org-2");
 	});
 
 	test("seeding never clobbers a live sticky from the same process", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();
-		const accounts = storage.listOAuthAccounts("anthropic", sessionId);
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
 		const accountA = accounts.find(account => account.accountId === "account-a");
-		expect(storage.pinSessionOAuthAccount("anthropic", sessionId, accountA!.credentialId)).toBe(true);
+		expect(storage.sessions.pin("anthropic", sessionId, accountA!.credentialId)).toBe(true);
 
 		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
 		manager.appendCredentialPin("anthropic", hash!);
 		seedCredentialPins(storage, manager, sessionId);
 
-		const active = storage.listOAuthAccounts("anthropic", sessionId).find(account => account.active);
+		const active = storage.oauth.accounts("anthropic", sessionId).find(account => account.active);
 		expect(active?.accountId).toBe("account-a");
 	});
 
@@ -401,22 +396,22 @@ describe("credential pins", () => {
 
 		seedCredentialPins(storage, manager, sessionId);
 
-		expect(storage.listOAuthAccounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 	});
 
 	test("recording appends the serving account's hash once and dedupes repeats", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();
-		const accounts = storage.listOAuthAccounts("anthropic", sessionId);
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
 		const accountA = accounts.find(account => account.accountId === "account-a");
-		storage.pinSessionOAuthAccount("anthropic", sessionId, accountA!.credentialId);
+		storage.sessions.pin("anthropic", sessionId, accountA!.credentialId);
 
 		recordCredentialPin(storage, manager, sessionId, "anthropic");
 		recordCredentialPin(storage, manager, sessionId, "anthropic");
 
 		const entries = manager.getBranch().filter(entry => entry.type === "credential_pin");
 		expect(entries).toHaveLength(1);
-		const identity = storage.getOAuthAccountIdentity("anthropic", sessionId);
+		const identity = storage.oauth.identity("anthropic", sessionId);
 		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", identity!));
 	});
 });

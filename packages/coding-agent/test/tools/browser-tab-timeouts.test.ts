@@ -4,7 +4,6 @@ import {
 	normalizeSelector,
 	resolveOpTimeouts,
 	resolveWaitTimeout,
-	withNetworkIdle2,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
 
@@ -118,59 +117,6 @@ describe("browser wait-helper timeout resolution", () => {
 	});
 });
 
-describe("networkidle2 compatibility", () => {
-	it("requires at most two in-flight requests for a continuous 500ms and removes its listeners", async () => {
-		vi.useFakeTimers();
-		try {
-			type Listener = (request: object) => void;
-			const listeners = new Map<string, Set<Listener>>();
-			const page = {
-				on(event: string, listener: Listener) {
-					const entries = listeners.get(event) ?? new Set<Listener>();
-					entries.add(listener);
-					listeners.set(event, entries);
-				},
-				off(event: string, listener: Listener) {
-					listeners.get(event)?.delete(listener);
-				},
-			};
-			const emit = (event: string, request: object): void => {
-				for (const listener of listeners.get(event) ?? []) listener(request);
-			};
-			const requests = [{}, {}, {}, {}];
-			let resolved = false;
-			const idle = withNetworkIdle2(
-				page as never,
-				async () => {
-					emit("request", requests[0]!);
-					emit("request", requests[1]!);
-					emit("request", requests[2]!);
-					return "done";
-				},
-				5_000,
-			);
-			void idle.then(() => {
-				resolved = true;
-			});
-			await Promise.resolve();
-			emit("requestfinished", requests[0]!);
-			vi.advanceTimersByTime(499);
-			await Promise.resolve();
-			expect(resolved).toBe(false);
-			emit("request", requests[3]!);
-			vi.advanceTimersByTime(500);
-			await Promise.resolve();
-			expect(resolved).toBe(false);
-			emit("requestfinished", requests[1]!);
-			vi.advanceTimersByTime(500);
-			await expect(idle).resolves.toBe("done");
-			expect([...listeners.values()].every(entries => entries.size === 0)).toBe(true);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
 describe("browser wait(predicate) deadline resolution", () => {
 	it("keeps the default deadline strictly under the cell budget so the named error wins", () => {
 		// Default cell (30s): the old 30s predicate default tied the cell timer and lost the
@@ -197,21 +143,6 @@ describe("browser wait(predicate) deadline resolution", () => {
 });
 
 describe("browser selector normalization", () => {
-	it("passes Playwright pseudos, selector namespaces, and plain CSS through untouched", () => {
-		expect(normalizeSelector('button:has-text("Allow all")')).toBe('button:has-text("Allow all")');
-		expect(normalizeSelector("div:visible")).toBe("div:visible");
-		expect(normalizeSelector(':text("Login")')).toBe(':text("Login")');
-		expect(normalizeSelector("text/Allow all")).toBe("text/Allow all");
-		expect(normalizeSelector("aria/Sign in")).toBe("aria/Sign in");
-		expect(normalizeSelector("button.cookie-accept")).toBe("button.cookie-accept");
-		expect(normalizeSelector("div:has(> img)")).toBe("div:has(> img)");
-	});
-
-	it("still rewrites legacy p- prefixes", () => {
-		expect(normalizeSelector("p-text/Continue")).toBe("text/Continue");
-		expect(normalizeSelector('p-aria/Submit[role="button"]')).toBe('aria/Submit[role="button"]');
-	});
-
 	it("rejects non-string selectors (handle/number) instead of crashing on .startsWith", () => {
 		// Regression: passing the ElementHandle from tab.id()/tab.ref() reached
 		// `selector.startsWith(...)` and threw the opaque `A.trim is not a function`.

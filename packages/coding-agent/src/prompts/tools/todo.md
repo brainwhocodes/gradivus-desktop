@@ -1,6 +1,4 @@
-**Tasks: verbatim content strings, NEVER auto-generated IDs; no "task-1"/"task-N". Pass content in `task`.**
-
-After each successful state-changing op: if nothing is `in_progress`, the earliest `pending` task (phase order) auto-promotes to `in_progress`; if several are `in_progress`, only the earliest stays. Blocked tasks NEVER auto-promote—`unblock` first. Out-of-order completion may move pointer back to an earlier phase—expected; completed tasks NEVER revert.
+Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; lost text: view, NEVER guess.
 
 ## Operations
 
@@ -35,10 +33,10 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 
 ## Rules
 
+- After successful mutation: if nothing is `in_progress`, earliest `pending` task (phase order) auto-promotes; if several are `in_progress`, only the earliest stays. Blocked tasks NEVER auto-promote—`unblock` first. Out-of-order completion may rewind the pointer; completed tasks NEVER reopen.
 - Mark leaf tasks done immediately; complete phases in order.
-- NEVER make a todo call the turn's only tool call. Batch it with real work.
-- External blocker? `block` the leaf with `reason`; `unblock` when actionable.
-- Agent-actionable blocker? `append` a child task instead.
+- NEVER make a todo call the turn's only tool call. Batch it with real work; init with first work, done/start with next action.
+- External waits: `block` the leaf with an optional `reason`; unblock when actionable. Agent-actionable blockers: `append` a clearing child task.
 - Keep introduced `task`/`phase` strings stable.
 - Lost exact task text? `view`; NEVER guess.
 

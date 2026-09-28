@@ -2,15 +2,15 @@ import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { Page } from "playwright-core";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
-import { SearchProviderError } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
+import { SearchProviderError } from "../types";
 import { formatScraperQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import type { LoadedHtmlPage } from "./browser-page";
 import { browserFetch } from "./browser-page";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
 
 const MOJEEK_ORIGIN = "https://www.mojeek.de";
 const MOJEEK_HOME_URL = `${MOJEEK_ORIGIN}/?arc=none&lang=en&lb=en&theme=dark`;
@@ -74,10 +74,10 @@ function parseHtmlResults(html: string): ParsedResult[] {
 		if (!href) continue;
 		const url = normalizeResultUrl(href);
 		if (!url) continue;
-		const title = (anchor?.textContent ?? "").replace(/\s+/g, " ").trim();
+		const title = normalizeSearchText(anchor?.textContent) ?? "";
 		if (!title) continue;
-		const snippet = (item.querySelector("p.s")?.textContent ?? "").replace(/\s+/g, " ").trim();
-		results.push({ title, url, snippet: snippet || undefined });
+		const snippet = normalizeSearchText(item.querySelector("p.s")?.textContent);
+		results.push({ title, url, snippet });
 	}
 	return results;
 }
@@ -123,9 +123,7 @@ async function solveCaptcha(page: Page, signal: AbortSignal): Promise<void> {
 	await untilAborted(signal, () => checkbox.click());
 	await untilAborted(signal, () => navigation);
 	await untilAborted(signal, () =>
-		page
-			.waitForSelector("ul.results-standard li", { state: "attached", timeout: CAPTCHA_SOLVE_TIMEOUT_MS })
-			.catch(() => null),
+		page.waitForSelector("ul.results-standard li", { timeout: CAPTCHA_SOLVE_TIMEOUT_MS }).catch(() => null),
 	);
 }
 

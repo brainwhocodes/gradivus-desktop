@@ -1,9 +1,11 @@
-# browser
+# Browser Eval prelude
 
 > Open, reuse, close, and script browser tabs against project-shared Chromium, CDP-attached apps, Gradivus browser panes, the user's Chrome through the OMP Browser Relay, or cmux surfaces.
 
 ## Source
-- Entry: `packages/coding-agent/src/tools/browser.ts`
+
+- Host facade: `packages/coding-agent/src/tools/browser.ts`
+- JavaScript/Python facades: `packages/coding-agent/src/tools/browser/prelude.{js,py}`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/browser.md`
 - Key collaborators:
   - `packages/coding-agent/src/tools/browser/tab-supervisor.ts` — global tab registry; worker lifecycle; run/close coordination.
@@ -41,17 +43,20 @@
   - `packages/coding-agent/src/tools/browser/stealth/12_stealth_codecs.txt` — spoof media codec support.
   - `packages/coding-agent/src/tools/browser/stealth/13_stealth_worker.txt` — carry UA/platform spoofing into `Worker`/`SharedWorker`.
 
-## Inputs
+The prelude exists only while Eval and `browser.enabled` are enabled. It is not an AgentTool.
 
-### Shared fields
+## JavaScript API
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `action` | `"open" \| "close" \| "run"` | Yes | Dispatches to the open/close/run path. |
-| `name` | `string` | No | Tab id. Defaults to `"main"`. Tabs live in a process-global map, so the same name is reused across later calls and in-process subagents until closed. |
-| `timeout` | `number` | No | Tool wall-clock timeout in seconds. Defaults to `30`; clamped to the browser tool range before execution. |
+```js
+const tab = await browser.open({
+  name: "main",
+  url: "https://example.com",
+  wait_until: "load",
+});
 
-### `action: "open"`
+const observation = await tab.observe();
+await tab.id(observation.elements[0].id).click();
+const title = await tab.title();
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -61,35 +66,25 @@
 | `dialogs` | `"accept" \| "dismiss"` | No | Installs a page `dialog` handler that auto-accepts or auto-dismisses dialogs. Omitted means no handler. |
 | `app` | `{ path?: string; cdp_url?: string; relay?: boolean; args?: string[]; target?: string }` | No | Selects browser kind. Explicit `app.cdp_url` wins, then `app.path`. In a Gradivus terminal, inherited `PI_BROWSER_CDP_URL` is skipped; explicit relay and configured relay/CDP/cmux backends remain eligible, then automation fails closed instead of falling back to headless until the authenticated pane-scoped runtime broker is available. Otherwise `app.relay: true` precedes generic inherited `PI_BROWSER_CDP_URL`; then configured relay, `browser.cdpUrl`, cmux, and headless. `app.relay: false` suppresses configured relay, while `PI_BROWSER_RELAY` overrides relay enablement. `browser.relayUrl` defaults to `http://127.0.0.1:9224`. `args` apply only to spawned `app.path`; `target` selects an attached/spawned/relay page by URL/title substring. |
 
-### `action: "close"`
+await tab.close();
+```
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `all` | `boolean` | No | Close every known tab. Omitted closes only `name`. |
 | `kill` | `boolean` | No | When a tab release drops a spawned-app browser handle to refcount 0, also terminate its process tree. Has no effect on headless shutdown and only disconnects connected CDP browsers. |
 
-### `action: "run"`
+`open` accepts `name`, `url`, `viewport`, `wait_until`, `dialogs`, `app`, and `timeout`. `timeout` is in seconds, defaults to 30, and is clamped to 1–300.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `code` | `string` | Yes | Async-function body executed by the shared `JsRuntime` (`src/eval/js/shared/runtime.ts`, the same engine as the `eval` JS tool). In scope: browser-specific `page`, `browser`, `tab`, `assert(cond, msg?)`, and `wait(ms)`, plus the runtime prelude helpers (`display`, `print`, `read`, `write`, `append`, `tree`, `env`, `tool`, `completion`, `agent`, `parallel`, `pipeline`, `log`, `phase`, `budget`, ...) and ambient Bun globals (`console`, timers, `URL`, `TextEncoder`/`TextDecoder`, `Buffer`). |
+### Direct tab helpers
 
-## Outputs
-The tool returns one result per call; no streaming partial output is emitted from the browser implementation itself.
+Direct helpers cross the host bridge and return real structured values:
 
-- `open`: text content with `Opened` or `Reused`, browser description, URL, and optional title. `details` includes `action`, `name`, `browser`, `url`, `viewport`, and the same text in `details.result`.
-- `close`: text content with either `Closed ...` or `No tab named ...`. `details` includes `action`, `name`, and `details.result`.
-- `run`: ordered `content` array built as:
-  1. every structured display output in execution order (object/image `display(value)` calls plus helper status events),
-  2. final return value, JSON-stringified unless already a string,
-  3. or `Ran code on tab "..."` if nothing else was produced.
-- `display(value)` is handled by the shared runtime's `displayValue()` (`src/eval/js/shared/runtime.ts`), then mapped to content by `WorkerCore.#pushDisplay()` (`packages/coding-agent/src/tools/browser/tab-worker.ts`):
-  - `{ type: "image", data, mimeType }` with decodable base64 becomes image content; an unrecognized `data` shape is dropped with a debug note.
-  - any other object/array becomes pretty JSON text (`JSON.stringify(value, null, 2)`); a value that is not structured-cloneable is dropped with a debug note.
-  - helper side effects (`read`/`write`/`tree`/...) emit `status` events that surface as compact JSON text.
-  - primitive `display(value)` (string/number/...) and `console.*` flow to the text channel, which the worker forwards as debug logs rather than tool content; `undefined` is ignored.
-- `tab.screenshot()` returns its saved path and appends text plus an image unless `silent: true`; `details.screenshots` records `{ dest, mimeType, bytes, width, height }`.
-- `run` `details` includes `action`, `name`, current `browser`/`url` when the tab exists, optional `screenshots`, and `details.result` containing only the concatenated text outputs. Combined run text is capped at the inline byte limit via `enforceInlineByteCap()`; over-cap text is saved as a session artifact (`saveBrowserOutputArtifact()`) and the capped text replaces it in content and `details.result`.
+- Navigation: `url()`, `title()`, `goto(url, { waitUntil? })`
+- Inspection: `observe({ includeAll?, viewportOnly? })`, `ariaSnapshot(selector?, { depth?, boxes? })`, `screenshot({ selector?, fullPage?, silent? })`, `extract("markdown" | "text")`
+- Interaction: `click(selector)`, `type(selector, text)`, `fill(selector, value)`, `press(key, { selector? })`, `scroll(dx, dy)`, `drag(from, to)`, `scrollIntoView(selector)`, `select(selector, ...values)`, `uploadFile(selector, ...paths)`
+- Waiting: `waitFor(selector, { timeout? })`, `waitForSelector(selector, { timeout?, visible?, hidden? })`, `waitForUrl(stringOrRegExp, { timeout? })`
+- Page execution: `evaluate(fnOrSource, ...args)`
 
 ## Flow
 1. `BrowserTool.execute()` (`packages/coding-agent/src/tools/browser.ts`) abort-checks, clamps `timeout` via `clampTimeout("browser", ...)`, defaults `name` to `"main"`, and dispatches on `action`.
@@ -262,3 +257,80 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - Headless orphan cleanup is best-effort: if a worker dies before closing its page, the supervisor searches browser targets by `targetId` and closes that page. A worker killed mid-init (init budget exhausted, aborted open) is covered the same way through the target the worker reported in `page-created` — a killed worker can't clean up after itself, and a shared browser's other targets are never touched.
 - Console methods inside `run` do not appear in tool output; they are forwarded as debug/warn/error logs through the worker transport.
 - Raw page request interception is run-scoped. At run end the worker removes user `request` handlers, disables interception, and releases held requests; cleanup failure marks the tab for recovery.
+Direct `waitFor` and `waitForSelector` return booleans. `tab.id(number)` and `tab.ref("e5")` instead return `BrowserElement` handles. Handles support `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
+
+Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, and `pierce/…` query handlers. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. `tab.select` is required for `<select>` elements; `tab.fill` does not support them.
+
+`observe()` assigns numeric ids consumed by `tab.id`. `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
+
+### `tab.run(fnOrCode, options?)`
+
+A run accepts either a serialized function or a JavaScript function-body string, plus `{ args?, timeout? }`:
+
+```js
+const hrefs = await tab.run(async ({ page }) => {
+  return await page.$$eval("a", links => links.map(link => link.href));
+});
+
+const title = await tab.run(
+  "return await tab.title();",
+  { timeout: 10 },
+);
+```
+
+Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
+
+The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
+
+Runs use the shared JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Request interception is cleaned up at the end of each run.
+
+The return value stays structured. Nonempty text emitted by inner `display(...)` calls prints in the outer Eval cell, object/image displays remain Eval output, and a run with no display text emits no placeholder.
+
+## Python API
+
+Python exposes the same handles and direct method names. `open` and `close` use keyword arguments, while `browser.tab` and `tab.id`/`tab.ref` are synchronous handle lookups. Keyword arguments on direct helpers become a trailing JavaScript options object.
+
+```python
+tab = await browser.open(name="main", url="https://example.com")
+observation = await tab.observe(viewportOnly=True)
+await tab.id(observation["elements"][0]["id"]).click()
+title = await tab.run("return await tab.title();", timeout=30)
+await tab.close()
+```
+
+Python `tab.run` accepts a JavaScript string only; it does not accept a Python callable.
+
+## Browser modes
+
+`browser.open` selects a browser in this order when explicitly requested: `app.cdp_url`, `app.path`, then `app.relay`. Without explicit selection it considers relay settings, configured CDP, cmux, then project-shared headless Chromium.
+
+- **Headless:** creates an omp-owned page in project-shared Chromium and applies stealth patches.
+- **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here.
+- **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
+- **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted.
+- **Cmux:** drives an available cmux WKWebView surface.
+
+Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned headless pages and owned cmux surfaces closes them. Connected and relay pages remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates the process.
+
+## Screenshots and output
+
+`tab.screenshot()` saves a full-resolution image beneath `browser.screenshotDir`, or the OS temporary directory when unset, and returns the path. Unless `silent: true`, it also emits an Eval image. It never accepts an output path.
+
+Host result details preserve structured `value` separately from displayed content. Display text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
+
+## Safety and lifecycle
+
+Relay and attached modes operate on real logged-in sessions; sites attribute actions to the user. Name a target or create a dedicated tab. Never navigate the user's visible tab or take a consequential action without direct authorization.
+
+Each named tab has one worker and permits one active run. A timed-out or aborted run can recycle the worker and invalidate handles. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
+
+## Common recovery
+
+- Missing/dead tab: call `browser.open` again.
+- Stale id/ref: call `observe` or `ariaSnapshot` again, then reacquire the handle.
+- Busy tab: await the active helper/run before issuing another.
+- Selector timeout: re-observe and use a supported selector.
+- Relay unavailable: install/start the relay and verify its Chrome extension connection.
+- Attached target missing: inspect available pages and use a precise `app.target`.
+
+`tab.run` and direct helpers execute against live browser state. Verify the actual page after every UI-changing action.

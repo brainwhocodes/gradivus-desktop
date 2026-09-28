@@ -1,12 +1,25 @@
 import { describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { connectOverCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
+import type { EvalPreludeDefinition } from "../../src/eval/preludes";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { chromiumAvailable } from "./chromium-probe";
 
+class BrowserTool {
+	readonly #session: ToolSession;
+	readonly #prelude: EvalPreludeDefinition;
+
+	constructor(session: ToolSession) {
+		this.#session = session;
+		this.#prelude = createBrowserPrelude(session);
+	}
+
+	execute(_method: string, parameters: unknown) {
+		return this.#prelude.invoke(parameters, { session: this.#session, toolCallId: "browser-tab-evaluate-test" });
+	}
+}
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 function makeSession(): ToolSession {
@@ -15,7 +28,11 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "browser.headless": true }),
+		settings: Settings.isolated({
+			"browser.enabled": true,
+			"browser.headless": true,
+			"browser.cmux": false,
+		}),
 	};
 }
 
@@ -43,12 +60,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 		}
 	}, 30_000);
 	it("returns a same-tab nested browser error through the worker bridge without hanging", async () => {
-		let browserTool!: BrowserTool;
 		const session = {
 			...makeSession(),
 			getToolByName: (name: string) => (name === "browser" ? browserTool : undefined),
 		} as ToolSession;
-		browserTool = new BrowserTool(session);
+		const browserTool = new BrowserTool(session);
 		const name = `worker-recursion-${process.pid}`;
 
 		try {
@@ -111,7 +127,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				action: "run",
 				name,
 				code: `
-					await tab.fill('aria/Email[role="textbox"]', "initial");
+					await tab.fill('p-aria/Email[role="textbox"]', "initial");
 					const email = await tab.waitFor("aria/Email");
 					await email.fill("hello");
 					await tab.type("aria/Email", "@example.test");
@@ -203,6 +219,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 			const intercepted = await tool.execute("run", {
 				action: "run",
 				name,
+				timeout: 5,
 				code: `
 					let heldSeen = false;
 					await page.route("**/*", route => {
@@ -221,10 +238,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 						globalThis.__heldFetch = fetch("/held").then(async response => await response.text());
 					});
 					await wait(() => heldSeen);
-					return await tab.evaluate(async () => await (await fetch("/mock")).text());
+					const mocked = await tab.evaluate(async () => await (await fetch("/mock")).text());
+					await page.unroute("**/*");
+					return {
+						mocked,
+						held: await tab.evaluate(async () => await globalThis.__heldFetch),
+						afterUnroute: await tab.evaluate(async () => await (await fetch("/mock")).text()),
+					};
 				`,
 			});
-			expect(intercepted.content).toEqual([{ type: "text", text: "mocked" }]);
+			expect(intercepted.content).toEqual([
+				{
+					type: "text",
+					text: '{\n  "mocked": "mocked",\n  "held": "normal-held",\n  "afterUnroute": "normal-mock"\n}',
+				},
+			]);
 
 			const resumed = await tool.execute("run", {
 				action: "run",
@@ -608,10 +636,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 			await tool.execute("open", { action: "open", name, url });
 			const tabSession = getTab(name);
 			if (tabSession?.backend !== "worker") throw new Error("Worker tab was not created");
-			const browser = await connectOverCdp(tabSession.browser.cdpEndpoint);
-			const context = browser.contexts()[0];
-			if (!context) throw new Error("No browser context");
-			const targetPage = context.pages().find(page => page.url() === url);
+			const browser = tabSession.browser.browser;
+			const targetPage = browser
+				.contexts()
+				.flatMap(context => context.pages())
+				.find(page => page.url() === url);
 			if (!targetPage) throw new Error(`Target page was not found for ${url}`);
 
 			const started = targetPage.waitForFunction("document.documentElement.dataset.floating === 'true'", {

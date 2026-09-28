@@ -24,8 +24,9 @@ test("dry-balance resolves configured bare role names", async () => {
 	const model = fakeModel("acme", "balance-model");
 	const registry: DryBalanceModelRegistry = {
 		authStorage: {
-			getOAuthAccess: async () =>
-				({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
+			oauth: {
+				access: async () => ({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
+			},
 		},
 		getAll: () => [model],
 		getAvailable: () => [model],
@@ -103,14 +104,14 @@ describe.skipIf(process.platform === "win32").serial("dry-balance default runtim
 		const refreshSpy = vi
 			.spyOn(ModelRegistry.prototype, "refreshRuntimeProviders")
 			.mockImplementation(async function (this: ModelRegistry): Promise<void> {
-				expect(this.authStorage.listStoredOAuthAccounts(provider)).toHaveLength(2);
+				expect(this.authStorage.oauth.accounts(provider)).toHaveLength(2);
 				expect(this.authStorage.getOAuthAccountSelection(provider)).toEqual({
 					identityHash,
 					credentialId: expectedCredentialId,
 					available: true,
 					allowSiblingFailover: true,
 				});
-				const access = await this.authStorage.getOAuthAccess(provider, "dry-balance-startup-policy");
+				const access = await this.authStorage.oauth.access(provider, "dry-balance-startup-policy");
 				expect(access).toMatchObject({
 					accessToken: "dry-balance-selected-access",
 					credentialId: expectedCredentialId,

@@ -15,6 +15,7 @@
 - Added automatic reconnection to workspace runtime with bounded backoff and terminal offset replay.
 - Added the ChatGPT OAuth settings flow and masked extension-input prompts for credentials that stay outside desktop transcripts.
 - Added every OAuth login provider reported by OMP and categorized, session-independent agent defaults, including native image generation and inspection controls.
+- Added memory and provider preference categories, structured JSON controls, and per-provider request limits to searchable OMP settings.
 - Added browser-only splits, a Ghostty WebAssembly terminal drawer backed by the authoritative workspace runtime, and durable browser presentation rehydration.
 - Added a native right-click pane menu for splitting browser panes right or down and closing them.
 - Connected desktop settings across theme switching (`dark`, `light`, `system`), tab close confirmation gating, browser search engine templates, default workspace paths, and reactive Ghostty terminal font, cursor, and palette styling without relaunch.

@@ -9,6 +9,7 @@ import type { SelectionAuthScope, SelectionTargetAgent } from "@oh-my-pi/pi-work
 import { type BrowserWindow, dialog, nativeImage, shell } from "electron";
 import { getAgentSwatch } from "../shared/agent-swatch";
 import { AUTH_DISCOVERY_PROVIDER } from "../shared/auth-events";
+import { isAgentSettingValue } from "../shared/contracts";
 import type {
 	AgentHubAgent,
 	AgentHubMessagePage,
@@ -503,6 +504,8 @@ class PlanReviewRpcError extends Error {
 	}
 }
 
+export type DesktopChatEventListener = (events: readonly GradivusEvent[]) => void;
+
 export class DesktopHost {
 	#registry: SessionRegistry;
 	#window: BrowserWindow | undefined;
@@ -533,6 +536,7 @@ export class DesktopHost {
 	#planReviewMutationTails = new Map<string, Promise<void>>();
 	#planReviewResetGates = new Map<string, PlanReviewResetGate>();
 	#suppressedEventSessions = new Set<string>();
+	#chatEventListeners = new Set<DesktopChatEventListener>();
 
 	constructor(userDataPath: string) {
 		this.#registry = new SessionRegistry(userDataPath);
@@ -668,6 +672,11 @@ export class DesktopHost {
 
 	setWindow(window: BrowserWindow | undefined): void {
 		this.#window = window;
+	}
+
+	subscribeChatEvents(listener: DesktopChatEventListener): () => void {
+		this.#chatEventListeners.add(listener);
+		return () => this.#chatEventListeners.delete(listener);
 	}
 
 	bootstrap(): BootstrapSnapshot {
@@ -1074,6 +1083,12 @@ export class DesktopHost {
 		const record = this.#record(idInput);
 		const runtime = this.#requiredRuntime(record.id);
 		return runtime.attachments.stageUploads(uploadsInput);
+	}
+
+	async stagePromptTemporaryFiles(idInput: unknown, filesInput: unknown): Promise<PromptAttachmentView[]> {
+		const record = this.#record(idInput);
+		const runtime = this.#requiredRuntime(record.id);
+		return runtime.attachments.stageTemporaryFiles(filesInput);
 	}
 
 	async stagePromptText(idInput: unknown, textInput: unknown): Promise<PromptAttachmentView> {
@@ -1948,7 +1963,11 @@ export class DesktopHost {
 		});
 	}
 
-	async getSubagentMessages(idInput: unknown, subagentIdInput: unknown, fromByteInput: unknown): Promise<unknown> {
+	async getSubagentMessages(
+		idInput: unknown,
+		subagentIdInput: unknown,
+		fromByteInput: unknown,
+	): Promise<AgentHubMessagePage> {
 		if (
 			typeof subagentIdInput !== "string" ||
 			typeof fromByteInput !== "number" ||
@@ -1963,7 +1982,7 @@ export class DesktopHost {
 				fromByte: fromByteInput,
 			});
 			if (!response.success) throw new Error(response.error ?? "subagent transcript unavailable");
-			return response.data;
+			return normalizeAgentHubMessagePage(response.data);
 		});
 	}
 
@@ -2347,6 +2366,15 @@ export class DesktopHost {
 			sessionId: record.id,
 			cwd: path.resolve(record.cwd),
 			workspace: record.title?.trim() || path.basename(record.cwd) || "Workspace",
+		};
+	}
+
+	resolveHostedChatSessionAuthority(idInput: unknown): { record: SessionRecordV1; state: ProcessState } {
+		const record = this.#record(idInput);
+		const runtime = this.#runtimes.get(record.id);
+		return {
+			record: structuredClone(record),
+			state: runtime?.state ?? "stopped",
 		};
 	}
 
@@ -3054,6 +3082,11 @@ export class DesktopHost {
 		this.#eventQueues.delete(sessionId);
 		this.#eventQueueIndexes.delete(sessionId);
 		if (!queue || queue.length === 0) return;
+		for (const listener of this.#chatEventListeners) {
+			try {
+				listener(queue);
+			} catch {}
+		}
 		if (isWindowUsable(this.#window)) {
 			try {
 				for (const event of queue) this.#window?.webContents.send("gradivus:event", event);
@@ -3783,8 +3816,12 @@ function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
 		value.label.length > 512 ||
 		typeof value.description !== "string" ||
 		value.description.length > 8_192 ||
-		(value.control !== "toggle" && value.control !== "select" && value.control !== "multiselect") ||
-		(value.apply !== "immediate" && value.apply !== "next-session") ||
+		(value.control !== "toggle" &&
+			value.control !== "select" &&
+			value.control !== "multiselect" &&
+			value.control !== "text" &&
+			value.control !== "json" &&
+			value.control !== "provider-limits") ||
 		!isAgentSettingValue(value.value)
 	)
 		return undefined;
@@ -3795,6 +3832,11 @@ function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
 	) {
 		return undefined;
 	}
+	if (value.control === "text" && typeof value.value !== "string") return undefined;
+	if (value.control === "json" && !isRecord(value.value)) return undefined;
+	if (value.control === "provider-limits" && !isProviderLimits(value.value)) return undefined;
+	if (value.control === "select" && typeof value.value !== "string" && typeof value.value !== "number")
+		return undefined;
 	const options = Array.isArray(value.options)
 		? value.options
 				.slice(0, 1_000)
@@ -3803,23 +3845,30 @@ function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
 		: undefined;
 	if ((value.control === "select" || value.control === "multiselect") && (!options || options.length === 0))
 		return undefined;
+	if (value.control === "select" && !options?.some(option => option.value === value.value)) return undefined;
+	if (
+		value.control === "multiselect" &&
+		(!Array.isArray(value.value) || value.value.some(item => !options?.some(option => option.value === item)))
+	)
+		return undefined;
 	return {
 		path: value.path,
 		tab: value.tab,
 		group: typeof value.group === "string" && value.group.length <= 160 ? value.group : undefined,
 		label: value.label,
 		description: value.description,
+		...(typeof value.warning === "string" && value.warning.length <= 8_192 ? { warning: value.warning } : {}),
 		control: value.control,
 		value: value.value,
 		options,
 		...(value.control === "multiselect" && typeof value.ordered === "boolean" ? { ordered: value.ordered } : {}),
-		apply: value.apply,
 	};
 }
 
 function normalizeAgentSettingOption(value: unknown): AgentSettingOption | undefined {
 	if (
 		!isRecord(value) ||
+		(typeof value.value !== "string" && typeof value.value !== "number") ||
 		!isAgentSettingValue(value.value) ||
 		typeof value.label !== "string" ||
 		value.label.length === 0 ||
@@ -3840,21 +3889,19 @@ function isAgentSettingTab(value: unknown): value is AgentSettingView["tab"] {
 		value === "model" ||
 		value === "interaction" ||
 		value === "context" ||
+		value === "memory" ||
 		value === "files" ||
 		value === "shell" ||
 		value === "tools" ||
-		value === "tasks"
+		value === "tasks" ||
+		value === "providers"
 	);
 }
 
-function isAgentSettingValue(value: unknown): value is AgentSettingValue {
+function isProviderLimits(value: unknown): value is Record<string, number> {
 	return (
-		typeof value === "boolean" ||
-		(typeof value === "string" && value.length <= 2_048) ||
-		(typeof value === "number" && Number.isFinite(value)) ||
-		(Array.isArray(value) &&
-			value.length <= 1_000 &&
-			value.every(item => typeof item === "string" && item.length <= 2_048))
+		isRecord(value) &&
+		Object.values(value).every(limit => typeof limit === "number" && Number.isFinite(limit) && limit > 0)
 	);
 }
 

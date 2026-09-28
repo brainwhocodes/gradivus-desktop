@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseImageMetadata } from "@oh-my-pi/pi-utils/mime";
+import { parseImageMetadata, readImageMetadata } from "@oh-my-pi/pi-utils/mime";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import {
 	MAX_INLINE_PROMPT_BYTES,
@@ -10,6 +10,7 @@ import {
 	MAX_PROMPT_ATTACHMENT_COUNT,
 	MAX_PROMPT_IMAGE_BYTES,
 	MAX_TEMP_PROMPT_BYTES,
+	type PromptAttachmentTempFile,
 	type PromptAttachmentUpload,
 	type PromptAttachmentView,
 	type PromptComposition,
@@ -17,7 +18,7 @@ import {
 	type PromptImageContent,
 } from "../shared/contracts";
 
-export * from "../shared/attachment-display";
+export { promptAttachmentDisplayText } from "@gradivus/chat/attachment-display";
 
 const MAX_NAME_CODE_POINTS = 160;
 const MAX_MIME_CODE_POINTS = 160;
@@ -32,7 +33,7 @@ export interface ResolvedPromptComposition {
 type StoredAttachment = {
 	view: PromptAttachmentView;
 	path: string;
-	bytes: Uint8Array;
+	bytes?: Uint8Array;
 };
 
 export class PromptAttachmentStore {
@@ -67,6 +68,47 @@ export class PromptAttachmentStore {
 				await fs.writeFile(stagedPath, upload.data);
 				await fs.chmod(stagedPath, 0o600);
 				const stored = { view, path: path.resolve(stagedPath), bytes: upload.data };
+				this.#attachments.set(view.id, stored);
+				this.#retainedBytes += view.size;
+				created.push(stored);
+			}
+			return created.map(item => ({ ...item.view }));
+		} catch (error) {
+			for (const item of created) {
+				this.#attachments.delete(item.view.id);
+				this.#retainedBytes -= item.view.size;
+				await fs.rm(item.path, { force: true }).catch(() => {});
+			}
+			throw error;
+		}
+	}
+
+	async stageTemporaryFiles(value: unknown): Promise<PromptAttachmentView[]> {
+		this.#assertOpen();
+		const files = await validateTemporaryFiles(value);
+		const batchBytes = files.reduce((total, file) => total + file.size, 0);
+		this.#assertQuota(batchBytes);
+		const tempDir = await this.#getTempDir();
+		const created: StoredAttachment[] = [];
+		try {
+			for (const file of files) {
+				const metadata = await readImageMetadata(file.path);
+				const kind = metadata ? "image" : "file";
+				if (metadata && file.size > MAX_PROMPT_IMAGE_BYTES) throw new RangeError("image attachment exceeds 20 MiB");
+				const name = displayName(file.name);
+				const view: PromptAttachmentView = {
+					id: randomUUID(),
+					name,
+					size: file.size,
+					kind,
+					reference: this.#createReference(kind, name),
+				};
+				const stagedPath = tempDir.join(
+					`${view.id}${extensionFor(file.name, metadata?.mimeType ?? file.mimeType)}`,
+				);
+				await moveTemporaryFile(file.path, stagedPath);
+				await fs.chmod(stagedPath, 0o600);
+				const stored = { view, path: path.resolve(stagedPath) };
 				this.#attachments.set(view.id, stored);
 				this.#retainedBytes += view.size;
 				created.push(stored);
@@ -132,11 +174,12 @@ export class PromptAttachmentStore {
 			if (!record) throw new Error("prompt attachment resolution failed");
 			output.push(expandAttachment(record));
 			if (record.view.kind === "image") {
-				const metadata = parseImageMetadata(record.bytes);
+				const bytes = record.bytes ?? (await fs.readFile(record.path));
+				const metadata = parseImageMetadata(bytes);
 				if (!metadata) throw new Error("staged image is no longer valid");
 				images.push({
 					type: "image",
-					data: Buffer.from(record.bytes).toString("base64"),
+					data: Buffer.from(bytes).toString("base64"),
 					mimeType: metadata.mimeType,
 				});
 			}
@@ -301,6 +344,66 @@ function validateUploads(value: unknown): PromptAttachmentUpload[] {
 		uploads.push({ name: input.name, mimeType: input.mimeType as string | undefined, data });
 	}
 	return uploads;
+}
+
+async function validateTemporaryFiles(value: unknown): Promise<PromptAttachmentTempFile[]> {
+	if (!Array.isArray(value)) throw new TypeError("temporary attachments must be an array");
+	if (value.length === 0) throw new RangeError("attachments cannot be empty");
+	if (value.length > MAX_PROMPT_ATTACHMENT_COUNT) throw new RangeError("too many attachments");
+	const files: PromptAttachmentTempFile[] = [];
+	const paths = new Set<string>();
+	let batchBytes = 0;
+	for (let index = 0; index < value.length; index += 1) {
+		const candidate = value[index];
+		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+			throw new TypeError(`attachment ${index + 1} is invalid`);
+		}
+		const input = candidate as Record<string, unknown>;
+		const keys = Object.keys(input);
+		if (
+			keys.some(key => !["name", "mimeType", "size", "path"].includes(key)) ||
+			!Object.hasOwn(input, "name") ||
+			!Object.hasOwn(input, "size") ||
+			!Object.hasOwn(input, "path") ||
+			typeof input.name !== "string" ||
+			input.name.length === 0 ||
+			Array.from(input.name).length > MAX_NAME_CODE_POINTS ||
+			(input.mimeType !== undefined &&
+				(typeof input.mimeType !== "string" || Array.from(input.mimeType).length > MAX_MIME_CODE_POINTS)) ||
+			!Number.isSafeInteger(input.size) ||
+			(input.size as number) <= 0 ||
+			(input.size as number) > MAX_PROMPT_ATTACHMENT_BYTES ||
+			typeof input.path !== "string" ||
+			!path.isAbsolute(input.path)
+		) {
+			throw new RangeError(`attachment ${index + 1} is invalid`);
+		}
+		const resolvedPath = path.resolve(input.path);
+		if (paths.has(resolvedPath)) throw new RangeError("duplicate temporary attachment path");
+		const stats = await fs.lstat(resolvedPath);
+		if (!stats.isFile() || stats.size !== input.size)
+			throw new RangeError(`attachment ${index + 1} changed during upload`);
+		paths.add(resolvedPath);
+		batchBytes += stats.size;
+		if (batchBytes > MAX_PROMPT_ATTACHMENT_BATCH_BYTES) throw new RangeError("attachment batch exceeds 32 MiB");
+		files.push({
+			name: input.name,
+			mimeType: input.mimeType as string | undefined,
+			size: stats.size,
+			path: resolvedPath,
+		});
+	}
+	return files;
+}
+
+async function moveTemporaryFile(source: string, target: string): Promise<void> {
+	try {
+		await fs.rename(source, target);
+	} catch (error) {
+		if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EXDEV") throw error;
+		await fs.copyFile(source, target);
+		await fs.rm(source, { force: true });
+	}
 }
 
 function validateAttachmentIds(value: unknown, allowDuplicates = false): string[] {

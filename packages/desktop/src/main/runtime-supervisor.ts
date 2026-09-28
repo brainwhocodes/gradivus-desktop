@@ -406,6 +406,7 @@ export class RuntimeSupervisor {
 		this.#clearRuntimeTimers(entry);
 		this.#notify(entry);
 
+		// eslint-disable-next-line prefer-const -- the async continuation compares this promise with the entry's current startup.
 		let startup!: Promise<void>;
 		startup = (async () => {
 			try {
@@ -453,6 +454,7 @@ export class RuntimeSupervisor {
 		entry.state = "stopping";
 		this.#notify(entry);
 
+		// eslint-disable-next-line prefer-const -- the async continuation compares this promise with the entry's current stop.
 		let stopping!: Promise<void>;
 		stopping = (async () => {
 			try {

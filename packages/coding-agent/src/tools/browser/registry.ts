@@ -1,26 +1,50 @@
 import * as path from "node:path";
 import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import { ToolAbortError, ToolError } from "../tool-errors";
-import { findReusableCdp, gracefulKillTreeOnce, probeCdpEndpoint, waitForCdp } from "./attach";
+import type { Browser } from "playwright-core";
+import { ToolAbortError } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
 import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
-import { DEFAULT_VIEWPORT, launchBrowserProcess, removeUserDataDir } from "./launch";
+import {
+	BROWSER_PROTOCOL_TIMEOUT_MS,
+	DEFAULT_VIEWPORT,
+	launchHeadlessBrowser,
+	loadPlaywright,
+	removeUserDataDir,
+} from "./launch";
+import { protectDialogOwnership } from "./dialogs";
+import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
+import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 
+function formatError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 export type CdpBrowserKind =
-	| { kind: "headless"; headless: boolean }
-	| { kind: "spawned"; path: string }
+	| {
+			kind: "headless";
+			headless: boolean;
+			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
+			ignoreHttpsErrors?: boolean;
+			/** Process-local file access launch flag, unsupported by an already-running shared browser. */
+			allowFileAccess?: boolean;
+	  }
+	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
-
 export type BrowserKind = CdpBrowserKind | CmuxKind;
 export type BrowserKindTag = BrowserKind["kind"];
 
-const OWNED_PROCESS_CLOSE_TIMEOUT_MS = 5_000;
-const RELAY_EXTENSION_WAIT_MS = 35_000;
+/**
+ * Upper bound for closing the Playwright CDP connection to an OMP-owned
+ * headless browser before terminating the owned process tree.
+ */
+const HEADLESS_CLOSE_TIMEOUT_MS = 5_000;
 
 interface BrowserHandleCommon {
 	key: string;
@@ -28,11 +52,13 @@ interface BrowserHandleCommon {
 	refCount: number;
 }
 
-/** Plain endpoint and ownership record; Playwright connections live only in consumers/workers. */
+/** Playwright CDP connection plus its process/profile ownership record, when locally launched. */
 export interface CdpBrowserHandle extends BrowserHandleCommon {
 	kind: CdpBrowserKind;
+	browser: Browser;
 	cdpEndpoint: string;
 	pid?: number;
+	subprocess?: Subprocess;
 	ownedProcess?: Subprocess;
 	/** OMP-owned temporary profile, removed only after the matching owned process is stopped. */
 	userDataDir?: string;
@@ -58,12 +84,12 @@ export interface ReleaseBrowserOptions {
 const browsers = new Map<string, BrowserHandle>();
 const pendingOpens = new Map<string, Promise<BrowserHandle>>();
 
-function browserKey(kind: BrowserKind): string {
+export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}`;
+			return `headless:${kind.headless ? "1" : "0"}:${kind.ignoreHttpsErrors ? "tls" : ""}:${kind.allowFileAccess ? "file" : ""}`;
 		case "spawned":
-			return `spawned:${kind.path}`;
+			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
@@ -76,16 +102,16 @@ function browserKey(kind: BrowserKind): string {
 export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
-	appArgs?: string[];
 	signal?: AbortSignal;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
+	if (kind.kind === "spawned") kind = { ...kind, args: resolveSpawnArgs(kind.path, kind.args, opts.cwd) };
 	const key = browserKey(kind);
 	for (;;) {
 		const existing = browsers.get(key);
 		if (existing) {
-			if ("client" in existing || (await probeCdpEndpoint(existing.cdpEndpoint, opts.signal))) return existing;
+			if ("client" in existing || existing.browser.isConnected()) return existing;
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, {
 				kill: existing.ownedProcess !== undefined,
@@ -109,6 +135,7 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 			});
 			throw new ToolAbortError("Browser open aborted");
 		}
+		if ("browser" in handle) protectDialogOwnership(handle.browser);
 		browsers.set(key, handle);
 		return handle;
 	}
@@ -124,6 +151,13 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 	return cdpEndpoint;
 }
 
+async function connectBrowser(cdpEndpoint: string): Promise<Browser> {
+	const playwright = await loadPlaywright();
+	return await playwright.chromium.connectOverCDP(cdpEndpoint, {
+		noDefaults: true,
+		timeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+	});
+}
 async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	if (kind.kind === "cmux") {
 		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
@@ -131,82 +165,122 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		return { key: browserKey(kind), kind, client, surface: kind.surface, refCount: 0 };
 	}
 	if (kind.kind === "headless") {
-		if (isCompiledBinary() || workerHostEntry() !== null) return await openSharedHeadlessHandle(kind, opts);
-		const launched = await launchBrowserProcess({
+		const { browser, cdpEndpoint, subprocess, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
 			signal: opts.signal,
+			ignoreHttpsErrors: kind.ignoreHttpsErrors,
+			allowFileAccess: kind.allowFileAccess,
 		});
 		return {
 			key: browserKey(kind),
 			kind,
-			cdpEndpoint: launched.cdpEndpoint,
-			pid: launched.subprocess.pid,
-			ownedProcess: launched.subprocess,
-			userDataDir: launched.userDataDir,
-			ownsUserDataDir: launched.ownsUserDataDir,
+			browser,
+			cdpEndpoint,
+			pid: subprocess.pid,
+			subprocess,
+			ownedProcess: subprocess,
+			userDataDir,
+			ownsUserDataDir: userDataDir !== undefined,
 			refCount: 0,
 		};
 	}
 	if (kind.kind === "connected") {
 		const cdpEndpoint = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpEndpoint, 5_000, opts.signal);
-		return { key: browserKey(kind), kind, cdpEndpoint, refCount: 0 };
-	}
-	if (kind.kind === "relay") {
-		const cdpEndpoint = normalizeConnectedCdpUrl(kind.cdpUrl);
-		let autoStarted = false;
-		if (isLoopbackRelayUrl(cdpEndpoint) && (isCompiledBinary() || workerHostEntry() !== null)) {
-			autoStarted = await ensureRelayDaemon({ cdpUrl: cdpEndpoint, signal: opts.signal });
-		}
-		try {
-			await waitForCdp(cdpEndpoint, RELAY_EXTENSION_WAIT_MS, opts.signal);
-		} catch (error) {
-			if (error instanceof ToolAbortError || (error instanceof Error && error.name === "AbortError")) throw error;
-			throw new ToolError(
-				autoStarted
-					? `omp browser relay is serving at ${cdpEndpoint} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`
-					: `omp browser relay is not reachable at ${cdpEndpoint}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
-			);
-		}
-		return { key: browserKey(kind), kind, cdpEndpoint, refCount: 0 };
-	}
-
-	const executablePath = kind.path;
-	if (!path.isAbsolute(executablePath)) {
-		throw new ToolError(
-			`app.path must be absolute (got ${JSON.stringify(executablePath)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
-		);
-	}
-	const reused = await findReusableCdp(executablePath, opts.signal);
-	if (reused) {
-		logger.debug("Reusing existing CDP endpoint for attach", {
-			executablePath,
-			pid: reused.pid,
-			cdpEndpoint: reused.cdpEndpoint,
-		});
 		return {
 			key: browserKey(kind),
 			kind,
-			cdpEndpoint: reused.cdpEndpoint,
-			pid: reused.pid,
+			browser: await connectBrowser(cdpEndpoint),
+			cdpEndpoint,
 			refCount: 0,
 		};
 	}
-	const launched = await launchBrowserProcess({
-		headless: false,
-		executablePath,
-		args: opts.appArgs,
-		signal: opts.signal,
-	});
+	if (kind.kind === "relay") {
+		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
+		// Loopback relays are owned by a machine-global broker and auto-started
+		// on demand (the extension dials in on its own). Hosts without a CLI
+		// worker entry (bun test, SDK embedding) never spawn brokers. Remote
+		// relay URLs must already be serving.
+		if (isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null)) {
+			await ensureRelayDaemon({ cdpUrl, signal: opts.signal });
+		}
+		// The relay answers /json/version with 503 until its extension dials in;
+		// the wait fails fast when nothing serves the port or the server has
+		// already outlived the window an installed extension needs to connect.
+		const outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		if (outcome === "unreachable") {
+			throw new ToolError(
+				`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
+			);
+		}
+		if (outcome === "no-extension") {
+			throw new ToolError(
+				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
+			);
+		}
+		return {
+			key: browserKey(kind),
+			kind,
+			browser: await connectBrowser(cdpUrl),
+			cdpEndpoint: cdpUrl,
+			refCount: 0,
+		};
+	}
+
+	const exe = kind.path;
+	if (!path.isAbsolute(exe)) {
+		throw new ToolError(
+			`app.path must be absolute (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
+		);
+	}
+	const appArgs = kind.args ?? [];
+	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs });
+	let cdpUrl: string;
+	let pid: number;
+	let subprocess: Subprocess | undefined;
+	if (reused) {
+		logger.debug("Reusing existing CDP endpoint for attach", { exe, pid: reused.pid, cdpUrl: reused.cdpUrl });
+		cdpUrl = reused.cdpUrl;
+		pid = reused.pid;
+	} else {
+		const port = await findFreeCdpPort();
+		const launchArgs = [...appArgs, `--remote-debugging-port=${port}`];
+		const child = Bun.spawn([exe, ...launchArgs], {
+			cwd: opts.cwd,
+			stdout: "ignore",
+			stderr: "ignore",
+			stdin: "ignore",
+		});
+		child.unref();
+		subprocess = child;
+		pid = child.pid;
+		cdpUrl = `http://127.0.0.1:${port}`;
+		try {
+			await waitForCdp(cdpUrl, 30_000, opts.signal);
+		} catch (err) {
+			await gracefulKillTreeOnce(child.pid).catch(() => undefined);
+			if (err instanceof ToolAbortError) throw err;
+			if (err instanceof Error && err.name === "AbortError") throw err;
+			throw new ToolError(`Failed to attach to ${path.basename(exe)} on ${cdpUrl}: ${formatError(err)}`);
+		}
+	}
+
+	let browser: Browser;
+	try {
+		browser = await connectBrowser(cdpUrl);
+	} catch (err) {
+		if (subprocess) await gracefulKillTreeOnce(subprocess.pid);
+		throw new ToolError(`Connected to ${cdpUrl} but Playwright connectOverCDP failed: ${formatError(err)}`);
+	}
 	return {
 		key: browserKey(kind),
 		kind,
-		cdpEndpoint: launched.cdpEndpoint,
-		pid: launched.subprocess.pid,
-		ownedProcess: launched.subprocess,
-		userDataDir: launched.userDataDir,
-		ownsUserDataDir: launched.ownsUserDataDir,
+		browser,
+		cdpEndpoint: cdpUrl,
+		pid,
+		subprocess,
+		ownedProcess: subprocess,
 		refCount: 0,
 	};
 }
@@ -245,44 +319,114 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.client.close();
 		return;
 	}
-	if (handle.sharedDaemon || handle.kind.kind === "connected" || handle.kind.kind === "relay") return;
-	const terminate = handle.kind.kind === "headless" || opts.kill;
-	if (!terminate || !handle.ownedProcess) return;
-	await terminateOwnedProcess(handle, opts.timeoutMs ?? OWNED_PROCESS_CLOSE_TIMEOUT_MS);
-	if (handle.ownsUserDataDir && handle.userDataDir) await removeUserDataDir(handle.userDataDir);
-}
-
-function sharedEndpointFromWebSocket(wsEndpoint: string): string {
-	const endpoint = new URL(wsEndpoint);
-	endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
-	endpoint.pathname = "";
-	endpoint.search = "";
-	endpoint.hash = "";
-	return endpoint.toString().replace(/\/$/, "");
+	if (handle.kind.kind === "headless") {
+		if (handle.sharedDaemon) {
+			// Playwright close drops this CDP connection only; the shared daemon
+			// remains owned by its broker and other sessions.
+			if (handle.browser.isConnected()) {
+				try {
+					await withTimeout(
+						handle.browser.close(),
+						opts.timeoutMs ?? HEADLESS_CLOSE_TIMEOUT_MS,
+						"Timed out disconnecting from shared browser",
+					);
+				} catch (err) {
+					logger.debug("Failed to disconnect from shared browser", { error: formatError(err) });
+				}
+			}
+			return;
+		}
+		if (handle.browser.isConnected()) {
+			try {
+				await withTimeout(
+					handle.browser.close(),
+					HEADLESS_CLOSE_TIMEOUT_MS,
+					"Timed out closing headless browser connection",
+				);
+			} catch (err) {
+				logger.debug("Failed to close headless browser connection", { error: formatError(err) });
+			}
+		}
+		// This launch owns the process tree, so close the Playwright connection
+		// first, then stop Chromium before removing its temporary profile.
+		await terminateOwnedProcess(handle, opts.timeoutMs ?? HEADLESS_CLOSE_TIMEOUT_MS);
+		if (handle.userDataDir) await removeUserDataDir(handle.userDataDir);
+		return;
+	}
+	// Connected and relay browsers belong to the user: drop our CDP link, never kill.
+	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") {
+		if (handle.browser.isConnected()) {
+			try {
+				await withTimeout(
+					handle.browser.close(),
+					opts.timeoutMs ?? HEADLESS_CLOSE_TIMEOUT_MS,
+					"Timed out disconnecting from remote browser",
+				);
+			} catch (err) {
+				logger.debug("Failed to disconnect from remote browser", { error: formatError(err) });
+			}
+		}
+		return;
+	}
+	if (handle.browser.isConnected()) {
+		try {
+			await withTimeout(
+				handle.browser.close(),
+				opts.timeoutMs ?? HEADLESS_CLOSE_TIMEOUT_MS,
+				"Timed out disconnecting from spawned browser",
+			);
+		} catch (err) {
+			logger.debug("Failed to disconnect from spawned browser", { error: formatError(err) });
+		}
+	}
+	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
+	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
+		await gracefulKillTreeOnce(handle.subprocess.pid);
+	}
 }
 
 async function openSharedHeadlessHandle(
 	kind: Extract<CdpBrowserKind, { kind: "headless" }>,
 	opts: AcquireBrowserOptions,
 ): Promise<CdpBrowserHandle> {
-	const viewport = opts.viewport ?? DEFAULT_VIEWPORT;
+	if (kind.allowFileAccess) {
+		throw new ToolError(
+			"browser.open({ allow_file_access:true }) requires a process-local Chromium launch and cannot be applied to the project-shared browser. Use app.path to launch a dedicated browser.",
+		);
+	}
+	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	try {
 		const shared = await ensureSharedBrowser({
 			projectDir: opts.cwd,
 			headless: kind.headless,
-			viewport,
+			viewport: vp,
 			signal: opts.signal,
 		});
 		if (!shared) {
 			throw new ToolError(
-				"Shared browser daemon unavailable (broker start or Chromium launch failed); check `hub ps` for omp.browser.* daemons and ~/.omp/logs for details",
+				"Shared browser daemon unavailable (broker start or Chromium launch failed); check `omp ps` for omp.browser.* daemons and ~/.omp/logs for details",
 			);
 		}
-		const cdpEndpoint = sharedEndpointFromWebSocket(shared.wsEndpoint);
-		await waitForCdp(cdpEndpoint, 5_000, opts.signal);
+		const endpoint = new URL(shared.wsEndpoint);
+		endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
+		endpoint.pathname = "";
+		endpoint.search = "";
+		endpoint.hash = "";
+		const cdpEndpoint = endpoint.toString().replace(/\/$/, "");
+		const playwright = await loadPlaywright();
+		const browser = await playwright.chromium.connectOverCDP(cdpEndpoint, {
+			noDefaults: true,
+			timeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+		});
+		// Attaching to the shared daemon is the natural point to sweep targets
+		// left behind by omp processes that died without teardown — bounds
+		// accumulation without a background timer. Best-effort and detached so a
+		// slow reap never delays the open (issue #10022).
+		void reapOrphanSharedTargets(browser, { projectDir: shared.projectDir, daemonName: shared.daemonName });
 		return {
 			key: browserKey(kind),
 			kind,
+			browser,
 			cdpEndpoint,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,

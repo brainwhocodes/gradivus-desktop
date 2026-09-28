@@ -43,13 +43,24 @@ vi.mock("electron", () => {
 describe("Sequential application shutdown and terminal teardown", () => {
 	it("executes teardown sequence in strict order and blocks later stages until earlier stages release", async () => {
 		const order: string[] = [];
+		const localChatStopGate = Promise.withResolvers<void>();
 		const hostStopGate = Promise.withResolvers<void>();
 		const workspaceStopGate = Promise.withResolvers<void>();
+		const localChatStopped = Promise.withResolvers<void>();
+		const hostStopped = Promise.withResolvers<void>();
 
+		const mockLocalChatServer = {
+			stop: vi.fn(async () => {
+				await localChatStopGate.promise;
+				order.push("local-chat.stop");
+				localChatStopped.resolve();
+			}),
+		};
 		const mockHost = {
 			stopAll: vi.fn(async () => {
 				await hostStopGate.promise;
 				order.push("host.stopAll");
+				hostStopped.resolve();
 			}),
 			close: vi.fn(async () => {
 				order.push("host.close");
@@ -74,20 +85,32 @@ describe("Sequential application shutdown and terminal teardown", () => {
 		});
 
 		const shutdownPromise = shutdownDesktopServices({
+			localChatServer: mockLocalChatServer,
 			host: mockHost,
 			workspace: mockWorkspace,
 			runtimeClient: mockClient,
 			quit: mockQuit,
 		});
 		expect(order).toHaveLength(0);
+		expect(mockHost.stopAll).not.toHaveBeenCalled();
+		localChatStopGate.resolve();
+		await localChatStopped.promise;
+		expect(order).toEqual(["local-chat.stop"]);
 		expect(mockClient.close).not.toHaveBeenCalled();
 		hostStopGate.resolve();
-		await Promise.resolve();
-		expect(order).toEqual(["host.stopAll"]);
+		await hostStopped.promise;
+		expect(order).toEqual(["local-chat.stop", "host.stopAll"]);
 		expect(mockClient.close).not.toHaveBeenCalled();
 		workspaceStopGate.resolve();
 		await shutdownPromise;
-		expect(order).toEqual(["host.stopAll", "workspace.stop", "client.close", "host.close", "quit"]);
+		expect(order).toEqual([
+			"local-chat.stop",
+			"host.stopAll",
+			"workspace.stop",
+			"client.close",
+			"host.close",
+			"quit",
+		]);
 	});
 
 	it("continues through client cleanup even if workspace stop throws", async () => {

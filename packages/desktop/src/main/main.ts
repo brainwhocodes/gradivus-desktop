@@ -8,11 +8,29 @@ import { ensureWorkspaceRuntime, type WorkspaceRuntimeDescriptor } from "@oh-my-
 import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, net, protocol, session } from "electron";
 import { MAX_INLINE_PROMPT_BYTES } from "../shared/contracts";
+import type { LocalChatConnectionView } from "../shared/local-chat-consent";
 import { BROWSER_SELECTION_AGENT_PROFILE_ID } from "../shared/selection-agent";
 import { DESKTOP_THEME_PALETTES, type ResolvedTheme, resolveTheme } from "../shared/theme-palette";
 import { AppSettingsStore } from "./app-settings";
 import { defaultWorkspacePath, ompExecutablePath, runtimeRootDir } from "./backend-path";
 import { DesktopHost } from "./desktop-host";
+import { HostedCommandDispatcher } from "./hosted-command-dispatcher";
+import { HostedEventSequencer } from "./hosted-event-sequencer";
+import { HostedGrantCapabilityStore } from "./hosted-grant-capabilities";
+import { HostedNativeActionBridge } from "./hosted-native-actions";
+import { HostedProjection } from "./hosted-projection";
+import { LocalChatApi } from "./local-chat-api";
+import { LocalChatConnectionController } from "./local-chat-connections";
+import { LocalChatConsentController } from "./local-chat-consent";
+import { DesktopLocalChatConsentPresenter } from "./local-chat-consent-presenter";
+import { LocalScopeExpansionCoordinator } from "./local-chat-expansion";
+import {
+	FixedHostedClientRepository,
+	FixedHostedScopeRepository,
+	InMemoryAuthorizationCodeRepository,
+} from "./local-chat-oauth";
+import { LocalChatServer } from "./local-chat-server";
+import { LocalGrantRepository, LocalTokenService } from "./local-chat-tokens";
 import { adoptOwnedRuntimeCandidate } from "./runtime-candidate";
 import { driveRuntimeReconnect } from "./runtime-reconnect";
 import { shutdownDesktopServices } from "./shutdown";
@@ -47,6 +65,9 @@ let workspace: WorkspaceHost | undefined;
 let runtimeDescriptor: WorkspaceRuntimeDescriptor | undefined;
 let requestRuntimeReconnect: (() => Promise<void>) | undefined;
 let runtimeClient: WorkspaceClient | undefined;
+let localChatServer: LocalChatServer | undefined;
+let localChatConsentPresenter: DesktopLocalChatConsentPresenter | undefined;
+let localChatConnections: LocalChatConnectionController | undefined;
 
 interface InitializedServices {
 	host: DesktopHost;
@@ -239,6 +260,7 @@ if (!gotLock) {
 			}
 			mainWindow = createWindow(theme);
 			mainWindow.on("closed", () => {
+				localChatConsentPresenter?.cancelAll();
 				host?.setWindow(undefined);
 				mainWindow = undefined;
 			});
@@ -346,6 +368,105 @@ if (!gotLock) {
 
 			await bindRuntimeClient(runtimeClient);
 
+			if (host.bootstrap().warning) {
+				mainWindow.webContents.once("did-finish-load", () => {
+					if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+					try {
+						mainWindow.webContents.send("gradivus:event", {
+							sessionId: "",
+							type: "warning",
+							message: host?.bootstrap().warning,
+						});
+					} catch {}
+				});
+			}
+			await loadRenderer(mainWindow);
+
+			const allowDevelopmentClient = !app.isPackaged;
+			const clients = new FixedHostedClientRepository(allowDevelopmentClient);
+			const scopes = new FixedHostedScopeRepository();
+			const codes = new InMemoryAuthorizationCodeRepository();
+			const grants = new LocalGrantRepository();
+			const tokens = new LocalTokenService(grants);
+			localChatConsentPresenter = new DesktopLocalChatConsentPresenter(() => mainWindow);
+			const consent = new LocalChatConsentController(grants, localChatConsentPresenter);
+			const expansion = new LocalScopeExpansionCoordinator(consent, tokens);
+			const projection = await HostedProjection.create();
+			const capabilities = new HostedGrantCapabilityStore();
+			const events = new HostedEventSequencer({ host, projection, capabilities });
+			const sendConnections = (connections: LocalChatConnectionView[]): void => {
+				if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+				try {
+					mainWindow.webContents.send("gradivus:local-chat-connections-changed", connections);
+				} catch {}
+			};
+			localChatConnections = new LocalChatConnectionController({
+				clients,
+				grants,
+				tokens,
+				events,
+				capabilities,
+				host,
+				onChanged: sendConnections,
+			});
+			const nativeActions = new HostedNativeActionBridge({
+				host,
+				events,
+				projection,
+				confirmOpenFile: async (record, target) => {
+					if (!mainWindow || mainWindow.isDestroyed()) return false;
+					const response = await dialog.showMessageBox(mainWindow, {
+						type: "question",
+						title: "Open workspace file?",
+						message: `Gradivus Chat wants to open ${target} from ${record.title ?? "this chat"}.`,
+						detail: "The file path is resolved again inside the current workspace before opening.",
+						buttons: ["Open file", "Cancel"],
+						defaultId: 1,
+						cancelId: 1,
+						noLink: true,
+					});
+					return response.response === 0;
+				},
+				reconnectRuntime: async () => {
+					if (!requestRuntimeReconnect) throw new Error("Runtime reconnect is unavailable");
+					await requestRuntimeReconnect();
+				},
+				openDesktopAccounts: async () => {
+					if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+						throw new Error("Desktop window is unavailable");
+					}
+					if (mainWindow.isMinimized()) mainWindow.restore();
+					mainWindow.show();
+					mainWindow.focus();
+					mainWindow.webContents.send("gradivus:open-accounts");
+				},
+			});
+			const dispatcher = new HostedCommandDispatcher({ host, projection, capabilities, native: nativeActions });
+			const api = new LocalChatApi({
+				clients,
+				scopes,
+				codes,
+				consent,
+				expansion,
+				tokens,
+				dispatcher,
+				eventSequencer: events,
+				desktopVersion: app.getVersion(),
+				onConnectionsChanged: () => localChatConnections?.notifyChanged(),
+			});
+			localChatServer = new LocalChatServer({
+				isPackaged: app.isPackaged,
+				api,
+				onState: state => {
+					if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+						try {
+							mainWindow.webContents.send("gradivus:local-chat-state", state);
+						} catch {}
+					}
+				},
+			});
+			await localChatServer.start();
+
 			// Unblock all pending and future IPC calls
 			resolveServicesReady?.({
 				host,
@@ -353,21 +474,6 @@ if (!gotLock) {
 				settingsStore: appSettingsStore,
 				runtimeClient,
 			});
-
-			if (host.bootstrap().warning) {
-				mainWindow.webContents.once("did-finish-load", () => {
-					if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-						try {
-							mainWindow.webContents.send("gradivus:event", {
-								sessionId: "",
-								type: "warning",
-								message: host?.bootstrap().warning,
-							});
-						} catch {}
-					}
-				});
-			}
-			await loadRenderer(mainWindow);
 		})
 		.catch(error => {
 			console.error("GRADIVUS STARTUP FAILED:", error);
@@ -384,6 +490,7 @@ if (!gotLock) {
 			host,
 			workspace,
 			runtimeClient,
+			localChatServer,
 			quit: () => app.quit(),
 		});
 	});
@@ -398,6 +505,7 @@ if (!gotLock) {
 			const theme = resolveTheme(appSettingsStore.settings.theme, nativeTheme.shouldUseDarkColors);
 			mainWindow = createWindow(theme);
 			mainWindow.on("closed", () => {
+				localChatConsentPresenter?.cancelAll();
 				host?.setWindow(undefined);
 				mainWindow = undefined;
 			});
@@ -506,6 +614,24 @@ function registerIpc(): void {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
 		return h.setOAuthAccountFailover(enabled);
+	});
+	ipcMain.handle("gradivus:local-chat-connections", async event => {
+		assertTrustedSender(event);
+		await ensureServices();
+		if (!localChatConnections) throw new Error("Local app connections are unavailable");
+		return localChatConnections.list();
+	});
+	ipcMain.handle("gradivus:local-chat-revoke", async (event, grantId: unknown) => {
+		assertTrustedSender(event);
+		await ensureServices();
+		if (!localChatConnections) throw new Error("Local app connections are unavailable");
+		return localChatConnections.revoke(grantId);
+	});
+	ipcMain.handle("gradivus:local-chat-consent-response", async (event, response: unknown) => {
+		assertTrustedSender(event);
+		await ensureServices();
+		if (!localChatConsentPresenter) return false;
+		return localChatConsentPresenter.respond(response);
 	});
 	ipcMain.handle("gradivus:remove-oauth-account", async (event, providerId: unknown, credentialId: unknown) => {
 		assertTrustedSender(event);

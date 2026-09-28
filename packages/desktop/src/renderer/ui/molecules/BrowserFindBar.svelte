@@ -2,7 +2,7 @@
 	import { tick } from "svelte";
 	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import type { BrowserFindState } from "../../../shared/contracts";
-	import IconButton from "./IconButton.svelte";
+	import { IconButton } from "@gradivus/chat";
 
 	interface Props {
 		value?: string;

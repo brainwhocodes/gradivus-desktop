@@ -379,7 +379,7 @@ interface ObservedProcessIdentity {
 	startToken?: string;
 }
 
-type NativeProcessClass = typeof import("@oh-my-pi/pi-natives")["Process"];
+type NativeProcessClass = (typeof import("@oh-my-pi/pi-natives"))["Process"];
 let nativeProcessClassPromise: Promise<NativeProcessClass | undefined> | undefined;
 
 function loadNativeProcessClass(): Promise<NativeProcessClass | undefined> {

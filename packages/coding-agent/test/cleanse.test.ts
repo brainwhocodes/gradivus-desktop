@@ -141,8 +141,8 @@ describe("cleanse agent startup", () => {
 			email: "cleanse-b@example.com",
 		});
 		if (!identityHash) throw new Error("Expected cleanse account B to have a durable identity");
-		const selectedAccount = authStorage
-			.listStoredOAuthAccounts("anthropic")
+		const selectedAccount = authStorage.oauth
+			.accounts("anthropic")
 			.find(account => account.accountId === "cleanse-account-b");
 		if (!selectedAccount) throw new Error("Expected cleanse account B to be stored");
 		const settings = Settings.isolated({
@@ -159,7 +159,7 @@ describe("cleanse agent startup", () => {
 				available: true,
 				allowSiblingFailover: true,
 			});
-			const access = await authStorage.getOAuthAccess("anthropic", "cleanse-startup-test");
+			const access = await authStorage.oauth.access("anthropic", "cleanse-startup-test");
 			expect(access).toMatchObject({
 				accessToken: "cleanse-access-b",
 				credentialId: selectedAccount.credentialId,

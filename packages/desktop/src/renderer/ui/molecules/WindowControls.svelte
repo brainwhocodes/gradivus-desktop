@@ -2,7 +2,7 @@
 	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
 	import MaximizeSquare from "@solar-icons/svelte/linear/maximize-square";
 	import Minimize from "@solar-icons/svelte/linear/minimize";
-	import IconButton from "./IconButton.svelte";
+	import { IconButton } from "@gradivus/chat";
 
 	interface Props {
 		maximized: boolean;
