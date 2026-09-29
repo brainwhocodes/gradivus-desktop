@@ -1,10 +1,10 @@
-import { pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { documentToMarkdown } from "@oh-my-pi/pi-natives";
 import type { ConversionResult, Converter, StreamInfo } from "../../types";
 
 const EXTENSIONS = [".pdf"];
 const MIMETYPES = ["application/pdf", "application/x-pdf"];
 
-/** Converts PDF buffers to Markdown through the native `pdf-inspector` bridge. */
+/** Low-level local AnyDoc conversion; session-aware reads recover failures with vision. */
 export class PdfConverter implements Converter {
 	name = "pdf";
 
@@ -19,16 +19,10 @@ export class PdfConverter implements Converter {
 	}
 
 	async convert(input: Buffer, _streamInfo: StreamInfo): Promise<ConversionResult> {
-		const result = await pdfToMarkdown(input);
-		const notice =
-			result.pagesNeedingOcr.length > 0
-				? `Text extraction is incomplete for PDF pages ${result.pagesNeedingOcr.join(", ")}. Use the browser prelude to render those pages or OCR them.`
-				: undefined;
-
-		const conversion: ConversionResult = {
-			markdown: notice ? [result.markdown, notice].filter(Boolean).join("\n\n") : result.markdown,
-		};
-		if (result.title !== undefined) conversion.title = result.title;
-		return conversion;
+		const result = await documentToMarkdown(input, ".pdf");
+		if (result.error || result.pagesNeedingOcr.length > 0 || !result.markdown.trim()) {
+			throw new Error(result.error ?? "PDF text extraction is incomplete");
+		}
+		return { markdown: result.markdown };
 	}
 }

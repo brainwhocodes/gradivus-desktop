@@ -1,5 +1,9 @@
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { promptAttachmentDisplayText } from "@gradivus/chat/attachment-display";
 import { TRANSCRIPT_PRESENTATION_LIMITS } from "@gradivus/chat/transcript-limits";
+import { workspaceFileKind } from "@gradivus/chat/workspace-file-types";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type {
 	FileChangeDisposition,
@@ -22,12 +26,19 @@ export class TranscriptStore {
 	#messageById = new Map<string, TimelineItem>();
 	#thinkingByMessage = new Map<string, TimelineItem>();
 	#sequence = 0;
+	#artifacts = new Map<string, { target: string; realPath?: string; dev?: number; ino?: number }>();
+	#workspace: string;
+
+	constructor(workspace = process.cwd()) {
+		this.#workspace = workspace;
+	}
 
 	load(messages: readonly unknown[]): void {
 		this.#items = [];
 		this.#toolById.clear();
 		this.#messageById.clear();
 		this.#thinkingByMessage.clear();
+		this.#artifacts.clear();
 		for (const message of messages) this.#appendMessage(message);
 	}
 
@@ -69,6 +80,70 @@ export class TranscriptStore {
 			candidateIndex++;
 		}
 		return undefined;
+	}
+
+	/** Only explicit outputs of successful, known generation tools enter this session's allowlist. */
+	async resolveArtifact(target: string): Promise<string> {
+		const artifact = this.#artifacts.get(target);
+		if (!artifact) throw new Error("Generated artifact is not authorized for this session");
+		if (!artifact.realPath) throw Object.assign(new Error("Generated artifact is no longer available"), { code: "ENOENT" });
+		const actual = await fs.promises.realpath(artifact.target);
+		const stat = await fs.promises.lstat(actual);
+		if (actual !== artifact.realPath || !stat.isFile() || stat.dev !== artifact.dev || stat.ino !== artifact.ino)
+			throw new Error("Generated artifact changed identity");
+		return actual;
+	}
+
+	#generatedFiles(item: TimelineItem, result: unknown): TimelineFileChange[] | undefined {
+		if (!isRecord(result) || result.isError === true || !isRecord(result.details)) return undefined;
+		const wrapper = (item.toolName === "write" || item.toolName === "generate_image" || item.toolName === "tts") && isRecord(result.details.xdev) ? result.details.xdev : undefined;
+		const tool = wrapper?.mode === "execute" && typeof wrapper.tool === "string" ? wrapper.tool : item.toolName;
+		const details = wrapper ? wrapper.inner : result.details;
+		const args = wrapper ? wrapper.args : item.args;
+		if (!isRecord(details)) return undefined;
+		let paths: unknown[] = [];
+		if (tool === "generate_image" && Array.isArray(details.imagePaths)) paths = details.imagePaths;
+		else if (tool === "tts" && isRecord(args) && typeof args.output_path === "string" && typeof details.bytes === "number" && details.bytes > 0) {
+			let output = args.output_path;
+			if (details.backend === "local-inference" && details.codec === "wav" && !output.toLowerCase().endsWith(".wav")) {
+				const ext = path.extname(output);
+				output = `${ext ? output.slice(0, -ext.length) : output}.wav`;
+			}
+			paths = [output];
+		}
+		const files: TimelineFileChange[] = [];
+		const seen = new Set<string>();
+		for (const value of paths.slice(0, 32)) {
+			const output = workspacePath(value);
+			if (!output || seen.has(output)) continue;
+			if (tool === "generate_image" && workspaceFileKind(output) !== "image") continue;
+			seen.add(output);
+			const absolute = path.resolve(this.#workspace, output);
+			const relative = path.relative(this.#workspace, absolute);
+			if (!path.isAbsolute(output) && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+				files.push({ path: output, operation: "generate" });
+				continue;
+			}
+			const name = path.basename(output).replace(/[^a-zA-Z0-9._-]/g, "_");
+			const token = `@artifacts/${createHash("sha256").update(`${item.toolCallId ?? item.id}\0${output}`).digest("hex")}/${name}`;
+			if (!this.#artifacts.has(token)) {
+				const artifact: { target: string; realPath?: string; dev?: number; ino?: number } = { target: absolute };
+				try {
+					// Pin the actual file at successful completion/replay, not when a later preview is requested.
+					const stat = fs.lstatSync(absolute);
+					if (stat.isFile() && !stat.isSymbolicLink()) {
+						artifact.realPath = fs.realpathSync(absolute);
+						artifact.dev = stat.dev;
+						artifact.ino = stat.ino;
+					}
+				} catch {
+					// Keep expired generated files visible; the preview reports that their data is missing.
+				}
+				this.#artifacts.set(token, artifact);
+			}
+			files.push({ path: token, operation: "generate" });
+		}
+		return files.length > 0 ? files : undefined;
 	}
 
 	setWriteDisposition(toolCallId: string, disposition: FileChangeDisposition): TimelineItem | undefined {
@@ -200,6 +275,7 @@ export class TranscriptStore {
 				item.status = frame.isError === true ? "error" : "complete";
 				item.isError = frame.isError === true;
 				item.result = frame.result;
+				if (!item.isError) item.files = this.#generatedFiles(item, frame.result) ?? item.files;
 				const images = extractImages(frame.result);
 				if (images.length > 0) item.images = images;
 				item.detail = formatToolDetail(item.toolName, frame.result);
@@ -245,6 +321,7 @@ export class TranscriptStore {
 				item.status = message.isError === true ? "error" : "complete";
 				item.isError = message.isError === true;
 				item.result = message;
+				if (!item.isError) item.files = this.#generatedFiles(item, message) ?? item.files;
 				const images = extractImages(message);
 				if (images.length > 0) item.images = images;
 				item.detail = formatToolDetail(item.toolName, message.content);
@@ -373,7 +450,7 @@ export class TranscriptStore {
 				tool.text = toolName ?? tool.text;
 				tool.toolName = toolName ?? tool.toolName;
 				tool.args = candidate.arguments;
-				tool.files = extractFileChanges(tool.toolName, candidate.arguments);
+				if (tool.status === "running") tool.files = extractFileChanges(tool.toolName, candidate.arguments);
 				tool.toolActivity = extractToolActivity(tool.toolName, candidate.arguments);
 			}
 			changes.push({ ...tool });
@@ -761,6 +838,7 @@ function extractImages(value: unknown): TimelineImage[] {
 
 	const visit = (candidate: unknown): void => {
 		if (isInlineImage(candidate)) {
+			if (candidate.data.length > MAX_EVAL_IMAGE_DATA || images.length >= MAX_EVAL_DETAIL_IMAGES) return;
 			const key = `${candidate.mimeType}:${candidate.data}`;
 			if (!seenImages.has(key)) {
 				seenImages.add(key);

@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added searchable, type-filtered file and artifact previews with audio/video playback, image metadata, text inspection, and session-scoped generated image and speech outputs.
 - Added unified single-selection lifecycle with bounded DOM/screenshot capture and explicit awaited delivery.
 - Added platform-normalized keyboard shortcuts (`Cmd` on macOS / `Ctrl` elsewhere) with active input and terminal canvas filtering.
 - Added position-aware browser bounds with zoom factor scaling and automatic geometry recomputation.
@@ -41,6 +42,10 @@
 
 ### Changed
 
+- Simplified the browser toolbar around navigation, element selection, and explicit Agent access, with keyboard-accessible secondary actions that leave native page content unobscured.
+- Redesigned the workspace, chat navigation and composer, settings, inspectors, browser panels, terminal, and connection consent with clearer typography and responsive controls.
+- Added chat search that preserves the open conversation and workspace navigation state.
+
 - Changed browser element selection to use a host-owned multi-element queue with deterministic agent swatches, explicit target-session routing, retained DOM/screenshot captures, and a single active BrowserView inspector.
 - Changed active-turn Enter and the primary composer action to steer immediately while keeping Queue as an explicit secondary action.
 
@@ -66,6 +71,10 @@
 - Changed the chat terminal drawer to select WTerm's DOM renderer with libghostty WebAssembly on Windows while retaining Ghostty Web on macOS and Linux, behind a shared lifecycle boundary that preserves PTY state.
 
 ### Fixed
+
+- Fixed Agent Hub dialogs collapsing when the background workspace becomes inactive.
+- Fixed the desktop bundle failing to launch before the local chat connection service starts.
+- Kept the terminal resize handle within its allowed range after shrinking the window.
 
 - Fixed the Thinking selector in Runtime settings rendering as an unbounded text control instead of matching the aligned Provider and Model dropdowns.
 - Fixed edit activity cards exposing raw `*** Begin Patch` and `PUT` payload grammar; they now show file targets while running and structured diffs after completion.

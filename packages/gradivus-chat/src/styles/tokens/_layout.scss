@@ -1,10 +1,11 @@
 // Layout tokens: typography, motion, spacing, dimensions, stacking order.
 :root {
-	--font-sans: "Departure Mono", ui-monospace, monospace;
-	--font-display: "Departure Mono", ui-monospace, monospace;
+	--font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+	--font-ui: var(--font-sans);
+	--font-display: var(--font-sans);
 	--font-mono: "Departure Mono", ui-monospace, monospace;
 	--ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
-	--radius-small: 5px;
+	--radius-small: 7px;
 	--radius-medium: 8px;
 	--radius-large: 12px;
 	--space-1: 4px;
@@ -14,7 +15,7 @@
 	--control-height: 36px;
 	--session-rail-width: clamp(228px, 18vw, 264px);
 	--inspector-width: clamp(288px, 22vw, 340px);
-	--chat-content-width: 900px;
+	--chat-content-width: 880px;
 	--settings-sidebar-width: 216px;
 	--settings-content-width: 1040px;
 	--chat-message-width: 72ch;

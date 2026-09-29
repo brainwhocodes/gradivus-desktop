@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added SVG and AVIF preview metadata detection without changing the image formats accepted by model providers.
 - Added `findFreeTcpPort` for shared loopback port allocation.
 - Added dependency-free local runtime primitives for bounded authenticated JSONL framing and request correlation, secure owner-only runtime roots/tokens/endpoints, and verified process identity/tree shutdown.
 - Added atomic UTF-8 text replacement with fsync and Windows-safe replace fallback for editable agent definitions.

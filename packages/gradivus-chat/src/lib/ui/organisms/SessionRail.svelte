@@ -9,7 +9,9 @@
 	import InfoCircle from "@solar-icons/svelte/linear/info-circle";
 	import Moon from "@solar-icons/svelte/linear/moon";
 	import Settings from "@solar-icons/svelte/linear/settings";
+	import Magnifier from "@solar-icons/svelte/linear/magnifier";
 	import Sun from "@solar-icons/svelte/linear/sun";
+	import GradivusMark from "../../components/GradivusMark.svelte";
 	type ResolvedTheme = "dark" | "light";
 
 	interface SessionRailRecord {
@@ -72,6 +74,22 @@
 	}: Props = $props();
 
 	let collapsedWorkspaces = $state(new Set<string>());
+	let search = $state("");
+	let searchInput: HTMLInputElement;
+	const searchTerm = $derived(search.trim().toLocaleLowerCase());
+	const visibleGroups = $derived.by(() => {
+		if (!searchTerm) return groups;
+		return groups.flatMap(group => {
+			const sessions = group.folderName.toLocaleLowerCase().includes(searchTerm)
+				? group.sessions
+				: group.sessions.filter(session => displayName(session).toLocaleLowerCase().includes(searchTerm));
+			return sessions.length ? [{ ...group, sessions }] : [];
+		});
+	});
+
+	function workspaceExpanded(cwd: string): boolean {
+		return Boolean(searchTerm) || !collapsedWorkspaces.has(cwd);
+	}
 
 	function toggleWorkspace(cwd: string): void {
 		const next = new Set(collapsedWorkspaces);
@@ -110,26 +128,34 @@
 
 <aside id={railId} class="session-rail" aria-label="Chats">
 	<div class="rail-heading">
-		<h1>Chats</h1>
-		<button type="button" class="small-action" aria-label="Choose a workspace in Desktop" title="Choose a workspace in Desktop" disabled={loading} onclick={onCreateWorkspace}>
-			<AddSquare size={16} aria-hidden="true" />
+		<GradivusMark size={28} />
+		<h1>Gradivus</h1>
+	</div>
+	<div class="rail-start">
+		<button type="button" class="rail-new-chat" disabled={loading} onclick={() => currentCwd ? onNewChatInWorkspace(currentCwd) : onCreateWorkspace()}>
+			<AddSquare size={17} aria-hidden="true" /><span>New chat</span>
 		</button>
+		<div class="rail-search">
+			<Magnifier size={16} aria-hidden="true" />
+			<input bind:this={searchInput} bind:value={search} type="search" aria-label="Search chats" placeholder="Search chats" />
+		</div>
 	</div>
 
-	{#if groups.length > 0}
+	{#if visibleGroups.length > 0}
 		<ul class="workspace-tree" aria-label="Workspaces and chats">
-			{#each groups as group, groupIndex (group.cwd)}
+			{#each visibleGroups as group, groupIndex (group.cwd)}
 				<li class="workspace-group-node" class:is-active-workspace={currentCwd === group.cwd}>
 					<div class="workspace-folder-header">
 						<button
 							type="button"
 							class="folder-title-wrap"
-							aria-expanded={!collapsedWorkspaces.has(group.cwd)}
+							aria-expanded={workspaceExpanded(group.cwd)}
 							aria-controls={`${railId}-workspace-chat-group-${groupIndex}`}
-							aria-label={`${collapsedWorkspaces.has(group.cwd) ? "Expand" : "Collapse"} workspace ${group.folderName}`}
+							aria-label={`${workspaceExpanded(group.cwd) ? "Collapse" : "Expand"} workspace ${group.folderName}`}
+							disabled={Boolean(searchTerm)}
 							onclick={() => toggleWorkspace(group.cwd)}
 						>
-							<span class="folder-chevron" class:is-expanded={!collapsedWorkspaces.has(group.cwd)}><ArrowRight size={13} aria-hidden="true" /></span>
+							<span class="folder-chevron" class:is-expanded={workspaceExpanded(group.cwd)}><ArrowRight size={13} aria-hidden="true" /></span>
 							<span class="folder-glyph"><Folder size={15} aria-hidden="true" /></span>
 							<strong class="folder-name">{group.folderName}</strong>
 							<span class="folder-count">{group.sessions.length}</span>
@@ -147,7 +173,7 @@
 						</button>
 					</div>
 
-					{#if !collapsedWorkspaces.has(group.cwd)}
+					{#if workspaceExpanded(group.cwd)}
 						<ul id={`${railId}-workspace-chat-group-${groupIndex}`} class="workspace-chat-sublist" aria-label={`${group.folderName} chats`}>
 							{#each group.sessions as session (session.id)}
 								{@const live = liveStatus.get(session.id)}
@@ -200,6 +226,11 @@
 				</li>
 			{/each}
 		</ul>
+	{:else if searchTerm}
+		<div class="rail-empty">
+			<p role="status">No matching chats.</p>
+			<button type="button" class="text-button" onclick={() => { search = ""; searchInput?.focus(); }}>Clear search</button>
+		</div>
 	{:else}
 		<div class="rail-empty">
 			<p>No coding chats yet.</p>
@@ -208,6 +239,9 @@
 	{/if}
 
 	<nav class="rail-utilities" aria-label="Chat controls">
+		<button type="button" class="rail-utility-button" aria-label="Choose a workspace in Desktop" disabled={loading} onclick={onCreateWorkspace}>
+			<Folder size={16} aria-hidden="true" /><span>Open workspace</span>
+		</button>
 		<button type="button" class="rail-utility-button" onclick={(event) => onOpenSettings(event.currentTarget)}>
 			<Settings size={16} aria-hidden="true" />
 			<span>Settings</span>

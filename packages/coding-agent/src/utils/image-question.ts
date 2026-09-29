@@ -53,7 +53,7 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
 	let model: Model<Api> | undefined;
 	let selectedPattern: string | undefined;
-	for (const pattern of ["@vision", "@default", activeModelPattern]) {
+	for (const pattern of ["@vision", activeModelPattern, "@default"]) {
 		const resolved = resolvePattern(pattern);
 		if (resolved && sendsImageInputOnWire(resolved)) {
 			model = resolved;

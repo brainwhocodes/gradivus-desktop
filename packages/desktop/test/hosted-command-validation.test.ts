@@ -73,7 +73,7 @@ const validPayloads = {
 	agentHubClear: { sessionId, agentId: "agent-1" },
 	agentHubRevive: { sessionId, agentId: "agent-1" },
 	loadFileDiff: { sessionId, target: "src/main.ts" },
-	loadWorkspaceImage: { sessionId, target: "assets/logo.png", maxDimension: 1024 },
+	loadWorkspaceFilePreview: { sessionId, target: "assets/logo.png", maxDimension: 1024 },
 	openWorkspaceFile: { sessionId, target: "src/main.ts" },
 	getAgentSettings: { sessionId },
 	setAgentSetting: { sessionId, path: "ui.density", value: "compact" },

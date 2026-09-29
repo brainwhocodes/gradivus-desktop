@@ -29,6 +29,7 @@ import type {
 	HostedTimelineToolActivity,
 	HostedTodoPhase,
 	HostedTodoState,
+	HostedWorkspaceFilePreview,
 } from "./contracts";
 import type { HostedExportResult, HostedNativeActionResult } from "./protocol";
 
@@ -111,7 +112,7 @@ export interface ChatApi {
 	agentHubClear(sessionId: string, agentId: string): Promise<void>;
 	agentHubRevive(sessionId: string, agentId: string): Promise<void>;
 	loadFileDiff(sessionId: string, target: string): Promise<HostedFileView>;
-	loadWorkspaceImage(sessionId: string, target: string, maxDimension: number): Promise<HostedFileView>;
+	loadWorkspaceFilePreview(sessionId: string, target: string, maxDimension: number): Promise<HostedWorkspaceFilePreview>;
 	openWorkspaceFile(sessionId: string, target: string): Promise<HostedNativeActionResult>;
 	getAgentSettings(sessionId?: string): Promise<HostedAgentSetting[]>;
 	setAgentSetting(
@@ -136,4 +137,6 @@ export interface ChatApi {
 	reconnectRuntime(): Promise<HostedNativeActionResult>;
 	openDesktopAccounts(): Promise<HostedNativeActionResult>;
 	onEvent(listener: (event: HostedChatEvent) => void): () => void;
+	/** Authoritative bootstrap after a browser transport reconnect; existing drafts may be retained. */
+	onReconnect?(listener: (snapshot: HostedBootstrapSnapshot) => void): () => void;
 }

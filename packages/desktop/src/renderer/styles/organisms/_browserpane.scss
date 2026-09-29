@@ -2,22 +2,27 @@
 
 .browser-pane {
 	display: grid;
-	grid-template-rows: 42px minmax(0, 1fr);
+	grid-template-rows: auto minmax(0, 1fr);
 	min-width: 0;
 	min-height: 0;
 	background: var(--browser);
-	outline: 2px solid transparent;
+	outline: 1px solid transparent;
+	outline-offset: -1px;
+
+	&.has-find {
+		grid-template-rows: auto auto minmax(0, 1fr);
+	}
 
 	&.is-focused {
-		outline-color: var(--focus-inner);
-		box-shadow: 0 0 0 4px var(--focus-outer);
+		outline-color: var(--accent-boundary);
 	}
 }
 
 .browser-surface-host {
 	position: relative;
 	min-width: 0;
-	min-height: 0;
+	// Keep bounds publishable when docked controls consume a short split pane.
+	min-height: 1px;
 	width: 100%;
 	height: 100%;
 	overflow: hidden;
@@ -31,14 +36,14 @@
 }
 
 .browser-automation-pane {
-	width: min(330px, 42%);
-	min-width: 260px;
+	width: clamp(320px, 28vw, 400px);
+	min-width: 0;
 	height: 100%;
 	flex: 0 0 auto;
-	border-left: 1px solid var(--line);
-	padding: 12px;
+	border-left: 1px solid var(--line-soft);
+	padding: 20px;
 	color: var(--foreground);
-	background: var(--shell-raised);
+	background: var(--shell);
 	overflow: auto;
 }
 
@@ -47,46 +52,46 @@
 	align-items: flex-start;
 	justify-content: space-between;
 	gap: 8px;
-	margin-bottom: 14px;
+	margin-bottom: 24px;
 }
 
 .browser-automation-pane h2 {
 	margin: 2px 0 0;
-	font-size: 15px;
+	font-size: 20px;
 }
 
 .browser-automation-pane p {
 	color: var(--foreground-muted);
-	font-size: 12px;
+	font-size: 14px;
 	line-height: 1.5;
 }
 
 .browser-automation-lease {
 	display: grid;
-	gap: 5px;
+	gap: 8px;
 	border: 1px solid var(--accent-boundary);
 	border-radius: var(--radius-small);
-	padding: 10px;
+	padding: 14px;
 	background: var(--selection-surface);
 }
 
 .browser-automation-lease span,
 .browser-automation-lease code {
 	color: var(--foreground-muted);
-	font-size: 11px;
+	font-size: 12px;
 }
 
 .browser-automation-actions {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 7px;
-	margin-top: 12px;
+	gap: 8px;
+	margin-top: 16px;
 }
 
 .browser-automation-tabs {
-	margin-top: 18px;
-	padding-top: 14px;
-	border-top: 1px solid var(--line);
+	margin-top: 24px;
+	padding-top: 20px;
+	border-top: 1px solid var(--line-soft);
 
 	> header,
 	li {
@@ -98,14 +103,14 @@
 
 	h3 {
 		margin: 0;
-		font-size: 13px;
+		font-size: 16px;
 	}
 
 	header span,
 	.browser-automation-tab-copy span,
 	code {
 		color: var(--foreground-muted);
-		font-size: 10px;
+		font-size: 12px;
 	}
 
 	ul {
@@ -115,8 +120,8 @@
 	}
 
 	li {
-		padding: 10px 0;
-		border-bottom: 1px solid var(--line);
+		padding: 16px 0;
+		border-bottom: 1px solid var(--line-soft);
 	}
 
 	.browser-automation-tab-copy {
@@ -133,5 +138,40 @@
 }
 
 .browser-automation-error {
-	color: var(--danger) !important;
+	padding: 12px;
+	border: 1px solid var(--danger-boundary);
+	border-radius: var(--radius-small);
+	background: var(--danger-surface);
+	color: var(--foreground-strong) !important;
+}
+
+.browser-automation-capabilities {
+	display: grid;
+	gap: 16px;
+	margin: 20px 0;
+}
+
+.browser-automation-capabilities dt {
+	color: var(--foreground-strong);
+	font-weight: 600;
+}
+
+.browser-automation-capabilities dd {
+	margin: 4px 0 0;
+	color: var(--foreground-muted);
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.browser-automation-pane :is(button, summary) {
+	min-height: 36px;
+}
+
+@container browser-pane (max-width: 760px) {
+	.browser-automation-pane {
+		width: 100%;
+		height: clamp(240px, 38vh, 360px);
+		border-left: 0;
+		border-top: 1px solid var(--line-soft);
+	}
 }

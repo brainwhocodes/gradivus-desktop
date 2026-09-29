@@ -1,13 +1,13 @@
 import type { HostedTimelineFileChange as TimelineFileChange } from "./contracts";
+import { workspaceFileKind, type WorkspaceFileKind } from "./workspace-file-types";
 
-export type TurnFileDisposition = "created" | "edited" | "written";
-export type TurnFileKind = "document" | "image";
+export type TurnFileDisposition = "created" | "edited" | "written" | "generated";
 export type TurnFileSummaryOutcome = "complete" | "error" | "cancelled";
 
 export interface TurnFileSummaryEntry {
 	path: string;
 	disposition: TurnFileDisposition;
-	kind: TurnFileKind;
+	kind: WorkspaceFileKind;
 }
 
 export interface TurnFileSummary {
@@ -39,7 +39,7 @@ function timelineProjectionInput(value: unknown): TimelineItemWithFileDispositio
 				const candidate = file as Record<string, unknown>;
 				if (
 					typeof candidate.path !== "string" ||
-					(candidate.operation !== "write" && candidate.operation !== "edit")
+					(candidate.operation !== "write" && candidate.operation !== "edit" && candidate.operation !== "generate")
 				) {
 					return [];
 				}
@@ -75,26 +75,15 @@ function timelineProjectionInput(value: unknown): TimelineItemWithFileDispositio
 	};
 }
 
-const IMAGE_EXTENSIONS: Record<string, true> = {
-	gif: true,
-	jpeg: true,
-	jpg: true,
-	png: true,
-	webp: true,
-};
 const DISPOSITION_PRIORITY: Record<TurnFileDisposition, number> = {
 	written: 0,
 	edited: 1,
 	created: 2,
+	generated: 3,
 };
 
-export function turnFileKind(path: string): TurnFileKind {
-	const basename = path.replaceAll("\\", "/").split("/").at(-1) ?? path;
-	const extension = basename.includes(".") ? (basename.split(".").at(-1) ?? "").toLowerCase() : "";
-	return IMAGE_EXTENSIONS[extension] === true ? "image" : "document";
-}
-
 function dispositionFor(change: FileChangeWithDisposition): TurnFileDisposition {
+	if (change.operation === "generate") return "generated";
 	if (change.disposition === "created") return "created";
 	if (change.disposition === "edited" || change.operation === "edit") return "edited";
 	return "written";
@@ -127,7 +116,7 @@ function recordSuccessfulChanges(
 			pending.set(change.path, {
 				path: change.path,
 				disposition,
-				kind: turnFileKind(change.path),
+				kind: workspaceFileKind(change.path),
 			});
 			continue;
 		}

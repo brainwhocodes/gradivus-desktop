@@ -6,6 +6,7 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { ToolSession } from "../tools";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -32,6 +33,8 @@ export interface ProcessedFiles {
 export interface ProcessFileOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
+	/** Model/browser context for automatic document vision recovery. */
+	session?: ToolSession;
 }
 
 /** Process @file arguments into text, document content, and image attachments */
@@ -139,11 +142,11 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 				text += `<file name="${absolutePath}"></file>\n`;
 			}
 		} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
-			const result = await convertFileWithMarkit(absolutePath);
+			const result = await convertFileWithMarkit(absolutePath, undefined, { session: options?.session });
 			if (result.ok) {
 				text += `<file name="${absolutePath}">\n${result.content}\n</file>\n`;
 			} else {
-				text += `<file name="${absolutePath}">[Cannot read ${ext} file: ${result.error || "conversion failed"}]</file>\n`;
+				text += `<file name="${absolutePath}">[Cannot completely read ${ext} file: ${result.error || "conversion failed"}]${result.content ? `\nPartial extracted text:\n${result.content}` : ""}</file>\n`;
 			}
 		} else {
 			// Handle text file

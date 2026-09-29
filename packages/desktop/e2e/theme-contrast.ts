@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page } from "@playwright/test";
-import { relativeLuminance } from "@oh-my-pi/pi-utils/color";
+import { relativeLuminance } from "@oh-my-pi/pi-utils/color.js";
 import { DESKTOP_THEME_PALETTES, type DesktopTerminalTheme, type ResolvedTheme } from "../src/shared/theme-palette";
 
 const CSS_COLOR_ROLES = [

@@ -244,6 +244,7 @@
       <section class="agent-detail" aria-labelledby={`${messageInputId}-transcript-title`}>
         <div class="transcript-toolbar">
           <div class="transcript-heading">
+            <strong class="transcript-agent-name">{selectedAgent.displayName}</strong>
             <h3 id={`${messageInputId}-transcript-title`}>Transcript</h3>
             {#if selectedIsReadOnly}
               <span class="transcript-status-badge">{selectedAgent.status === "aborted" ? "History" : "Read only"}</span>
@@ -385,6 +386,7 @@
 
 <style>
   .agent-hub-panel {
+    container-type: inline-size;
     display: flex;
     width: 100%;
     height: 100%;
@@ -392,6 +394,7 @@
     flex-direction: column;
     color: var(--foreground);
     background: var(--shell);
+    font: 14px/1.5 var(--font-ui);
   }
 
   .agent-hub-panel.roster-only .agent-detail,
@@ -416,24 +419,24 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 12px;
   }
 
   .panel-header {
     flex: 0 0 auto;
     border-bottom: 1px solid var(--line);
-    padding: 16px;
+    padding: 20px;
   }
 
   .panel-header h2,
   .agent-detail-header h3 {
     margin: 0;
     color: var(--foreground-strong);
-    font-family: var(--font-sans);
+    font-family: var(--font-ui);
   }
 
   .panel-header h2 {
-    font-size: 0.875rem;
+    font-size: 18px;
     line-height: 1.25;
   }
 
@@ -454,7 +457,7 @@
     flex: 0 1 auto;
     overflow: auto;
     border-bottom: 1px solid var(--line);
-    padding: 8px;
+    padding: 12px;
     overscroll-behavior: contain;
   }
 
@@ -474,7 +477,7 @@
   .agent-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
   }
 
   .agent-list li.is-child {
@@ -498,10 +501,10 @@
     display: grid;
     grid-template-columns: 8px minmax(0, 1fr) auto;
     align-items: start;
-    gap: 8px;
+    gap: 10px;
     border: 1px solid transparent;
     border-radius: var(--radius-small);
-    padding: 8px;
+    padding: 14px 12px;
     color: var(--foreground);
     background: transparent;
     text-align: left;
@@ -515,10 +518,10 @@
   }
 
   .agent-card.selected {
-    border-color: var(--accent-boundary);
+    border-color: transparent;
     color: var(--selection-foreground);
     background: var(--selection-surface);
-    box-shadow: inset 2px 0 0 var(--accent-boundary);
+    box-shadow: inset 3px 0 0 var(--accent-boundary);
   }
 
   .agent-card.selected .agent-copy strong,
@@ -574,6 +577,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
   }
 
   .agent-name-line strong,
@@ -586,7 +590,7 @@
 
   .agent-name-line strong {
     color: var(--foreground-strong);
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1.35;
   }
 
@@ -605,9 +609,9 @@
     flex: 0 0 auto;
     border: 1px solid var(--line);
     border-radius: var(--radius-small);
-    padding: 2px 4px;
+    padding: 3px 6px;
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 11px;
     line-height: 1;
   }
 
@@ -621,15 +625,16 @@
     flex-wrap: wrap;
     gap: 4px 8px;
     margin-top: 2px;
-    color: var(--foreground);
-    font-size: 14px;
+    color: var(--foreground-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
     line-height: 1.3;
   }
 
   .agent-status {
     margin-top: 1px;
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 12px;
     line-height: 1.4;
     text-transform: lowercase;
   }
@@ -646,7 +651,7 @@
     align-items: flex-start;
     flex: 0 0 auto;
     border-bottom: 1px solid var(--line-soft);
-    padding: 12px 16px;
+    padding: 16px 24px;
   }
 
   .agent-detail-title,
@@ -695,7 +700,7 @@
 
   .selected-agent-metrics > div {
     min-width: 0;
-    padding: 8px 12px;
+    padding: 12px 24px;
     background: var(--shell);
   }
 
@@ -708,7 +713,7 @@
 
   .selected-agent-metrics dt {
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 12px;
   }
 
   .selected-agent-metrics dd {
@@ -716,6 +721,7 @@
     color: var(--foreground);
     font-size: 14px;
     line-height: 1.35;
+    font-variant-numeric: tabular-nums;
   }
   .read-only-notice {
     margin: 0;
@@ -729,7 +735,7 @@
   .transcript-toolbar {
     flex: 0 0 auto;
     border-bottom: 1px solid var(--line-soft);
-    padding: 8px 16px;
+    padding: 16px 24px;
   }
 
   .transcript-heading,
@@ -737,6 +743,21 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+
+  .transcript-heading {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .transcript-agent-name {
+    width: 100%;
+    overflow: hidden;
+    color: var(--foreground-strong);
+    font-size: 18px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .transcript-toolbar h3,
@@ -747,12 +768,18 @@
     line-height: 1.4;
   }
 
+  .transcript-toolbar h3 {
+    color: var(--foreground-muted);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
   .transcript-status-badge {
     border: 1px solid var(--line);
     border-radius: var(--radius-small);
     padding: 2px 5px;
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 12px;
     line-height: 1;
   }
 
@@ -767,18 +794,23 @@
   .message-list {
     display: flex;
     flex-direction: column;
+    gap: 16px;
+    padding: 24px;
   }
 
   .message-list li {
-    border-bottom: 1px solid var(--line-soft);
-    padding: 12px 16px;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-small);
+    padding: 16px 20px;
+    background: var(--shell);
   }
 
   .message-role {
     display: block;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 12px;
+    font-weight: 600;
     line-height: 1;
   }
 
@@ -787,7 +819,7 @@
     margin: 0;
     overflow-wrap: anywhere;
     color: var(--foreground);
-    font: 14px/1.55 var(--font-mono);
+    font: 14px/1.65 var(--font-ui);
     white-space: pre-wrap;
   }
 
@@ -855,7 +887,7 @@
     flex-direction: column;
     gap: 8px;
     border-top: 1px solid var(--line);
-    padding: 12px 16px;
+    padding: 20px 24px;
     background: var(--shell);
   }
 
@@ -865,10 +897,10 @@
     resize: none;
     border: 1px solid var(--line);
     border-radius: var(--radius-small);
-    padding: 8px;
+    padding: 12px;
     color: var(--foreground);
     background: var(--chat-canvas);
-    font: 14px/1.5 var(--font-mono);
+    font: 14px/1.5 var(--font-ui);
   }
 
   .message-composer textarea::placeholder {
@@ -882,7 +914,7 @@
   .composer-footer > span {
     max-width: 42ch;
     color: var(--foreground-muted);
-    font-size: 14px;
+    font-size: 12px;
     line-height: 1.4;
   }
 
@@ -895,9 +927,9 @@
   }
 
   .panel-button {
-    min-height: 28px;
+    min-height: var(--control-height);
     border: 1px solid var(--line);
-    padding: 4px 8px;
+    padding: 7px 12px;
     font-size: 14px;
     line-height: 1.2;
   }
@@ -919,9 +951,9 @@
   }
 
   .panel-button.danger {
-    border-color: var(--danger-boundary);
-    color: var(--danger-foreground);
-    background: var(--danger);
+    border-color: var(--line);
+    color: var(--danger-boundary);
+    background: transparent;
   }
 
   .panel-button.danger:hover:not(:disabled) {
@@ -932,7 +964,8 @@
 
   .text-button {
     border: 0;
-    padding: 4px;
+    min-height: var(--control-height);
+    padding: 6px;
     color: var(--foreground);
     font-size: 14px;
   }
@@ -946,8 +979,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: var(--control-height);
+    height: var(--control-height);
     padding: 0;
   }
 
@@ -972,8 +1005,9 @@
     to { opacity: 1; }
   }
 
-  @media (max-width: 420px) {
+  @container (max-width: 480px) {
     .agent-detail-header,
+    .transcript-toolbar,
     .composer-footer {
       align-items: stretch;
       flex-direction: column;
@@ -984,7 +1018,32 @@
     }
 
     .selected-agent-metrics {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .transcript-toolbar-actions {
+      flex-wrap: wrap;
+    }
+
+    .message-list {
+      padding: 16px;
+    }
+
+    .message-list li {
+      padding: 14px;
+    }
+
+    .agent-card {
+      grid-template-columns: 8px minmax(0, 1fr);
+    }
+
+    .agent-status {
+      grid-column: 2;
+    }
+
+    .message-composer,
+    .transcript-toolbar {
+      padding: 16px;
     }
   }
 

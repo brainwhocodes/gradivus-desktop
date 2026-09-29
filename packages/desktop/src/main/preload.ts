@@ -1,3 +1,4 @@
+import type { HostedWorkspaceFilePreview } from "@gradivus/chat/contracts";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { contextBridge, ipcRenderer } from "electron";
 import { isAgentSettingValue } from "../shared/contracts";
@@ -51,7 +52,6 @@ import type {
 	TodoState,
 	WorkspaceDocumentV1,
 	WorkspaceEvent,
-	WorkspaceImagePreview,
 } from "../shared/contracts";
 import {
 	MAX_INLINE_PROMPT_BYTES,
@@ -726,16 +726,16 @@ const api: GradivusApi = {
 		ipcRenderer.invoke("gradivus:agent-hub-clear", sessionId(id), agentHubId(agentId)) as Promise<void>,
 	loadFileDiff: (id, target) =>
 		ipcRenderer.invoke("gradivus:file-diff", sessionId(id), text(target, "file diff path")) as Promise<FileDiffView>,
-	loadWorkspaceImage: (id, target, maxDimension) => {
+	loadWorkspaceFilePreview: (id, target, maxDimension) => {
 		if (!Number.isInteger(maxDimension) || maxDimension < 64 || maxDimension > 2_048) {
-			throw new RangeError("invalid image preview dimension");
+			throw new RangeError("invalid file preview dimension");
 		}
 		return ipcRenderer.invoke(
-			"gradivus:workspace-image",
+			"gradivus:workspace-file-preview",
 			sessionId(id),
-			text(target, "workspace image path"),
+			text(target, "workspace file path"),
 			maxDimension,
-		) as Promise<WorkspaceImagePreview>;
+		) as Promise<HostedWorkspaceFilePreview>;
 	},
 	writeClipboardText: value =>
 		ipcRenderer.invoke("gradivus:clipboard-write", text(value, "clipboard text")) as Promise<void>,

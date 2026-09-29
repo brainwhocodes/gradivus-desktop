@@ -2243,6 +2243,20 @@ export async function runRootCommand(
 					? await logger.time("processFileArguments", () =>
 							processFileArguments(initialArgs.fileArgs, {
 								autoResizeImages: cfgImagesAutoResize.get(settingsInstance),
+								session: {
+									cwd,
+									hasUI: isInteractive,
+									settings: settingsInstance,
+									modelRegistry,
+									getSessionFile: () => sessionManager?.getSessionFile() ?? null,
+									getSessionSpawns: () => null,
+									getSessionId: () => sessionManager?.getSessionId() ?? null,
+									getModelString: () => sessionOptions.model
+										? `${sessionOptions.model.provider}/${sessionOptions.model.id}`
+										: Array.isArray(sessionOptions.modelPattern)
+											? sessionOptions.modelPattern[0]
+											: sessionOptions.modelPattern,
+								},
 							}),
 						)
 					: undefined;

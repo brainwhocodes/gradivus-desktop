@@ -32,6 +32,7 @@ pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;
+pub mod document;
 pub mod edit;
 pub mod fd;
 pub mod file_lock;

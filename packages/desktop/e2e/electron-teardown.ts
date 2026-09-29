@@ -14,8 +14,8 @@ import {
 	shutdownProcessTree,
 	type ProcessIdentity,
 	type ProcessIdentityInspection,
-} from "@oh-my-pi/pi-utils/local-runtime";
-import { withTimeout } from "@oh-my-pi/pi-utils/async";
+} from "@oh-my-pi/pi-utils/local-runtime.js";
+import { withTimeout } from "@oh-my-pi/pi-utils/async.js";
 
 const APP_CLOSE_TIMEOUT_MS = 3_000;
 const CLIENT_CONNECT_TIMEOUT_MS = 1_000;

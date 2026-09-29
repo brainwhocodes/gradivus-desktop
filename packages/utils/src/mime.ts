@@ -153,3 +153,43 @@ export function readImageMetadata(
 ): Promise<ImageMetadata | null> {
 	return peekFile(filePath, maxBytes, parseImageMetadata);
 }
+
+export type ImagePreviewMetadata =
+	| ImageMetadata
+	| {
+			mimeType: "image/svg+xml" | "image/avif";
+			width: number;
+			height: number;
+	  };
+
+/** Browser-preview formats do not extend the set of provider-supported image inputs. */
+export function parseImagePreviewMetadata(bytes: Uint8Array, mimeHint?: string): ImagePreviewMetadata | null {
+	const raster = parseImageMetadata(bytes);
+	if (raster) return raster;
+	const header = Buffer.from(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength, IMAGE_METADATA_HEADER_BYTES));
+	if (mimeHint === "image/svg+xml") {
+		const root = header.toString("utf8").match(/^\s*(?:<\?xml[\s\S]*?\?>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg\b([^>]*)>/i);
+		if (root) {
+			const viewBox = root[1]?.match(
+				/\bviewBox\s*=\s*["']\s*[-+\d.e]+[ ,]+[-+\d.e]+[ ,]+([\d.e+]+)[ ,]+([\d.e+]+)\s*["']/i,
+			);
+			const width = Number(root[1]?.match(/\bwidth\s*=\s*["']([\d.]+)(?:px)?["']/i)?.[1] ?? viewBox?.[1] ?? 300);
+			const height = Number(root[1]?.match(/\bheight\s*=\s*["']([\d.]+)(?:px)?["']/i)?.[1] ?? viewBox?.[2] ?? 150);
+			return { mimeType: "image/svg+xml", width, height };
+		}
+	}
+	if (header.toString("ascii", 4, 8) !== "ftyp" || !/avi[fs]/.test(header.toString("ascii", 8, 64))) return null;
+	let width = 0;
+	let height = 0;
+	// Include every declared image extent, not just a potentially smaller thumbnail.
+	for (
+		let offset = header.indexOf("ispe", 12, "ascii");
+		offset >= 0;
+		offset = header.indexOf("ispe", offset + 4, "ascii")
+	) {
+		if (offset < 4 || offset + 16 > header.length || header.readUInt32BE(offset - 4) !== 20) continue;
+		width = Math.max(width, header.readUInt32BE(offset + 8));
+		height = Math.max(height, header.readUInt32BE(offset + 12));
+	}
+	return width > 0 && height > 0 ? { mimeType: "image/avif", width, height } : null;
+}

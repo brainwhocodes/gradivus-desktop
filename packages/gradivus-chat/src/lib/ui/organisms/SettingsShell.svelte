@@ -85,7 +85,7 @@
 		: undefined;
 	$: if (automaticCategory && automaticCategory !== requestedAutomaticCategory) {
 		requestedAutomaticCategory = automaticCategory;
-		onCategoryChange(automaticCategory);
+		void selectAutomaticCategory(automaticCategory);
 	}
 	$: if (!automaticCategory && requestedAutomaticCategory !== undefined) {
 		requestedAutomaticCategory = undefined;
@@ -112,11 +112,16 @@
 		searchInput?.focus({ preventScroll: true });
 	}
 
+	async function selectAutomaticCategory(category: SettingsCategoryId): Promise<void> {
+		await tick();
+		if (automaticCategory === category) onCategoryChange(category);
+	}
+
 	async function selectCategory(category: SettingsCategoryId): Promise<void> {
 		if (onCategoryChange(category) === false) return;
 		await tick();
 		categoryHeading?.focus({ preventScroll: true });
-		categoryHeading?.scrollIntoView({ block: "start" });
+		categoryHeading?.parentElement?.scrollIntoView({ block: "start" });
 	}
 
 	function clearSearch(): void {

@@ -3,20 +3,55 @@
 
 	interface Props {
 		value: string;
+		loading?: boolean;
 		onnavigate: (address: string) => void;
 	}
 
-	let { value, onnavigate }: Props = $props();
+	let { value, loading = false, onnavigate }: Props = $props();
+	let input: HTMLInputElement;
+	let draft = $state("");
+	let editing = $state(false);
+
+	$effect(() => {
+		if (!editing) draft = value;
+	});
 </script>
 
 <form
 	class="address-form"
+	class:is-loading={loading}
 	onsubmit={(event) => {
 		event.preventDefault();
-		const data = new FormData(event.currentTarget);
-		void onnavigate(String(data.get("address") ?? ""));
+		const address = draft.trim();
+		if (!address) {
+			input.focus();
+			return;
+		}
+		onnavigate(address);
+		input.blur();
 	}}
 >
 	<Global size={14} aria-hidden="true" />
-	<input name="address" aria-label="Address" {value} autocomplete="off" spellcheck="false" />
+	<input
+		bind:this={input}
+		bind:value={draft}
+		name="address"
+		aria-label="Address"
+		placeholder="Enter a web address"
+		autocomplete="off"
+		autocapitalize="off"
+		spellcheck="false"
+		onfocus={() => {
+			editing = true;
+			input.select();
+		}}
+		onblur={() => { editing = false; }}
+		onkeydown={(event) => {
+			if (event.key !== "Escape" || event.isComposing) return;
+			event.preventDefault();
+			event.stopPropagation();
+			draft = value;
+			input.select();
+		}}
+	/>
 </form>

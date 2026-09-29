@@ -1,3 +1,4 @@
+import type { HostedWorkspaceFilePreview } from "@gradivus/chat/contracts";
 import type { PlanReviewAnnotationState } from "@oh-my-pi/pi-utils/plan-review";
 import type { LocalChatConnectionView, LocalChatConsentDecision, LocalChatConsentRequest } from "./local-chat-consent";
 
@@ -297,7 +298,7 @@ export interface TimelineImage {
 	mimeType: string;
 }
 
-export type FileChangeOperation = "write" | "edit";
+export type FileChangeOperation = "write" | "edit" | "generate";
 export type FileChangeDisposition = "created" | "edited";
 
 export interface TimelineFileChange {
@@ -371,12 +372,6 @@ export interface FileDiffView {
 	message?: string;
 }
 
-export interface WorkspaceImagePreview {
-	path: string;
-	dataUrl: string;
-	width: number;
-	height: number;
-}
 
 export type TimelineTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -1089,7 +1084,7 @@ export interface GradivusApi {
 	extensionResponse(id: string, response: unknown): Promise<void>;
 	getSubagentMessages(id: string, subagentId: string, fromByte: number): Promise<unknown>;
 	loadFileDiff(id: string, target: string): Promise<FileDiffView>;
-	loadWorkspaceImage(id: string, target: string, maxDimension: number): Promise<WorkspaceImagePreview>;
+	loadWorkspaceFilePreview(id: string, target: string, maxDimension: number): Promise<HostedWorkspaceFilePreview>;
 	writeClipboardText(text: string): Promise<void>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;
 	openExternal(url: string): Promise<void>;

@@ -49,6 +49,7 @@
       <span class="diff-additions">+{diff.additions}</span>
       <span class="diff-deletions">−{diff.deletions}</span>
     </div>
+    <p class="working-tree-note">Current working-tree changes for this file.</p>
   {/if}
 
   {#if loading}
@@ -66,3 +67,53 @@
     <div class="diff-state"><strong>{diff.status === "clean" ? "No Git changes" : diff.status === "binary" ? "Binary change" : "No text preview"}</strong><span>{diff.message ?? "No patch content is available for this file."}</span></div>
   {/if}
 </section>
+
+<style>
+  .diff-inspector {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--chat-canvas);
+    font: 14px/1.5 var(--font-ui);
+  }
+  .diff-header {
+    position: static;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 20px;
+    padding: 24px;
+    background: var(--shell);
+  }
+  .diff-title .eyebrow {
+    color: var(--foreground-muted);
+    font: 12px/1.4 var(--font-ui);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .diff-title h2 { margin-top: 6px; font: 550 15px/1.4 var(--font-mono); }
+  .diff-actions { align-items: center; gap: 8px; }
+  .diff-actions .icon-button { min-height: var(--control-height); }
+  .diff-summary { flex: 0 0 auto; gap: 16px; padding: 12px 24px; background: var(--shell); font: 13px/1.4 var(--font-ui); font-variant-numeric: tabular-nums; }
+  .diff-status { text-transform: capitalize; }
+  .diff-additions { color: var(--success-boundary); }
+  .diff-deletions { color: var(--danger-boundary); }
+  .working-tree-note { flex: 0 0 auto; margin: 0; padding: 12px 24px; border-bottom: 1px solid var(--line-soft); color: var(--foreground-muted); background: var(--shell-raised); font-size: 13px; }
+  .diff-code { min-height: 0; flex: 1 1 auto; padding: 16px 0; }
+  .diff-line { padding: 1px 24px; contain-intrinsic-size: 23px; }
+  .diff-line code { font: 13px/1.7 var(--font-mono); }
+  .line-added { color: var(--foreground); background: var(--success-surface); box-shadow: inset 3px 0 var(--success-boundary); }
+  .line-removed { color: var(--foreground); background: var(--danger-surface); box-shadow: inset 3px 0 var(--danger-boundary); }
+  .line-hunk { margin: 12px 0; padding-block: 6px; color: var(--foreground-muted); background: var(--shell-raised); font-weight: 500; }
+  .line-meta { font-style: normal; }
+  .diff-state { flex: 1 1 auto; padding: 32px 24px; font-size: 14px; }
+  .diff-note { flex: 0 0 auto; padding: 12px 24px; font-size: 13px; }
+  @media (max-width: 640px) {
+    .diff-header { align-items: flex-start; flex-direction: column; padding: 16px; }
+    .diff-actions { width: 100%; justify-content: flex-end; }
+    .diff-summary, .working-tree-note, .diff-note { padding-inline: 16px; }
+    .diff-line { padding-inline: 16px; }
+  }
+</style>

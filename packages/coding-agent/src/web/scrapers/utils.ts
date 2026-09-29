@@ -3,6 +3,7 @@ import { isRecord, ptree } from "@oh-my-pi/pi-utils";
 export { isRecord };
 
 import { ToolAbortError } from "../../tools/tool-errors";
+import type { ToolSession } from "../../tools";
 import { convertBufferWithMarkit } from "../../utils/markit";
 import { MAX_BYTES } from "./types";
 
@@ -96,14 +97,17 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 }
 
 /**
- * Convert binary content to markdown using markit.
+ * Convert locally with AnyDoc and recover incomplete documents using the session's vision model.
  */
 export async function convertWithMarkit(
 	buffer: Uint8Array,
 	extension: string,
 	timeout: number = 20,
 	signal?: AbortSignal,
+	session?: ToolSession,
 ): Promise<{ content: string; ok: boolean; error?: string }> {
-	const conversionSignal = ptree.combineSignals(signal, timeout * 1000);
-	return convertBufferWithMarkit(buffer, extension, conversionSignal);
+	// Vision recovery has its own bounded deadline; the HTTP timeout is not a
+	// suitable budget for rendering and transcribing multiple document pages.
+	const conversionSignal = session ? signal : ptree.combineSignals(signal, timeout * 1000);
+	return convertBufferWithMarkit(buffer, extension, conversionSignal, { session });
 }

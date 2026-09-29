@@ -32,6 +32,7 @@ import type {
 	HostedTimelineToolActivity,
 	HostedTodoState,
 	HostedWorkspaceView,
+	HostedWorkspaceFilePreview,
 } from "@gradivus/chat/contracts";
 import type {
 	AgentHubAgent,
@@ -62,7 +63,6 @@ import type {
 	TimelinePresentation,
 	TimelineToolActivity,
 	TodoState,
-	WorkspaceImagePreview,
 } from "../shared/contracts";
 
 interface ProjectedWorkspace {
@@ -862,11 +862,15 @@ export class HostedProjection {
 		};
 	}
 
-	async projectHostedImage(record: SessionRecordV1, view: WorkspaceImagePreview): Promise<HostedFileView> {
+	async projectHostedFilePreview(record: SessionRecordV1, view: HostedWorkspaceFilePreview): Promise<HostedWorkspaceFilePreview> {
 		const workspace = await this.#workspace(record.cwd);
-		const target = relativeDisplayPath(workspace.root, view.path);
-		if (!target) throw new Error("Image is outside the hosted workspace");
-		return { kind: "image", path: target, dataUrl: view.dataUrl, width: view.width, height: view.height };
+		const relative = relativeDisplayPath(workspace.root, view.path);
+		if (!relative) throw new Error("File is outside the hosted workspace");
+		const target = path.isAbsolute(view.path) ? relative : view.path;
+		const sensitive = [record.ompSessionId, record.sessionFile];
+		if (view.kind === "text") return { ...view, path: target, text: sanitizeText(view.text, workspace.root, sensitive) };
+		if (view.kind === "unavailable") return { ...view, path: target, message: sanitizeText(view.message, workspace.root, sensitive) };
+		return { ...view, path: target };
 	}
 
 	projectHostedStats(view: SessionStatsView): HostedSessionStats {

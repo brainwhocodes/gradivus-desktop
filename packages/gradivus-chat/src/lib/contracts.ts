@@ -63,7 +63,7 @@ export interface HostedTimelineImage {
 
 export interface HostedTimelineFileChange {
 	path: string;
-	operation: "write" | "edit";
+	operation: "write" | "edit" | "generate";
 	disposition?: "created" | "edited";
 }
 
@@ -524,6 +524,13 @@ export interface HostedEditMessageResult {
 	error?: string;
 }
 
+/** Preview payloads are bounded by Desktop before crossing IPC or authenticated HTTP. */
+export type HostedWorkspaceFilePreview =
+	| { kind: "image"; path: string; dataUrl: string; width: number; height: number; byteSize: number; mimeType: string }
+	| { kind: "audio" | "video"; path: string; dataUrl: string; byteSize: number; mimeType: string }
+	| { kind: "text"; path: string; text: string; truncated: boolean; byteSize: number; mimeType: string }
+	| { kind: "unavailable"; path: string; message: string; byteSize?: number; mimeType?: string };
+
 export type HostedFileView =
 	| {
 			kind: "diff";
@@ -535,7 +542,7 @@ export type HostedFileView =
 			truncated: boolean;
 			message?: string;
 	  }
-	| { kind: "image"; path: string; dataUrl: string; width: number; height: number };
+	| HostedWorkspaceFilePreview;
 
 export interface HostedAppearanceSettings {
 	theme: "dark" | "light" | "system";

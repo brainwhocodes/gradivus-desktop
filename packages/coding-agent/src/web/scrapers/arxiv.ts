@@ -1,15 +1,12 @@
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, loadPage } from "./types";
 import { convertWithMarkit, fetchBinary } from "./utils";
+import { ToolAbortError } from "../../tools/tool-errors";
 
 /**
  * Handle arXiv URLs via arXiv API
  */
-export const handleArxiv: SpecialHandler = async (
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-): Promise<RenderResult | null> => {
+export const handleArxiv: SpecialHandler = async (url, timeout, signal, _storage, session): Promise<RenderResult | null> => {
 	try {
 		const parsed = new URL(url);
 		if (parsed.hostname !== "arxiv.org") return null;
@@ -62,11 +59,9 @@ export const handleArxiv: SpecialHandler = async (
 				notes.push("Fetching PDF for full content...");
 				const pdfResult = await fetchBinary(pdfLink, timeout, signal);
 				if (pdfResult.ok) {
-					const converted = await convertWithMarkit(pdfResult.buffer, ".pdf", timeout, signal);
-					if (converted.ok && converted.content.length > 500) {
-						md += `---\n\n## Full Paper\n\n${converted.content}\n`;
-						notes.push("PDF converted via markit");
-					}
+					const converted = await convertWithMarkit(pdfResult.buffer, ".pdf", timeout, signal, session);
+					if (converted.ok) md += `---\n\n## Paper transcription\n\n${converted.content}\n`;
+					notes.push(converted.ok ? "PDF converted locally with AnyDoc/vision" : `PDF unavailable: ${converted.error}`);
 				}
 			}
 		}
@@ -77,7 +72,9 @@ export const handleArxiv: SpecialHandler = async (
 			fetchedAt,
 			notes: notes.length ? notes : ["Fetched via arXiv API"],
 		});
-	} catch {}
+	} catch {
+		if (signal?.aborted) throw new ToolAbortError();
+	}
 
 	return null;
 };

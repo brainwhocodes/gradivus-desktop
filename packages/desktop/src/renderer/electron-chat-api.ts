@@ -427,10 +427,8 @@ export function createElectronChatApi(source: GradivusApi, options: ElectronChat
 			kind: "diff",
 			...(await source.loadFileDiff(sessionId, target)),
 		}),
-		loadWorkspaceImage: async (sessionId, target, maxDimension): Promise<HostedFileView> => ({
-			kind: "image",
-			...(await source.loadWorkspaceImage(sessionId, target, maxDimension)),
-		}),
+		loadWorkspaceFilePreview: (sessionId, target, maxDimension) =>
+			source.loadWorkspaceFilePreview(sessionId, target, maxDimension),
 		openWorkspaceFile: async (sessionId, target) => {
 			await source.openWorkspaceFile(sessionId, target);
 			return { action: action("open_file", "completed") };

@@ -1,5 +1,3 @@
-// Settings, model, and provider surfaces.
-
 // Settings and model/provider controls.
 
 .settings-workspace-source {
@@ -10,11 +8,13 @@
 	flex-direction: column;
 }
 
-.settings-workspace-source[aria-hidden="true"] {
+.settings-workspace-source.is-settings-hidden {
 	display: none;
 }
 
 .settings-shell {
+	--settings-content-width: 1080px;
+	--settings-sidebar-width: 224px;
 	min-width: 0;
 	min-height: 0;
 	flex: 1 1 0%;
@@ -22,23 +22,25 @@
 	flex-direction: column;
 	color: var(--foreground);
 	background: var(--chat-canvas);
+	font-family: var(--font-ui);
 }
 
 .settings-shell-toolbar {
 	display: grid;
-	grid-template-columns: auto minmax(calc(var(--control-height) * 5), 1fr) auto;
+	grid-template-columns: minmax(150px, 1fr) minmax(180px, 360px) auto;
 	align-items: center;
 	gap: var(--space-4);
 	flex: 0 0 auto;
 	border-bottom: 1px solid var(--line);
-	padding: var(--space-3) var(--space-4);
-	background: var(--shell-raised);
+	min-height: 76px;
+	padding: 18px 24px;
+	background: var(--chat-canvas);
 }
 
 .settings-shell-toolbar h1 {
 	margin: 0;
 	color: var(--foreground-strong);
-	font: 680 20px/1.2 var(--font-display);
+	font: 650 22px/1.2 var(--font-ui);
 	letter-spacing: -0.02em;
 }
 
@@ -104,7 +106,7 @@
 	min-height: 0;
 	overflow: auto;
 	border-right: 1px solid var(--line);
-	padding: var(--space-4) var(--space-3);
+	padding: 24px 12px;
 	background: var(--shell);
 	overscroll-behavior: contain;
 }
@@ -117,8 +119,10 @@
 	margin: 0 0 var(--space-2);
 	padding: 0 var(--space-2);
 	color: var(--foreground-muted);
-	font-size: 14px;
-	font-weight: 680;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 	line-height: 1.4;
 }
 
@@ -150,10 +154,11 @@
 }
 
 .settings-category-list button[aria-current="page"] {
-	border-color: var(--accent-boundary);
+	border-color: transparent;
 	color: var(--selection-foreground);
 	background: var(--selection-surface);
-	font-weight: 680;
+	font-weight: 600;
+	box-shadow: inset 3px 0 0 var(--accent-boundary);
 }
 
 .settings-category-list button.has-search-match:not([aria-current="page"]) {
@@ -178,7 +183,7 @@
 	min-width: 0;
 	min-height: 0;
 	overflow: auto;
-	padding: calc(var(--space-4) * 2) calc(var(--space-4) * 2) calc(var(--space-4) * 4);
+	padding: 36px clamp(24px, 4vw, 64px) 64px;
 	background: var(--chat-canvas);
 	overscroll-behavior: contain;
 	font-size: 14px;
@@ -193,14 +198,14 @@
 	display: block;
 	margin-bottom: var(--space-1);
 	color: var(--foreground-muted);
-	font-size: 14px;
-	font-weight: 680;
+	font-size: 12px;
+	font-weight: 500;
 }
 
 .settings-content-heading h2 {
 	margin: 0;
 	color: var(--foreground-strong);
-	font: 680 24px/1.2 var(--font-display);
+	font: 650 28px/1.2 var(--font-ui);
 	letter-spacing: -0.025em;
 }
 
@@ -232,9 +237,10 @@
 }
 
 .settings-copy {
-	max-width: 64ch;
+	max-width: 78ch;
+	margin: 12px 0 18px;
 	color: var(--foreground-muted);
-	font-size: 12.5px;
+	font-size: 14px;
 	line-height: 1.58;
 }
 
@@ -259,7 +265,7 @@
 	padding: var(--space-2) var(--space-3);
 	color: var(--foreground);
 	background: var(--success-surface);
-	font: 12px/1.4 var(--font-mono);
+	font: 13px/1.5 var(--font-ui);
 }
 
 .settings-section {
@@ -281,17 +287,13 @@
 .security-note h3 {
 	margin: 0;
 	color: var(--foreground-strong);
-	font: 680 17px/1.25 var(--font-display);
+	font: 600 17px/1.35 var(--font-ui);
 }
 .settings-section-heading p {
 	margin: var(--space-1) 0 0;
 	color: var(--foreground-muted);
 	font-size: 14px;
 	line-height: 1.5;
-}
-
-.settings-copy {
-	margin: 12px 0 18px;
 }
 
 .settings-context {
@@ -325,6 +327,7 @@
 }
 
 .settings-field,
+.settings-multiselect,
 .settings-toggle {
 	min-width: 0;
 	border: 0;
@@ -335,40 +338,75 @@
 	background: transparent;
 }
 
-.settings-field {
+.settings-field,
+.settings-multiselect {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(calc(var(--control-height) * 5), calc(var(--control-height) * 8));
+	grid-template-columns: minmax(0, 1fr) minmax(220px, 36%);
 	align-items: center;
 	column-gap: calc(var(--space-4) * 2);
 }
 
 .settings-field > span,
+.settings-multiselect > span:not(.settings-description),
 .settings-toggle strong {
 	color: var(--foreground-strong);
-	font-size: 12px;
-	font-weight: 680;
+	font-size: 14px;
+	font-weight: 550;
 }
 
 .settings-field small,
+.settings-multiselect .settings-description,
 .settings-toggle small {
 	display: block;
 	margin-top: var(--space-1);
 	color: var(--foreground-muted);
-	font-size: 12px;
-	line-height: 1.42;
+	font-size: 13px;
+	line-height: 1.55;
 }
 
-.settings-field > span {
+.settings-field > span,
+.settings-multiselect > span:not(.settings-description) {
 	grid-column: 1;
 	grid-row: 1;
 }
 
-.settings-field > small {
+.settings-field > small,
+.settings-multiselect .settings-description {
 	grid-column: 1;
 	grid-row: 2;
 }
 
- .settings-field > :is(input:not([type="checkbox"]), .custom-dropdown) {
+.settings-multiselect > select {
+	width: 100%;
+	min-width: 0;
+	min-height: 144px;
+	grid-column: 2;
+	grid-row: 1 / span 2;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	padding: var(--space-2);
+	color: var(--foreground);
+	background: var(--chat-canvas);
+	font: 14px/1.5 var(--font-ui);
+}
+
+.settings-multiselect,
+.settings-json-field {
+	align-items: start;
+	grid-template-rows: auto 1fr;
+}
+
+.settings-multiselect option {
+	padding: 6px 8px;
+	border-radius: 3px;
+}
+
+.settings-multiselect option:checked {
+	color: var(--selection-foreground);
+	background: var(--selection-surface);
+}
+
+.settings-field > :is(input:not([type="checkbox"]), .custom-dropdown) {
 	width: 100%;
 	min-height: var(--control-height);
 	grid-column: 2;
@@ -380,7 +418,13 @@
 	padding: 0 var(--space-2);
 	color: var(--foreground);
 	background: var(--chat-canvas);
-	font-size: 12px;
+	font-size: 14px;
+}
+
+.settings-shell .settings-field > .custom-dropdown {
+	border: 0;
+	padding: 0;
+	background: transparent;
 }
 .settings-field > textarea {
 	width: 100%;
@@ -394,7 +438,7 @@
 	padding: var(--space-2);
 	color: var(--foreground);
 	background: var(--chat-canvas);
-	font: 12px/1.4 var(--font-mono);
+	font: 13px/1.6 var(--font-mono);
 	resize: vertical;
 }
 
@@ -421,10 +465,10 @@
 	outline-offset: 1px;
 }
 
-	.settings-field > input:not([type="checkbox"]):disabled {
-		color: var(--foreground-disabled);
-		background: var(--shell);
-	}
+.settings-field > input:not([type="checkbox"]):disabled {
+	color: var(--foreground-disabled);
+	background: var(--shell);
+}
 
 .settings-toggle {
 	display: grid;
@@ -438,7 +482,44 @@
 	min-width: 0;
 }
 
-.settings-toggle input,
+.settings-toggle input {
+	appearance: none;
+	width: 38px;
+	height: 22px;
+	margin: 0;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	background: var(--shell-hover);
+	cursor: pointer;
+	transition: background-color 140ms var(--ease-standard);
+}
+
+.settings-toggle input::before {
+	content: "";
+	display: block;
+	width: 16px;
+	height: 16px;
+	margin: 2px;
+	border-radius: 50%;
+	background: var(--foreground-muted);
+	transition: transform 140ms var(--ease-standard);
+}
+
+.settings-toggle input:checked {
+	border-color: var(--accent);
+	background: var(--accent);
+}
+
+.settings-toggle input:checked::before {
+	background: var(--accent-foreground);
+	transform: translateX(16px);
+}
+
+.settings-toggle input:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
 .provider-route input {
 	width: 16px;
 	height: 16px;
@@ -455,7 +536,7 @@
 	padding: var(--space-2) var(--space-3);
 	color: var(--foreground);
 	background: var(--success-surface);
-	font: 12px/1.4 var(--font-mono);
+	font: 13px/1.5 var(--font-ui);
 }
 
 .settings-feedback.error,
@@ -854,10 +935,8 @@
 
 .agent-settings-group h3 {
 	margin: 0;
-	color: var(--foreground-muted);
-	font: 600 12px/1.2 var(--font-mono);
-	letter-spacing: 0.07em;
-	text-transform: uppercase;
+	color: var(--foreground-strong);
+	font: 600 16px/1.4 var(--font-ui);
 }
 
 .setting-scope {
@@ -870,6 +949,7 @@
 	.settings-shell-toolbar {
 		grid-template-columns: minmax(0, 1fr) auto;
 		gap: var(--space-2);
+		padding: 16px;
 	}
 
 	.settings-shell-toolbar h1 {
@@ -906,14 +986,18 @@
 
 	.settings-mobile-category .custom-dropdown {
 		width: 100%;
-		padding: calc(var(--space-4) + var(--space-2)) var(--space-4) calc(var(--space-4) * 3);
+	}
+
+	.settings-shell-content {
+		padding: 24px 20px 48px;
 	}
 
 	.settings-content-heading {
 		margin-bottom: calc(var(--space-4) + var(--space-2));
 	}
 
-	.settings-field {
+	.settings-field,
+	.settings-multiselect {
 		grid-template-columns: minmax(0, 1fr);
 	}
 
@@ -922,7 +1006,8 @@
 		grid-row: 3;
 		margin-top: var(--space-3);
 	}
-	.settings-field > textarea {
+	.settings-field > textarea,
+	.settings-multiselect > select {
 		grid-column: 1;
 		grid-row: 3;
 		margin-top: var(--space-3);
@@ -953,7 +1038,36 @@
 
 }
 
+@media (max-width: 480px) {
+	.settings-shell-toolbar {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.settings-shell-actions {
+		grid-column: 1;
+		grid-row: 3;
+		justify-content: space-between;
+	}
+
+	.settings-context {
+		align-items: flex-start;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.settings-shell-content {
+		padding-inline: 16px;
+	}
+}
+
 @media (forced-colors: active) {
+	.settings-toggle input {
+		appearance: auto;
+	}
+
+	.settings-toggle input::before {
+		display: none;
+	}
 	.settings-category-list button[aria-current="page"] {
 		border-color: Highlight;
 		color: HighlightText;
@@ -963,5 +1077,12 @@
 	.settings-category-list button.has-search-match:not([aria-current="page"]),
 	.settings-category-count {
 		border-color: CanvasText;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.settings-toggle input,
+	.settings-toggle input::before {
+		transition: none;
 	}
 }

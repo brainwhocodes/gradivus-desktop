@@ -6,13 +6,21 @@
 	gap: 8px;
 	flex: 1 1 auto;
 	min-width: 0;
-	height: 30px;
+	height: 32px;
 	padding: 0 10px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-small);
 	background: var(--shell);
 	color: var(--foreground-muted);
 	transition: border-color 140ms var(--ease-standard), box-shadow 140ms var(--ease-standard);
+
+	&.is-loading {
+		border-bottom-color: var(--accent-boundary);
+	}
+
+	> svg {
+		flex-shrink: 0;
+	}
 
 	&:focus-within {
 		border-color: var(--line);

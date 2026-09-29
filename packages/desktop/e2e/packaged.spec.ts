@@ -112,7 +112,7 @@ async function seedWorkSession(userData: string, workspace: string): Promise<voi
 	);
 }
 
-test("loads the contained Gradivus app and bundles the OMP runtime", async () => {
+test("loads the contained Gradivus app with its runtime and protected Desktop OAuth endpoint", async () => {
 	const packagedBinary = findPackagedBinary();
 	if (!packagedBinary) {
 		throw new Error(`Packaged Gradivus binary not found under ${path.join(desktopRoot, "out")}`);
@@ -145,6 +145,8 @@ test("loads the contained Gradivus app and bundles the OMP runtime", async () =>
 				TMP: tempRoot,
 				TEMP: tempRoot,
 				PI_CODING_AGENT_DIR: path.join(userData, "omp-agent"),
+				// /context is local, but the runtime still needs a configured model to open a chat.
+				OPENAI_API_KEY: "sk-mock-key-for-packaged-local-command-test",
 				ELECTRON_ENABLE_SECURITY_WARNINGS: "0",
 			},
 			stdio: ["ignore", "ignore", "pipe"],
@@ -165,10 +167,28 @@ test("loads the contained Gradivus app and bundles the OMP runtime", async () =>
 		await page.setViewportSize({ width: 1440, height: 900 });
 
 		await expect.poll(() => page.evaluate(() => document.styleSheets.length), { timeout: DEVTOOLS_TIMEOUT_MS }).toBeGreaterThan(0);
-		await expect(page.getByLabel("Gradivus", { exact: true })).toBeVisible();
-		await expect(page.getByRole("heading", { name: "Make the next useful thing." })).toBeVisible();
-		await expect(page.getByRole("button", { name: /Choose a workspace/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: "Gradivus", exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "Choose a workspace in Desktop", exact: true })).toBeVisible();
 		await expect(page.getByRole("button", { name: "Open browser tab" })).toBeVisible();
+		const desktopOrigin = "http://127.0.0.1:47832";
+		await expect.poll(async () => {
+			try { return (await fetch(`${desktopOrigin}/.well-known/oauth-authorization-server`)).status; }
+			catch { return 0; }
+		}, { timeout: DEVTOOLS_TIMEOUT_MS }).toBe(200);
+		const metadata = await (await fetch(`${desktopOrigin}/.well-known/oauth-authorization-server`)).json();
+		expect(metadata).toMatchObject({
+			issuer: desktopOrigin,
+			authorization_endpoint: `${desktopOrigin}/oauth/authorize`,
+			token_endpoint: `${desktopOrigin}/oauth/token`,
+			code_challenge_methods_supported: ["S256"],
+		});
+		const untrustedCommand = await fetch(`${desktopOrigin}/v1/command`, {
+			method: "POST",
+			headers: { Origin: "https://untrusted.example", "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(untrustedCommand.status).toBe(403);
+		expect(untrustedCommand.headers.get("access-control-allow-origin")).toBeNull();
 		const composer = page.getByLabel("Message OMP");
 		await expect(composer).toBeVisible({ timeout: DEVTOOLS_TIMEOUT_MS });
 		await composer.fill("/context");

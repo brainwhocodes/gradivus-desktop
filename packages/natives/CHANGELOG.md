@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added local AnyDoc document-to-Markdown conversion with OCR-page metadata and bounded embedded-image recovery.
+
 ### Changed
 
 - Improved syntax highlighting to use about 5x less memory and run 3-5x faster by compiling grammars with Oniguruma instead of fancy-regex; highlighted output is unchanged.

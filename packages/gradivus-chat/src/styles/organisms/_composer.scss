@@ -24,15 +24,18 @@
 }
 
 
+.composer-top-bar:not(.is-plan-mode):not(:has(.attachment-chip-list, .attachment-status)) { display: none; }
+.composer-attachment-bar:not(:has(.attachment-chip-list, .attachment-status)) { display: none; }
+
 .plan-mode-pill {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
 	padding: 2px 8px;
 	border-radius: 999px;
-	background: rgba(139, 92, 246, 0.15);
-	border: 1px solid rgba(139, 92, 246, 0.4);
-	color: #a78bfa;
+	background: var(--selection-surface);
+	border: 1px solid var(--accent-boundary);
+	color: var(--foreground);
 	font-family: var(--font-mono);
 	font-size: 14px;
 	font-weight: 700;
@@ -47,8 +50,8 @@
 		padding: 1px 5px;
 		border: 0;
 		border-radius: 4px;
-		background: rgba(139, 92, 246, 0.25);
-		color: #c4b5fd;
+		background: var(--shell-hover);
+		color: var(--foreground);
 		font-family: var(--font-sans);
 		font-size: 14px;
 		font-weight: 600;
@@ -56,7 +59,7 @@
 		transition: background-color 140ms ease;
 
 		&:hover {
-			background: rgba(139, 92, 246, 0.45);
+			background: var(--accent);
 			color: #ffffff;
 		}
 	}
@@ -140,11 +143,9 @@
 .runtime-picker-kicker {
 	flex: 0 0 auto;
 	color: var(--foreground-muted);
-	font-family: var(--font-mono);
-	font-size: 14px;
-	font-weight: 700;
-	letter-spacing: 0.05em;
-	text-transform: uppercase;
+	font-family: var(--font-sans);
+	font-size: 13px;
+	font-weight: 600;
 }
 
 .runtime-picker-summary {
@@ -208,11 +209,9 @@
 	justify-content: space-between;
 	gap: 8px;
 	color: var(--foreground-strong);
-	font-family: var(--font-mono);
-	font-size: 14px;
-	font-weight: 700;
-	letter-spacing: 0.05em;
-	text-transform: uppercase;
+	font-family: var(--font-sans);
+	font-size: 13px;
+	font-weight: 600;
 }
 
 .runtime-picker-close {
@@ -267,21 +266,21 @@
 	grid-template-columns: minmax(0, 1fr) auto;
 	grid-template-areas:
 		"top top"
-		"shortcuts shortcuts"
 		"input input"
+		"shortcuts shortcuts"
 		"footer footer";
 	align-items: end;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-large);
 	background: var(--shell-raised);
-	box-shadow: 0 8px 30px var(--shadow-color);
+	box-shadow: 0 2px 8px var(--shadow-color);
 	position: relative;
 	min-width: 0;
 	container: composer / inline-size;
-	--composer-textarea-min-height: 42px;
+	--composer-textarea-min-height: 64px;
 	--composer-textarea-max-height: 160px;
-	--composer-input-padding-block: calc(var(--space-1) + 3px);
-	--composer-input-padding-inline: var(--space-2);
+	--composer-input-padding-block: var(--space-3);
+	--composer-input-padding-inline: var(--space-3);
 	--composer-actions-gap: var(--space-2);
 	--composer-tools-gap: var(--space-2);
 	--composer-actions-margin-inline: var(--space-2);
@@ -290,12 +289,12 @@
 		box-shadow 140ms var(--ease-standard);
 
 	&.is-plan-mode {
-		border-color: rgba(139, 92, 246, 0.5);
-		box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.15), 0 4px 20px rgba(139, 92, 246, 0.08);
+		border-color: var(--accent-boundary);
+		box-shadow: none;
 
 		&:focus-within {
-			border-color: #8b5cf6;
-			box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25), 0 8px 24px rgba(139, 92, 246, 0.12);
+			border-color: var(--focus-inner);
+			box-shadow: 0 0 0 2px var(--focus-outer);
 		}
 	}
 }
@@ -304,7 +303,7 @@
 	--composer-textarea-min-height: 36px;
 	--composer-textarea-max-height: 144px;
 	--composer-input-padding-block: var(--space-1);
-	--composer-input-padding-inline: var(--space-2);
+	--composer-input-padding-inline: var(--space-3);
 	--composer-actions-gap: var(--space-1);
 	--composer-tools-gap: var(--space-2);
 	--composer-actions-margin-inline: var(--space-2);
@@ -329,6 +328,8 @@
 .attachment-add-button {
 	display: inline-flex;
 	align-items: center;
+	justify-content: center;
+	width: var(--control-height);
 	gap: 5px;
 	flex: 0 0 auto;
 	height: var(--control-height);
@@ -491,7 +492,7 @@
 	line-height: 1.48;
 	letter-spacing: normal;
 	position: relative;
-	z-index: 1;
+	z-index: var(--z-raised);
 
 	&.has-backdrop {
 		color: transparent;
@@ -510,9 +511,9 @@
 	flex: 0 0 auto;
 	align-items: flex-end;
 	align-self: end;
-	justify-content: flex-end;
+	justify-content: space-between;
 	gap: var(--composer-actions-gap);
-	margin: 0 var(--composer-actions-margin-inline) 2px;
+	margin: 4px var(--composer-actions-margin-inline) 8px;
 	min-width: 0;
 	min-height: var(--control-height);
 }
@@ -525,50 +526,9 @@
 	min-width: 0;
 }
 
-.composer-inspector-links {
-	display: inline-flex;
-	flex: 0 0 auto;
-	align-items: center;
-	gap: 2px;
-	padding-right: var(--space-2);
-	border-right: 1px solid var(--line-soft);
-}
-
-.composer-inspector-links button {
-	height: 26px;
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	border: 1px solid transparent;
-	border-radius: var(--radius-small);
-	padding: 0 6px;
-	color: var(--foreground-muted);
-	background: transparent;
-	font-size: 11px;
-	font-weight: 700;
-	cursor: pointer;
-}
-
-.composer-inspector-links button:hover {
-	color: var(--foreground);
-	background: var(--shell-hover);
-}
-
-.composer-inspector-links button.is-active {
-	border-color: var(--accent-boundary);
-	color: var(--selection-foreground);
-	background: var(--selection-surface);
-}
-
-.composer-inspector-links button span {
-	min-width: 15px;
-	border-radius: 999px;
-	padding: 1px 4px;
-	color: var(--accent);
-	background: var(--accent-surface);
-	font-size: 10px;
-	font-variant-numeric: tabular-nums;
-	text-align: center;
+@media (max-width: 759px) {
+	.composer-actions { flex-wrap: wrap; row-gap: 8px; }
+	.composer-action-rail { margin-left: auto; }
 }
 
 .composer-tools .context-meter-anchor,
@@ -869,14 +829,14 @@
 }
 
 .composer-command-shortcuts button {
-	height: 24px;
+	height: 30px;
 	flex: 0 0 auto;
 	border: 1px solid var(--line-soft);
 	border-radius: 999px;
 	padding: 0 8px;
 	color: var(--foreground-muted);
 	background: transparent;
-	font: 10px/1 var(--font-mono);
+	font: 12px/1 var(--font-sans);
 	cursor: pointer;
 }
 

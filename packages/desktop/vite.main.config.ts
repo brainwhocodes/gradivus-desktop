@@ -36,8 +36,26 @@ function stageNativeAddonPlugin(): Plugin {
 		},
 	};
 }
+
+function bundledCrosswsRequirePlugin(): Plugin {
+	return {
+		name: "crossws-commonjs-module-url",
+		enforce: "pre",
+		transform(code, id) {
+			if (!id.replaceAll("\\", "/").endsWith("/crossws/dist/_chunks/libs/ws.mjs")) return;
+			// Crossws constructs a require for Node builtins and optional ws accelerators.
+			// Rolldown's CJS output erases import.meta.url; resolve from the emitted
+			// main module instead so packaged Electron can initialize the loopback API.
+			return {
+				code: code.replaceAll("import.meta.url", "__filename"),
+				map: { mappings: "" },
+			};
+		},
+	};
+}
+
 export default defineConfig({
-	plugins: [rawTextPlugin(), stageNativeAddonPlugin()],
+	plugins: [rawTextPlugin(), stageNativeAddonPlugin(), bundledCrosswsRequirePlugin()],
 	optimizeDeps: {
 		exclude: ["fsevents"],
 	},

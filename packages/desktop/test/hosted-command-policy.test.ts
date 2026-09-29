@@ -57,7 +57,7 @@ describe("CHAT_COMMAND_POLICY", () => {
 			["chat.read"],
 			READY_RUNNING,
 		);
-		expectGroup(["loadFileDiff", "loadWorkspaceImage"], ["chat.read", "files.read"], READY_RUNNING);
+		expectGroup(["loadFileDiff", "loadWorkspaceFilePreview"], ["chat.read", "files.read"], READY_RUNNING);
 	});
 
 	it("assigns exact execution states to prompt, runtime, todo, and Agent Hub mutations", () => {

@@ -6,6 +6,7 @@ import { ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { AgentStorage } from "../../session/agent-storage";
+import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 
 export { formatNumber } from "@oh-my-pi/pi-utils";
@@ -26,6 +27,7 @@ export type SpecialHandler = (
 	timeout: number,
 	signal?: AbortSignal,
 	storage?: AgentStorage | null,
+	session?: ToolSession,
 ) => Promise<RenderResult | null>;
 
 export const MAX_OUTPUT_CHARS = 500_000;

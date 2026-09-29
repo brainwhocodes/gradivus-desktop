@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { GradivusMark } from "@gradivus/chat";
 	import type { LocalChatConnectionView } from "../../../shared/local-chat-consent";
 
 	export let connections: LocalChatConnectionView[] = [];
@@ -43,9 +44,12 @@
 			{#each connections as connection (connection.grantId)}
 				<article class="local-connection-row" aria-labelledby={`local-connection-${connection.grantId}`}>
 					<div class="local-connection-heading">
-						<div>
+						<div class="local-connection-identity">
+							<GradivusMark size={32} />
+							<div>
 							<strong id={`local-connection-${connection.grantId}`}>{connection.clientName}</strong>
 							<code>{connection.origin}</code>
+							</div>
 						</div>
 						<span class={`provider-state ${connection.status === "active" ? "connected" : ""}`}>
 							{connection.status}
@@ -63,6 +67,7 @@
 						<div><dt>Active tokens</dt><dd>{connection.activeTokenCount}</dd></div>
 					</dl>
 					<div class="local-connection-actions">
+						<p>{connection.status === "active" ? "Revoking access disconnects this browser. Local chats are kept." : "This browser no longer has access through this connection."}</p>
 						<button
 							type="button"
 							class="danger-button"

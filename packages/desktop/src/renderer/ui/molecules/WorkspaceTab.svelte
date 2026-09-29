@@ -2,7 +2,7 @@
 	import type { Component } from "svelte";
 	import type { SVGAttributes } from "svelte/elements";
 	import CloseCircle from "@solar-icons/svelte/linear/close-circle";
-	import Stars from "@solar-icons/svelte/linear/stars";
+	import { GradivusMark } from "@gradivus/chat";
 
 	type IconComponent = Component<SVGAttributes<SVGSVGElement> & { size?: number | string }>;
 
@@ -55,7 +55,6 @@
 		tabindex = active ? 0 : -1,
 		draggable = false,
 	}: Props = $props();
-	const DefaultChatIcon = Stars;
 </script>
 
 {#if variant === "chat"}
@@ -76,7 +75,7 @@
 				{@const Icon = icon}
 				<Icon size={14} />
 			{:else}
-				<DefaultChatIcon size={14} />
+				<GradivusMark size={18} />
 			{/if}
 		</span>
 		{title}

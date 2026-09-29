@@ -197,11 +197,10 @@
 				<label><input type="radio" name="agent-prompt-scope" checked={scope === "project"} onchange={(event) => requestSelection(selectedName, "project", event.currentTarget)} /> Project</label>
 				<label><input type="radio" name="agent-prompt-scope" checked={scope === "user"} onchange={(event) => requestSelection(selectedName, "user", event.currentTarget)} /> User</label>
 			</fieldset>
-		</div>
-
-		<div class="definition-summary">
-			<div><span>Effective source</span><strong>{selected.effectiveSource}</strong></div>
-			<div><span>Editing</span><strong>{scope} {selectedOverride ? "override" : "new override"}</strong></div>
+			<div class="definition-summary">
+				<div><span>Effective source</span><strong>{selected.effectiveSource}</strong></div>
+				<div><span>Editing {scope} {selectedOverride ? "override" : "new override"}</span><code>{overridePath()}</code></div>
+			</div>
 		</div>
 		<p class="description">{selected.description}</p>
 		{#if shadowedUser}
@@ -213,7 +212,7 @@
 			<textarea bind:this={textarea} bind:value={draft} disabled={saving} spellcheck="false" rows="18"></textarea>
 		</label>
 		<div class="editor-footer">
-			<div class="editor-state" aria-live="polite">
+			<div class="editor-state" class:is-dirty={dirty} class:has-error={Boolean(error)} aria-live="polite">
 				{#if error}<span class="editor-error" role="alert">{error}</span>{:else if status}<span>{status}</span>{:else if dirty}<span>Unsaved changes</span>{:else}<span>Saved</span>{/if}
 			</div>
 			<div class="editor-actions">
@@ -247,32 +246,48 @@
 {/if}
 
 <style>
-	.prompt-editor { display: grid; gap: 16px; }
-	.editor-context, .editor-footer, .editor-toolbar, .definition-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+	.prompt-editor { display: grid; gap: 24px; font: 14px/1.5 var(--font-ui); }
+	.editor-context, .editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+	.editor-context strong { color: var(--foreground-strong); font-size: 16px; font-weight: 600; }
 	.editor-context p, .description { margin: 4px 0 0; color: var(--foreground-muted); }
-	.apply-badge { flex: none; border: 1px solid var(--line-soft); border-radius: 999px; padding: 4px 8px; color: var(--foreground-muted); font-size: 12px; }
-	.editor-toolbar { align-items: end; padding: 14px; border: 1px solid var(--line-soft); border-radius: var(--radius-medium); background: var(--shell-raised); }
-	.editor-toolbar > label { display: grid; gap: 6px; min-width: min(320px, 48%); font-size: 12px; color: var(--foreground-muted); }
-	select { min-height: 34px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--chat-canvas); color: var(--foreground); padding: 0 10px; }
-	fieldset { display: flex; gap: 12px; border: 0; margin: 0; padding: 0; }
-	legend { margin-bottom: 6px; color: var(--foreground-muted); font-size: 12px; }
-	fieldset label { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
-	.definition-summary { justify-content: flex-start; gap: 28px; }
-	.definition-summary div { display: grid; gap: 2px; }
-	.definition-summary span { color: var(--foreground-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-	.definition-summary strong { text-transform: capitalize; }
-	.shadow-note { margin: 0; padding: 9px 11px; border-left: 3px solid var(--warning-boundary); background: var(--warning-surface); }
-	.prompt-field { display: grid; gap: 7px; font-weight: 600; }
-	textarea { width: 100%; min-height: 280px; resize: vertical; border: 1px solid var(--line); border-radius: var(--radius-medium); background: var(--chat-canvas); color: var(--foreground); padding: 14px; font: 13px/1.55 "Cascadia Mono", "SFMono-Regular", Consolas, monospace; tab-size: 2; }
+	.apply-badge { flex: none; border: 1px solid var(--accent-boundary); border-radius: 999px; padding: 4px 10px; color: var(--selection-foreground); background: var(--selection-surface); font-size: 12px; }
+	.editor-toolbar { display: grid; grid-template-columns: minmax(160px, 1fr) auto minmax(180px, 1fr); align-items: start; gap: 28px; padding: 24px 0; border-block: 1px solid var(--line); }
+	.editor-toolbar > label { display: grid; gap: 10px; min-width: 0; font-size: 14px; color: var(--foreground-strong); }
+	select { width: 100%; min-height: var(--control-height); border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--shell-raised); color: var(--foreground); padding: 0 12px; font: inherit; }
+	fieldset { display: flex; align-items: center; gap: 16px; border: 0; border-inline: 1px solid var(--line); margin: 0; padding: 0 24px; }
+	legend { margin-bottom: 10px; color: var(--foreground-strong); font-size: 14px; }
+	fieldset label { display: inline-flex; align-items: center; gap: 8px; min-height: var(--control-height); }
+	fieldset input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+	.definition-summary { display: grid; gap: 10px; min-width: 0; }
+	.definition-summary div { display: grid; gap: 4px; }
+	.definition-summary span { color: var(--foreground-muted); font-size: 12px; }
+	.definition-summary strong { text-transform: capitalize; font-weight: 500; }
+	.definition-summary code { overflow-wrap: anywhere; color: var(--foreground-muted); font-size: 12px; }
+	.shadow-note { margin: 0; padding: 12px 16px; border-left: 3px solid var(--warning-boundary); background: var(--warning-surface); }
+	.prompt-field { display: grid; gap: 12px; font-size: 16px; font-weight: 600; }
+	textarea { width: 100%; min-height: 360px; resize: vertical; border: 1px solid var(--line); border-radius: var(--radius-medium); background: var(--shell-raised); color: var(--foreground); padding: 20px; font: 14px/1.7 var(--font-mono); tab-size: 2; }
 	textarea:focus, select:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-	.editor-state { min-height: 24px; color: var(--foreground-muted); }
-	.editor-error { color: var(--danger); }
+	.editor-footer { padding-top: 20px; border-top: 1px solid var(--line); }
+	.editor-state { display: flex; align-items: center; gap: 8px; min-height: 24px; color: var(--foreground-muted); }
+	.editor-state::before { content: ""; width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--success-boundary); }
+	.editor-state.is-dirty::before { background: var(--warning-boundary); }
+	.editor-state.has-error::before { background: var(--danger-boundary); }
+	.editor-error { color: var(--danger-boundary); overflow-wrap: anywhere; }
 	.editor-actions { display: flex; gap: 8px; }
 	.editor-empty { display: grid; gap: 5px; padding: 22px; border: 1px dashed var(--line-soft); border-radius: var(--radius-medium); color: var(--foreground-muted); }
-	code { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; }
+	code { font-family: var(--font-mono); }
+	@media (max-width: 1100px) {
+		.editor-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+		.definition-summary { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+		fieldset { border-right: 0; padding-right: 0; }
+	}
 	@media (max-width: 760px) {
-		.editor-context, .editor-footer, .editor-toolbar { align-items: stretch; flex-direction: column; }
-		.editor-toolbar > label { min-width: 0; }
+		.editor-context, .editor-footer { align-items: stretch; flex-direction: column; }
+		.editor-toolbar { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+		fieldset { border: 0; padding: 0; }
+		.definition-summary { grid-template-columns: minmax(0, 1fr); }
+		.apply-badge { width: fit-content; }
+		textarea { min-height: 300px; padding: 16px; }
 		.editor-actions { display: grid; grid-template-columns: 1fr 1fr; }
 		.editor-actions :global(button) { min-height: 36px; }
 	}

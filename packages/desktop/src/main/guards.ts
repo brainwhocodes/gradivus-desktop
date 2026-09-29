@@ -1,27 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { workspaceFileKind, workspaceFileMimeType } from "@gradivus/chat/workspace-file-types";
 import { MAX_INLINE_PROMPT_BYTES } from "../shared/contracts";
 
 export const MAX_EDITOR_BYTES = MAX_INLINE_PROMPT_BYTES;
 export const MAX_NAME_CODE_POINTS = 160;
-const DOCUMENT_EXTENSIONS: Record<string, true> = {
-	".txt": true,
-	".md": true,
-	".pdf": true,
-	".csv": true,
-	".json": true,
-	".yaml": true,
-	".yml": true,
-	".doc": true,
-	".docx": true,
-	".xlsx": true,
-	".pptx": true,
-	".png": true,
-	".jpg": true,
-	".jpeg": true,
-	".gif": true,
-	".webp": true,
-};
 
 export function assertBoundedText(value: unknown, label: string): string {
 	if (typeof value !== "string") throw new TypeError(`${label} must be text`);
@@ -58,6 +41,10 @@ export async function resolveWorkspaceTarget(
 	workspace: string,
 	target: string,
 ): Promise<{ workspace: string; target: string; revealOnly: boolean }> {
+	if (!target || target.length > 4096 || /[\0-\x1f]/.test(target) || target.replaceAll("\\", "/").split("/").includes(".."))
+		throw new Error("Invalid workspace file target");
+	if (process.platform === "win32" && target.replace(/^[A-Za-z]:/, "").includes(":"))
+		throw new Error("Alternate data streams are not allowed");
 	const workspaceReal = await fs.realpath(workspace);
 	const targetPath = path.isAbsolute(target) ? target : path.resolve(workspaceReal, target);
 	const targetReal = await fs.realpath(targetPath);
@@ -65,7 +52,9 @@ export async function resolveWorkspaceTarget(
 	const targetKey = normalizeForCompare(targetReal);
 	if (targetKey !== workspaceKey && !targetKey.startsWith(`${workspaceKey}${path.sep}`))
 		throw new Error("Target is outside the workspace");
-	const revealOnly = DOCUMENT_EXTENSIONS[path.extname(targetReal).toLowerCase()] !== true;
+	const kind = workspaceFileKind(targetReal);
+	// Never launch scripts, executables, HTML, or SVG through a file association.
+	const revealOnly = kind === "code" || kind === "other" || workspaceFileMimeType(targetReal) === "image/svg+xml";
 	return { workspace: workspaceReal, target: targetReal, revealOnly };
 }
 

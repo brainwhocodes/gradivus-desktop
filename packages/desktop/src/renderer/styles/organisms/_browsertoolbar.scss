@@ -1,31 +1,35 @@
 // BrowserPane toolbar: navigation controls, target picker, pane actions.
 
 .browser-toolbar {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	height: 42px;
-	min-height: 42px;
-	padding: 0 10px;
-	border-bottom: 1px solid var(--line);
+	min-width: 0;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--line-soft);
 	background: var(--shell-raised);
+}
+
+.browser-toolbar-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
 }
 
 .browser-controls,
 .browser-pane-actions {
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	gap: 2px;
 }
 
 .browser-toolbar button,
-.browser-more-actions summary,
 .browser-find-bar button {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 28px;
-	height: 28px;
+	width: 32px;
+	height: 32px;
+	flex-shrink: 0;
 	border: 1px solid transparent;
 	border-radius: var(--radius-small);
 	background: transparent;
@@ -50,6 +54,11 @@
 
 	&.target-button {
 		color: var(--foreground-muted);
+		width: auto;
+		min-width: 32px;
+		gap: 5px;
+		padding-inline: 6px;
+		font-size: 12px;
 
 		&:hover:not(:disabled) {
 			color: var(--foreground-strong);
@@ -64,95 +73,80 @@
 		}
 	}
 
-	&.browser-agent-hub-button {
-		width: auto;
-		max-width: 168px;
-		gap: var(--space-1);
-		padding-inline: var(--space-2);
-		font-size: 14px;
-		white-space: nowrap;
-
-		&.is-active {
-			border-color: var(--accent-boundary);
-			color: var(--selection-foreground);
-			background: var(--selection-surface);
-		}
-	}
-
-	.browser-agent-hub-label {
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.browser-agent-count {
-		min-width: 16px;
-		color: inherit;
-		font-variant-numeric: tabular-nums;
-		text-align: center;
-	}
 }
 
 .browser-more-actions {
 	position: relative;
-}
-
-.browser-more-actions summary {
-	list-style: none;
 	letter-spacing: 1px;
 }
 
-.browser-more-actions summary::-webkit-details-marker {
-	display: none;
-}
 
 .browser-more-menu {
-	position: absolute;
-	right: 0;
-	top: 32px;
-	z-index: var(--z-popover);
-	width: 150px;
+	// Dock in flow so BrowserSurface's ResizeObserver moves native bounds below the menu.
 	display: grid;
-	gap: 2px;
-	border: 1px solid var(--line);
-	border-radius: var(--radius-small);
-	padding: 5px;
-	background: var(--shell-raised);
-	box-shadow: 0 8px 24px var(--shadow-color);
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 2px 8px;
+	max-height: min(224px, 36vh);
+	overflow-y: auto;
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px solid var(--line-soft);
 }
 
 .browser-more-menu button {
 	width: 100%;
-	justify-content: flex-start;
-	padding-inline: 8px;
+	min-width: 0;
+	height: auto;
+	min-height: 32px;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 8px;
 	font-size: 12px;
+	text-align: left;
+	overflow-wrap: anywhere;
+}
+
+.browser-more-count {
+	position: absolute;
+	top: -4px;
+	right: -4px;
+	min-width: 14px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	padding-inline: 2px;
+	background: var(--shell-raised);
+	color: var(--foreground-strong);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+	letter-spacing: normal;
 }
 
 .browser-find-bar {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	min-height: 38px;
-	padding: 4px 8px;
-	border-bottom: 1px solid var(--line);
+	min-height: 52px;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--line-soft);
 	background: var(--shell);
 }
 
 .browser-find-bar input {
 	min-width: 120px;
 	flex: 1 1 auto;
-	height: 28px;
+	height: 36px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-small);
 	padding: 0 8px;
 	color: var(--foreground);
 	background: var(--shell-raised);
-	font-size: 12px;
+	font-size: 14px;
 }
 
 .browser-find-count {
 	min-width: 58px;
 	color: var(--foreground-muted);
-	font-size: 11px;
+	font-size: 12px;
 	font-variant-numeric: tabular-nums;
 	text-align: right;
 }
@@ -164,20 +158,48 @@
 .browser-toolbar .browser-automation-button {
 	width: auto;
 	gap: 5px;
-	padding-inline: 8px;
+	padding-inline: 6px;
 	font-size: 12px;
-	font-weight: 700;
+	font-weight: 500;
 	white-space: nowrap;
 }
 
-.browser-toolbar .browser-automation-button.is-active {
+.browser-toolbar :is(.browser-automation-button, .browser-more-actions).is-active {
 	border-color: var(--accent-boundary);
 	color: var(--selection-foreground);
 	background: var(--selection-surface);
 }
 
 .browser-toolbar .browser-automation-button span {
-	color: var(--accent);
-	font-size: 10px;
-	text-transform: capitalize;
+	color: var(--foreground-muted);
+	font-size: 12px;
+}
+
+.browser-toolbar button:focus-visible,
+.browser-find-bar :is(input, button):focus-visible {
+	outline: 2px solid var(--focus-inner);
+	outline-offset: 2px;
+	box-shadow: 0 0 0 4px var(--focus-outer);
+}
+
+@container browser-pane (max-width: 540px) {
+	.browser-toolbar-row {
+		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.browser-toolbar .address-form {
+		grid-column: 1 / -1;
+		grid-row: 1;
+	}
+
+	.browser-pane-actions {
+		justify-content: flex-end;
+	}
+}
+
+@container browser-pane (max-width: 360px) {
+	.browser-pane-actions .target-button span,
+	.browser-automation-button > span {
+		display: none;
+	}
 }

@@ -335,11 +335,11 @@ export function validateHostedCommandPayload(envelope: HostedRawCommandEnvelope)
 			sessionId(payload);
 			relativeTarget(payload.target);
 			break;
-		case "loadWorkspaceImage":
+		case "loadWorkspaceFilePreview":
 			exact(payload, ["sessionId", "target", "maxDimension"]);
 			sessionId(payload);
 			relativeTarget(payload.target);
-			integer(payload.maxDimension, "maxDimension", 1, 8192);
+			integer(payload.maxDimension, "maxDimension", 64, 2048);
 			break;
 		case "getAgentSettings":
 		case "getAgentPrompts":

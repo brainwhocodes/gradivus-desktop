@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { HostedWorkspaceFilePreview } from "@gradivus/chat/contracts";
+import { workspaceFileKind, workspaceFileMimeType } from "@gradivus/chat/workspace-file-types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { parseImageMetadata } from "@oh-my-pi/pi-utils/mime";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { WorkspaceDocumentV1, WorkspacePrincipalV1 } from "@oh-my-pi/pi-wire";
 import type { SelectionAuthScope, SelectionTargetAgent } from "@oh-my-pi/pi-workspace-runtime/selection";
@@ -56,7 +57,6 @@ import type {
 	TimelineToolActivity,
 	TodoPhase,
 	TodoState,
-	WorkspaceImagePreview,
 } from "../shared/contracts";
 import {
 	MAX_INLINE_PROMPT_BYTES,
@@ -86,6 +86,7 @@ import { RpcProcess } from "./rpc-process";
 import { RuntimeSupervisor } from "./runtime-supervisor";
 import { SessionRegistry } from "./session-registry";
 import { TranscriptStore } from "./transcript-store";
+import { readWorkspaceFilePreview } from "./workspace-file-preview";
 
 type SelectionPromptMetadata = {
 	paneId?: string;
@@ -182,10 +183,6 @@ type RuntimeSession = {
 type TimerHandle = NodeJS.Timeout;
 const FILE_DIFF_CACHE_TTL_MS = 1_000;
 const EVENT_BATCH_DELAY_MS = 16;
-const MAX_WORKSPACE_IMAGE_DIMENSION = 8_192;
-const MAX_WORKSPACE_IMAGE_PIXELS = 4_194_304;
-const MIN_IMAGE_PREVIEW_DIMENSION = 64;
-const MAX_IMAGE_PREVIEW_DIMENSION = 2_048;
 interface StateData {
 	sessionId: string;
 	sessionFile?: string;
@@ -2065,65 +2062,38 @@ export class DesktopHost {
 		});
 	}
 
-	async loadWorkspaceImage(
+	async loadWorkspaceFilePreview(
 		idInput: unknown,
 		targetInput: unknown,
 		maxDimensionInput: unknown,
-	): Promise<WorkspaceImagePreview> {
+	): Promise<HostedWorkspaceFilePreview> {
 		const record = this.#record(idInput);
-		if (typeof targetInput !== "string") throw new TypeError("image path must be text");
-		if (
-			typeof maxDimensionInput !== "number" ||
-			!Number.isInteger(maxDimensionInput) ||
-			maxDimensionInput < MIN_IMAGE_PREVIEW_DIMENSION ||
-			maxDimensionInput > MAX_IMAGE_PREVIEW_DIMENSION
-		) {
-			throw new RangeError("invalid image preview dimension");
+		if (typeof targetInput !== "string") throw new TypeError("file path must be text");
+		if (typeof maxDimensionInput !== "number" || !Number.isInteger(maxDimensionInput) || maxDimensionInput < 64 || maxDimensionInput > 2048)
+			throw new RangeError("invalid file preview dimension");
+		try {
+			const resolved = await this.#resolveFileTarget(record, targetInput);
+			return await readWorkspaceFilePreview(resolved.target, targetInput, maxDimensionInput, bytes => nativeImage.createFromBuffer(bytes));
+		} catch (error) {
+			if (isRecord(error) && (error.code === "ENOENT" || error.code === "ENOTDIR"))
+				return { kind: "unavailable", path: targetInput, mimeType: workspaceFileMimeType(targetInput), message: "This file is missing or the generated artifact has expired. Generate it again or restore the file to preview it." };
+			throw error;
 		}
-		const resolved = await resolveWorkspaceTarget(record.cwd, targetInput);
-		const stat = await fs.promises.stat(resolved.target);
-		if (!stat.isFile()) throw new Error("Image preview target is not a file");
-		if (stat.size <= 0 || stat.size > MAX_PROMPT_IMAGE_BYTES) {
-			throw new RangeError("Image preview exceeds the 20 MiB limit");
-		}
-		const bytes = await fs.promises.readFile(resolved.target);
-		const metadata = parseImageMetadata(bytes);
-		if (!metadata) throw new Error("Image preview format is unsupported");
-		const width = metadata.width ?? 0;
-		const height = metadata.height ?? 0;
-		if (
-			width <= 0 ||
-			height <= 0 ||
-			width > MAX_WORKSPACE_IMAGE_DIMENSION ||
-			height > MAX_WORKSPACE_IMAGE_DIMENSION ||
-			width * height > MAX_WORKSPACE_IMAGE_PIXELS
-		) {
-			throw new RangeError("Image preview dimensions are unsupported");
-		}
-		const source = nativeImage.createFromBuffer(bytes);
-		if (source.isEmpty()) throw new Error("Image preview could not be decoded");
-		const scale = Math.min(1, maxDimensionInput / Math.max(width, height));
-		const image =
-			scale < 1
-				? source.resize({
-						width: Math.max(1, Math.round(width * scale)),
-						height: Math.max(1, Math.round(height * scale)),
-						quality: "good",
-					})
-				: source;
-		const previewSize = image.getSize();
-		return {
-			path: targetInput,
-			dataUrl: image.toDataURL(),
-			width: previewSize.width,
-			height: previewSize.height,
-		};
+	}
+
+	async #resolveFileTarget(record: SessionRecordV1, target: string): Promise<{ target: string; revealOnly: boolean }> {
+		if (!target.startsWith("@artifacts/")) return resolveWorkspaceTarget(record.cwd, target);
+		const runtime = this.#runtimes.get(record.id);
+		if (!runtime) throw new Error("Session is not loaded");
+		const resolved = await runtime.timeline.resolveArtifact(target);
+		const kind = workspaceFileKind(resolved);
+		return { target: resolved, revealOnly: kind === "code" || kind === "other" || workspaceFileMimeType(resolved) === "image/svg+xml" };
 	}
 
 	async openWorkspaceFile(idInput: unknown, targetInput: unknown): Promise<void> {
 		const record = this.#record(idInput);
 		if (typeof targetInput !== "string") throw new TypeError("target must be text");
-		const resolved = await resolveWorkspaceTarget(record.cwd, targetInput);
+		const resolved = await this.#resolveFileTarget(record, targetInput);
 		if (resolved.revealOnly) await shell.showItemInFolder(resolved.target);
 		else {
 			const error = await shell.openPath(resolved.target);
@@ -2154,7 +2124,7 @@ export class DesktopHost {
 		const runtime = {} as RuntimeSession;
 		runtime.record = record;
 		runtime.attachments = new PromptAttachmentStore();
-		runtime.timeline = new TranscriptStore();
+		runtime.timeline = new TranscriptStore(record.cwd);
 		runtime.state = "stopped";
 		runtime.subagents = [];
 		runtime.commands = [];
@@ -3433,6 +3403,11 @@ function dehydrateTimelineItem(item: TimelineItem): TimelineItem {
 		delete activity.images;
 		delete activity.statusEvents;
 		dehydrated.toolActivity = { ...activity, omittedImageCount, detailsLoaded: false };
+		return dehydrated;
+	}
+	if (item.files?.some(file => file.operation === "generate")) {
+		const dehydrated = { ...item };
+		delete dehydrated.result;
 		return dehydrated;
 	}
 	if (item.kind !== "thinking" || item.text.length <= 64 * 1024) return { ...item };

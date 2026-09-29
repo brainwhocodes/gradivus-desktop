@@ -1,26 +1,21 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import AddCircle from "@solar-icons/svelte/linear/add-circle";
+  import { onDestroy, tick } from "svelte";
+  import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils/format";
   import AltArrowLeft from "@solar-icons/svelte/linear/alt-arrow-left";
   import AltArrowRight from "@solar-icons/svelte/linear/alt-arrow-right";
-  import Diskette from "@solar-icons/svelte/linear/diskette";
-  import Document from "@solar-icons/svelte/linear/document";
   import Folder from "@solar-icons/svelte/linear/folder";
-  import Gallery from "@solar-icons/svelte/linear/gallery";
-  import Pen from "@solar-icons/svelte/linear/pen";
-  import type { HostedFileView, HostedTimelineFileChange as TimelineFileChange } from "../../contracts";
+  import type { HostedWorkspaceFilePreview, HostedTimelineFileChange as TimelineFileChange } from "../../contracts";
   import {
     buildChangedFileTree,
     collectChangedFileDirectoryIds,
     collectChangedFileLeaves,
     fileDispositionLabel,
     flattenChangedFileTree,
-    isRasterImagePath,
     type ChangedFileTreeLeaf,
     type ChangedFileTreeRow,
   } from "../../changed-file-tree";
-
-  type WorkspaceImagePreview = Extract<HostedFileView, { kind: "image" }>;
+  import { workspaceFileKind, isTextWorkspaceFile, type WorkspaceFileKind } from "../../workspace-file-types";
+  import WorkspaceFileIcon from "../atoms/WorkspaceFileIcon.svelte";
 
   export let files: TimelineFileChange[] = [];
   export let selectedPath = "";
@@ -29,72 +24,79 @@
   export let onRetry: (() => void) | undefined = undefined;
   export let onOpenFile: (path: string) => void;
   export let onOpenDiff: (path: string) => void;
-  export let loadImagePreview: (path: string, maxDimension: number) => Promise<WorkspaceImagePreview>;
+  export let loadPreview: (path: string, maxDimension: number) => Promise<HostedWorkspaceFilePreview>;
 
   type PreviewState =
-    | { status: "idle" }
-    | { status: "loading" }
-    | { status: "ready"; preview: WorkspaceImagePreview }
+    | { status: "idle" | "loading" }
+    | { status: "ready"; preview: HostedWorkspaceFilePreview }
     | { status: "error"; message: string };
-
+  type FileFilter = WorkspaceFileKind | "all";
+  const FILTERS: { kind: FileFilter; label: string }[] = [
+    { kind: "all", label: "All" }, { kind: "image", label: "Images" },
+    { kind: "video", label: "Video" }, { kind: "audio", label: "Audio" },
+    { kind: "document", label: "Docs" }, { kind: "code", label: "Code" },
+    { kind: "other", label: "Other" },
+  ];
+  const IDLE_PREVIEW: PreviewState = { status: "idle" };
   const THUMBNAIL_MAX_DIMENSION = 160;
   const HERO_MAX_DIMENSION = 1_600;
-  const IDLE_PREVIEW: PreviewState = { status: "idle" };
-
+  let filter: FileFilter = "all";
+  let query = "";
   let expandedDirectoryIds = new Set<string>();
   let knownDirectorySignature = "";
   let selectedFileId = "";
   let appliedSelectedPath = "";
   let activeNodeId = "";
-  let imageDetailOpen = false;
-  let treeElement: HTMLElement | undefined;
+  let detailOpen = false;
+  let treeElement: HTMLDivElement | undefined;
   let backButton: HTMLButtonElement | undefined;
-  let thumbnailRail: HTMLElement | undefined;
+  let thumbnailRail: HTMLDivElement | undefined;
   let thumbnailPreviews = new Map<string, PreviewState>();
-  let heroPreviews = new Map<string, PreviewState>();
-  let knownImageFiles = new Map<string, TimelineFileChange>();
-  let imageCacheGeneration = 0;
+  let knownFiles = new Map<string, TimelineFileChange>();
+  let previewSource: TimelineFileChange | undefined;
+  let previewState: PreviewState = IDLE_PREVIEW;
+  let previewRequest = 0;
+  let cacheGeneration = 0;
+  let mediaError = "";
+  let mediaDuration = "";
+  let destroyed = false;
 
-  $: tree = buildChangedFileTree(files);
-  $: directoryIds = collectChangedFileDirectoryIds(tree);
-  $: reconcileDirectories(directoryIds);
+  $: allLeaves = collectChangedFileLeaves(buildChangedFileTree(files));
+  $: filterCounts = new Map(FILTERS.map(item => [item.kind, item.kind === "all" ? allLeaves.length : allLeaves.filter(leaf => workspaceFileKind(leaf.path) === item.kind).length]));
+  $: filteredFiles = allLeaves.filter(leaf => (filter === "all" || workspaceFileKind(leaf.path) === filter) && leaf.path.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).map(leaf => leaf.file);
+  $: tree = buildChangedFileTree(filteredFiles);
+  $: directories = collectChangedFileDirectoryIds(tree);
+  $: reconcileDirectories(directories);
   $: visibleRows = flattenChangedFileTree(tree, expandedDirectoryIds);
   $: reconcileActiveNode(visibleRows);
   $: leaves = collectChangedFileLeaves(tree);
   $: reconcileSelection(leaves);
-  $: reconcileRequestedPath(selectedPath, leaves);
+  $: reconcileRequestedPath(selectedPath, allLeaves);
   $: selectedLeaf = leaves.find(leaf => leaf.id === selectedFileId);
-  $: imageLeaves = leaves.filter(leaf => isRasterImagePath(leaf.path));
-  $: reconcileImagePreviews(imageLeaves);
-  $: selectedImageLeaf = imageDetailOpen && selectedLeaf && isRasterImagePath(selectedLeaf.path)
-    ? selectedLeaf
-    : undefined;
-  $: selectedHeroState = selectedImageLeaf
-    ? (heroPreviews.get(selectedImageLeaf.file.path) ?? IDLE_PREVIEW)
-    : IDLE_PREVIEW;
+  $: imageLeaves = leaves.filter(leaf => workspaceFileKind(leaf.path) === "image");
+  $: reconcilePreviews(allLeaves);
+  $: synchronizePreview(detailOpen ? selectedLeaf : undefined);
+  $: selectedIndex = leaves.findIndex(leaf => leaf.id === selectedFileId);
+
+  onDestroy(() => { destroyed = true; previewRequest += 1; });
 
   function reconcileDirectories(ids: readonly string[]): void {
     const signature = ids.join("\u0000");
     if (signature === knownDirectorySignature) return;
-    const previousIds = new Set(knownDirectorySignature ? knownDirectorySignature.split("\u0000") : []);
-    const validIds = new Set(ids);
-    const nextExpanded = new Set([...expandedDirectoryIds].filter(id => validIds.has(id)));
-    for (const id of ids) {
-      if (!previousIds.has(id)) nextExpanded.add(id);
-    }
-    expandedDirectoryIds = nextExpanded;
+    const previous = new Set(knownDirectorySignature ? knownDirectorySignature.split("\u0000") : []);
+    const valid = new Set(ids);
+    expandedDirectoryIds = new Set([...expandedDirectoryIds].filter(id => valid.has(id)));
+    for (const id of ids) if (!previous.has(id)) expandedDirectoryIds.add(id);
     knownDirectorySignature = signature;
   }
   function reconcileActiveNode(rows: readonly ChangedFileTreeRow[]): void {
-    if (rows.some(row => row.node.id === activeNodeId)) return;
-    activeNodeId = rows.find(row => row.node.id === selectedFileId)?.node.id ?? rows[0]?.node.id ?? "";
+    if (!rows.some(row => row.node.id === activeNodeId)) activeNodeId = rows[0]?.node.id ?? "";
   }
-
   function reconcileSelection(nextLeaves: readonly ChangedFileTreeLeaf[]): void {
     if (nextLeaves.some(leaf => leaf.id === selectedFileId)) return;
     selectedFileId = nextLeaves[0]?.id ?? "";
-    activeNodeId = selectedFileId || nextLeaves[0]?.id || "";
-    imageDetailOpen = false;
+    activeNodeId = selectedFileId || visibleRows[0]?.node.id || "";
+    detailOpen = false;
   }
   function reconcileRequestedPath(path: string, nextLeaves: readonly ChangedFileTreeLeaf[]): void {
     const normalized = path.replaceAll("\\", "/");
@@ -102,846 +104,292 @@
     const leaf = nextLeaves.find(candidate => candidate.path === normalized);
     if (!leaf) return;
     appliedSelectedPath = normalized;
-    const segments = normalized.split("/");
-    segments.pop();
-    const expanded = new Set(expandedDirectoryIds);
-    let directoryPath = "";
-    for (const segment of segments) {
-      directoryPath = directoryPath ? `${directoryPath}/${segment}` : segment;
-      expanded.add(`directory:${directoryPath}`);
-    }
-    expandedDirectoryIds = expanded;
-    selectLeaf(leaf);
+    filter = "all";
+    query = "";
+    void selectLeaf(leaf);
   }
-  function reconcileImagePreviews(nextImages: readonly ChangedFileTreeLeaf[]): void {
-    const nextFiles = new Map<string, TimelineFileChange>();
-    let changed = knownImageFiles.size !== nextImages.length;
-    for (const image of nextImages) {
-      nextFiles.set(image.file.path, image.file);
-      if (knownImageFiles.get(image.file.path) !== image.file) changed = true;
+  function reconcilePreviews(nextLeaves: readonly ChangedFileTreeLeaf[]): void {
+    const next = new Map(nextLeaves.map(leaf => [leaf.file.path, leaf.file]));
+    let changed = next.size !== knownFiles.size;
+    const thumbnails = new Map(thumbnailPreviews);
+    for (const [path, source] of knownFiles) {
+      if (next.get(path) !== source) { thumbnails.delete(path); changed = true; }
     }
+    for (const [path, source] of next) if (knownFiles.get(path) !== source) changed = true;
     if (!changed) return;
-
-    const nextThumbnails = new Map(thumbnailPreviews);
-    const nextHeroes = new Map(heroPreviews);
-    for (const [path, previousFile] of knownImageFiles) {
-      if (nextFiles.get(path) === previousFile) continue;
-      nextThumbnails.delete(path);
-      nextHeroes.delete(path);
-    }
-    for (const [path, nextFile] of nextFiles) {
-      if (knownImageFiles.get(path) === nextFile) continue;
-      nextThumbnails.delete(path);
-      nextHeroes.delete(path);
-    }
-    knownImageFiles = nextFiles;
-    thumbnailPreviews = nextThumbnails;
-    heroPreviews = nextHeroes;
-    imageCacheGeneration += 1;
-
-    const selectedImage = nextImages.find(image => image.id === selectedFileId);
-    if (imageDetailOpen && selectedImage) void ensureHero(selectedImage.file.path);
+    knownFiles = next;
+    thumbnailPreviews = thumbnails;
+    cacheGeneration += 1;
   }
-
+  function synchronizePreview(leaf: ChangedFileTreeLeaf | undefined): void {
+    if (previewSource === leaf?.file) return;
+    previewSource = leaf?.file;
+    previewRequest += 1;
+    previewState = IDLE_PREVIEW;
+    mediaError = "";
+    mediaDuration = "";
+    if (leaf) void ensurePreview(leaf);
+  }
   function toggleDirectory(id: string, force?: boolean): void {
-    const next = new Set(expandedDirectoryIds);
-    const expanded = force ?? !next.has(id);
-    if (expanded) next.add(id);
-    else next.delete(id);
-    expandedDirectoryIds = next;
+    const expanded = new Set(expandedDirectoryIds);
+    if (force ?? !expanded.has(id)) expanded.add(id); else expanded.delete(id);
+    expandedDirectoryIds = expanded;
   }
-
   async function focusTreeNode(id: string): Promise<void> {
     activeNodeId = id;
     await tick();
-    const items = treeElement?.querySelectorAll<HTMLElement>("[role='treeitem']");
-    for (const item of items ?? []) {
-      if (item.dataset.treeNodeId === id) {
-        item.focus();
-        break;
-      }
+    for (const item of treeElement?.querySelectorAll<HTMLElement>("[role='treeitem']") ?? []) {
+      if (item.dataset.treeNodeId === id) { item.focus(); break; }
     }
   }
-
   async function handleTreeKeydown(event: KeyboardEvent, row: ChangedFileTreeRow, index: number): Promise<void> {
     const node = row.node;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      const next = visibleRows[Math.min(index + 1, visibleRows.length - 1)];
-      if (next) await focusTreeNode(next.node.id);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      const previous = visibleRows[Math.max(index - 1, 0)];
-      if (previous) await focusTreeNode(previous.node.id);
-      return;
-    }
-    if (event.key === "Home" || event.key === "End") {
-      event.preventDefault();
-      const edge = event.key === "Home" ? visibleRows[0] : visibleRows.at(-1);
-      if (edge) await focusTreeNode(edge.node.id);
-      return;
-    }
-    if (event.key === "ArrowRight" && node.kind === "directory") {
-      event.preventDefault();
-      if (!expandedDirectoryIds.has(node.id)) {
-        toggleDirectory(node.id, true);
-        return;
-      }
-      await tick();
-      const child = visibleRows.find(candidate => candidate.parentId === node.id);
-      if (child) await focusTreeNode(child.node.id);
-      return;
-    }
-    if (event.key === "ArrowLeft") {
-      if (node.kind === "directory" && expandedDirectoryIds.has(node.id)) {
-        event.preventDefault();
-        toggleDirectory(node.id, false);
-      } else if (row.parentId) {
-        event.preventDefault();
-        await focusTreeNode(row.parentId);
-      }
-      return;
-    }
-    if (event.key !== "Enter" && event.key !== " ") return;
+    let target: string | undefined;
+    if (event.key === "ArrowDown") target = visibleRows[Math.min(index + 1, visibleRows.length - 1)]?.node.id;
+    else if (event.key === "ArrowUp") target = visibleRows[Math.max(index - 1, 0)]?.node.id;
+    else if (event.key === "Home" || event.key === "End") target = (event.key === "Home" ? visibleRows[0] : visibleRows.at(-1))?.node.id;
+    else if (event.key === "ArrowRight" && node.kind === "directory") {
+      if (!expandedDirectoryIds.has(node.id)) toggleDirectory(node.id, true);
+      else target = visibleRows.find(candidate => candidate.parentId === node.id)?.node.id;
+    } else if (event.key === "ArrowLeft") {
+      if (node.kind === "directory" && expandedDirectoryIds.has(node.id)) toggleDirectory(node.id, false);
+      else target = row.parentId;
+    } else if (event.key === "Enter" || event.key === " ") {
+      if (node.kind === "directory") toggleDirectory(node.id); else await selectLeaf(node);
+    } else return;
     event.preventDefault();
-    if (node.kind === "directory") toggleDirectory(node.id);
-    else selectLeaf(node);
+    if (target) await focusTreeNode(target);
   }
-
-  function selectLeaf(leaf: ChangedFileTreeLeaf): void {
+  async function selectLeaf(leaf: ChangedFileTreeLeaf, focus = true): Promise<void> {
+    const opening = !detailOpen;
     selectedFileId = leaf.id;
     activeNodeId = leaf.id;
-    if (!isRasterImagePath(leaf.path)) {
-      imageDetailOpen = false;
-      return;
-    }
-    const openingDetail = !imageDetailOpen;
-    imageDetailOpen = true;
-    void ensureThumbnail(leaf.file.path);
-    void ensureHero(leaf.file.path);
-    if (openingDetail) void focusImageDetail();
+    detailOpen = true;
+    if (focus && opening) { await tick(); backButton?.focus(); }
   }
-
-  async function focusImageDetail(): Promise<void> {
-    await tick();
-    backButton?.focus();
-  }
-
   async function returnToTree(): Promise<void> {
-    imageDetailOpen = false;
+    detailOpen = false;
     await focusTreeNode(selectedFileId);
   }
-
+  function changeFilter(next: FileFilter): void { detailOpen = false; filter = next; }
   function previewErrorMessage(cause: unknown): string {
-    const fallback = "The image preview could not be loaded.";
-    const message = cause instanceof Error ? cause.message : fallback;
-    const normalized = message.replaceAll("\u0000", "").replace(/\s+/g, " ").trim();
-    if (!normalized) return fallback;
-    return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
+    const message = cause instanceof Error ? cause.message : "The file preview could not be loaded.";
+    return message.replaceAll("\u0000", "").replace(/\s+/g, " ").trim().slice(0, 240);
   }
-
-  async function ensureThumbnail(path: string, retry = false): Promise<void> {
+  async function ensurePreview(leaf: ChangedFileTreeLeaf): Promise<void> {
+    const request = ++previewRequest;
+    previewState = { status: "loading" };
+    mediaError = "";
+    mediaDuration = "";
+    try {
+      const preview = await loadPreview(leaf.file.path, HERO_MAX_DIMENSION);
+      if (!destroyed && request === previewRequest) previewState = { status: "ready", preview };
+    } catch (cause) {
+      if (!destroyed && request === previewRequest) previewState = { status: "error", message: previewErrorMessage(cause) };
+    }
+  }
+  async function ensureThumbnail(path: string): Promise<void> {
     const state = thumbnailPreviews.get(path);
-    if (!retry && (state?.status === "loading" || state?.status === "ready")) return;
-    const sourceFile = knownImageFiles.get(path);
-    const loadingStates = new Map(thumbnailPreviews);
-    loadingStates.set(path, { status: "loading" });
-    thumbnailPreviews = loadingStates;
+    if (state?.status === "loading" || state?.status === "ready") return;
+    const source = knownFiles.get(path);
+    thumbnailPreviews = new Map(thumbnailPreviews).set(path, { status: "loading" });
     try {
-      const preview = await loadImagePreview(path, THUMBNAIL_MAX_DIMENSION);
-      if (knownImageFiles.get(path) !== sourceFile) return;
-      const readyStates = new Map(thumbnailPreviews);
-      readyStates.set(path, { status: "ready", preview });
-      thumbnailPreviews = readyStates;
+      const preview = await loadPreview(path, THUMBNAIL_MAX_DIMENSION);
+      if (!destroyed && knownFiles.get(path) === source) thumbnailPreviews = new Map(thumbnailPreviews).set(path, { status: "ready", preview });
     } catch (cause) {
-      if (knownImageFiles.get(path) !== sourceFile) return;
-      const failedStates = new Map(thumbnailPreviews);
-      failedStates.set(path, { status: "error", message: previewErrorMessage(cause) });
-      thumbnailPreviews = failedStates;
+      if (!destroyed && knownFiles.get(path) === source) thumbnailPreviews = new Map(thumbnailPreviews).set(path, { status: "error", message: previewErrorMessage(cause) });
     }
   }
-
-  async function ensureHero(path: string, retry = false): Promise<void> {
-    const state = heroPreviews.get(path);
-    if (!retry && (state?.status === "loading" || state?.status === "ready")) return;
-    const sourceFile = knownImageFiles.get(path);
-    const loadingStates = new Map(heroPreviews);
-    loadingStates.set(path, { status: "loading" });
-    heroPreviews = loadingStates;
-    try {
-      const preview = await loadImagePreview(path, HERO_MAX_DIMENSION);
-      if (knownImageFiles.get(path) !== sourceFile) return;
-      const readyStates = new Map(heroPreviews);
-      readyStates.set(path, { status: "ready", preview });
-      heroPreviews = readyStates;
-    } catch (cause) {
-      if (knownImageFiles.get(path) !== sourceFile) return;
-      const failedStates = new Map(heroPreviews);
-      failedStates.set(path, { status: "error", message: previewErrorMessage(cause) });
-      heroPreviews = failedStates;
-    }
+  function lazyThumbnail(node: HTMLElement, path: string): { destroy(): void } {
+    if (!("IntersectionObserver" in window)) { void ensureThumbnail(path); return { destroy() {} }; }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      observer.disconnect();
+      void ensureThumbnail(path);
+    }, { root: node.closest(".image-thumbnail-rail"), rootMargin: "96px" });
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
   }
-
-  function lazyThumbnail(node: HTMLElement, initialPath: string): { update(path: string): void; destroy(): void } {
-    let path = initialPath;
-    let observer: IntersectionObserver | undefined;
-
-    const observe = (): void => {
-      observer?.disconnect();
-      if (!("IntersectionObserver" in window)) {
-        void ensureThumbnail(path);
-        return;
-      }
-      observer = new IntersectionObserver(
-        entries => {
-          if (!entries.some(entry => entry.isIntersecting)) return;
-          observer?.disconnect();
-          void ensureThumbnail(path);
-        },
-        { root: node.closest(".image-thumbnail-rail"), rootMargin: "96px 0px" },
-      );
-      observer.observe(node);
-    };
-
-    observe();
-    return {
-      update(nextPath: string): void {
-        path = nextPath;
-        observe();
-      },
-      destroy(): void {
-        observer?.disconnect();
-      },
-    };
-  }
-
   async function handleThumbnailKeydown(event: KeyboardEvent, index: number): Promise<void> {
-    let nextIndex: number | undefined;
-    if (event.key === "ArrowDown") nextIndex = Math.min(index + 1, imageLeaves.length - 1);
-    else if (event.key === "ArrowUp") nextIndex = Math.max(index - 1, 0);
-    else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = imageLeaves.length - 1;
+    const nextIndex = event.key === "ArrowRight" ? Math.min(index + 1, imageLeaves.length - 1)
+      : event.key === "ArrowLeft" ? Math.max(index - 1, 0)
+      : event.key === "Home" ? 0 : event.key === "End" ? imageLeaves.length - 1 : undefined;
     if (nextIndex === undefined) return;
     event.preventDefault();
-    const nextLeaf = imageLeaves[nextIndex];
-    if (!nextLeaf) return;
-    selectLeaf(nextLeaf);
+    const next = imageLeaves[nextIndex];
+    if (!next) return;
+    await selectLeaf(next, false);
     await tick();
-    const buttons = thumbnailRail?.querySelectorAll<HTMLButtonElement>("[data-image-thumbnail]");
-    buttons?.[nextIndex]?.focus();
+    thumbnailRail?.querySelectorAll<HTMLButtonElement>("button")[nextIndex]?.focus();
+  }
+  function initializeTextPreview(node: HTMLTextAreaElement): void {
+    node.setSelectionRange(0, 0);
+  }
+  function loadedMedia(event: Event): void {
+    const media = event.currentTarget;
+    if (media instanceof HTMLMediaElement && Number.isFinite(media.duration)) mediaDuration = formatDuration(media.duration * 1_000);
   }
 </script>
 
 <section class="file-activity-panel" aria-labelledby="file-activity-title">
   <header class="panel-header">
-    <div>
-      <h2 id="file-activity-title">Files</h2>
-      <p>{leaves.length} changed file{leaves.length === 1 ? "" : "s"}</p>
-    </div>
+    <div class="panel-heading"><h2 id="file-activity-title">Files</h2><span>{allLeaves.length}</span></div>
+    <p>Artifacts and changes from this chat</p>
+    {#if allLeaves.length > 0}
+      <input class="file-search" type="search" aria-label="Filter files by path" placeholder="Find a file…" bind:value={query} oninput={() => { detailOpen = false; }} />
+      <div class="file-filters" role="group" aria-label="File types">
+        {#each FILTERS.filter(item => item.kind === "all" || (filterCounts.get(item.kind) ?? 0) > 0 || item.kind === filter) as item (item.kind)}
+          <button type="button" class:is-active={filter === item.kind} aria-pressed={filter === item.kind} onclick={() => changeFilter(item.kind)}>{item.label}<span>{filterCounts.get(item.kind) ?? 0}</span></button>
+        {/each}
+      </div>
+    {/if}
   </header>
-
   {#if loading}
-    <div class="panel-state" role="status" aria-live="polite">
-      <strong>Loading changed files…</strong>
-      <p>Collecting the latest successful changes from this chat.</p>
-    </div>
+    <div class="panel-state" role="status"><strong>Loading files…</strong><p>Collecting successful outputs from this chat.</p></div>
   {:else if error}
-    <div class="panel-state panel-error" role="alert">
-      <strong>Changed files are unavailable</strong>
-      <p>{error}</p>
-      {#if onRetry}
-        <button type="button" class="panel-button" onclick={onRetry}>Retry</button>
-      {/if}
-    </div>
+    <div class="panel-state" role="alert"><strong>Files are unavailable</strong><p>{error}</p>{#if onRetry}<button type="button" class="panel-button" onclick={onRetry}>Retry</button>{/if}</div>
+  {:else if allLeaves.length === 0}
+    <div class="panel-state"><strong>No files yet</strong><p>Generated artifacts and files successfully written or edited will appear here.</p></div>
   {:else if leaves.length === 0}
-    <div class="panel-state" role="status">
-      <strong>No changed files yet</strong>
-      <p>Files successfully written or edited in this chat will appear here.</p>
-    </div>
-  {:else if selectedImageLeaf}
-    <div class="image-detail">
-      <header class="detail-header">
-        <button bind:this={backButton} type="button" class="back-button" onclick={() => void returnToTree()}>
-          <AltArrowLeft size={16} aria-hidden="true" />
-          <span>All files</span>
-        </button>
-        <div class="detail-heading">
-          <span class="category-icon"><Gallery size={17} aria-hidden="true" /></span>
-          <div>
-            <h3 title={selectedImageLeaf.file.path}>{selectedImageLeaf.name}</h3>
-            <p>{imageLeaves.length} changed image{imageLeaves.length === 1 ? "" : "s"}</p>
-          </div>
+    <div class="panel-state" role="status"><strong>No matching files</strong><p>Try another name or file type.</p><button type="button" class="panel-button" onclick={() => { query = ""; changeFilter("all"); }}>Clear filters</button></div>
+  {:else if detailOpen && selectedLeaf}
+    <div class="file-detail">
+      <div class="detail-navigation">
+        <button bind:this={backButton} type="button" class="back-button" onclick={() => void returnToTree()}><AltArrowLeft size={16} aria-hidden="true" />All files</button>
+        <div class="step-controls">
+          <span>{selectedIndex + 1} / {leaves.length}</span>
+          <button type="button" aria-label="Previous file" disabled={selectedIndex <= 0} onclick={() => void selectLeaf(leaves[selectedIndex - 1]!, false)}><AltArrowLeft size={16} aria-hidden="true" /></button>
+          <button type="button" aria-label="Next file" disabled={selectedIndex >= leaves.length - 1} onclick={() => void selectLeaf(leaves[selectedIndex + 1]!, false)}><AltArrowRight size={16} aria-hidden="true" /></button>
         </div>
-      </header>
-
-      <div class="image-browser">
-        <div class="image-thumbnail-rail" bind:this={thumbnailRail} role="group" aria-label="Changed images">
-          {#each imageLeaves as image, index (`${image.id}:${imageCacheGeneration}`)}
+      </div>
+      <div class="detail-heading"><WorkspaceFileIcon kind={workspaceFileKind(selectedLeaf.path)} size={20} /><div><h3 title={selectedLeaf.name}>{selectedLeaf.name}</h3><p>{fileDispositionLabel(selectedLeaf.file)} · {workspaceFileKind(selectedLeaf.path)}</p></div></div>
+      <div class="preview-area">
+        {#if previewState.status === "ready"}
+          {@const preview = previewState.preview}
+          {#key selectedLeaf.file}
+            {#if preview.kind === "image"}
+              <figure class="image-preview"><img src={preview.dataUrl} alt={`Preview of ${selectedLeaf.name}`} decoding="async" onerror={() => { mediaError = "This image cannot be displayed here. Open the file in a compatible application."; }} /></figure>
+            {:else if preview.kind === "video"}
+              <!-- svelte-ignore a11y_media_has_caption (Local artifact preview; captions are not supplied by the source file.) -->
+              <video controls playsinline preload="metadata" src={preview.dataUrl} aria-label={`Preview of ${selectedLeaf.name}`} onloadedmetadata={loadedMedia} onerror={() => { mediaError = "This video format cannot be played here. Open the file in a compatible application."; }}></video>
+            {:else if preview.kind === "audio"}
+              <div class="audio-preview"><WorkspaceFileIcon kind="audio" size={44} /><strong>{selectedLeaf.name}</strong><audio controls preload="metadata" src={preview.dataUrl} aria-label={`Preview of ${selectedLeaf.name}`} onloadedmetadata={loadedMedia} onerror={() => { mediaError = "This audio format cannot be played here. Open the file in a compatible application."; }}></audio></div>
+            {:else if preview.kind === "text"}
+              <textarea class="text-preview" use:initializeTextPreview readonly wrap="off" spellcheck="false" aria-label={`Contents of ${selectedLeaf.name}`} value={preview.text}></textarea>
+              {#if preview.truncated}<p class="preview-note">Preview truncated. Open the file to read the rest.</p>{/if}
+            {:else if preview.kind === "unavailable"}
+              <div class="preview-state"><WorkspaceFileIcon kind={workspaceFileKind(selectedLeaf.path)} size={32} /><strong>Preview unavailable</strong><p>{preview.message}</p></div>
+            {/if}
+          {/key}
+          {#if mediaError}<p class="preview-note" role="alert">{mediaError}</p>{/if}
+          <div class="preview-metadata">
+            {#if preview.byteSize !== undefined}<span>{formatBytes(preview.byteSize)}</span>{/if}
+            {#if preview.kind === "image"}<span>Preview {preview.width} × {preview.height}</span>{/if}
+            {#if mediaDuration}<span>{mediaDuration}</span>{/if}
+            {#if preview.mimeType}<span>{preview.mimeType}</span>{/if}
+          </div>
+        {:else if previewState.status === "error"}
+          <div class="preview-state" role="alert"><strong>Preview unavailable</strong><p>{previewState.message}</p><button type="button" class="panel-button" onclick={() => void ensurePreview(selectedLeaf!)}>Retry preview</button></div>
+        {:else}
+          <div class="preview-state" role="status"><strong>Loading preview…</strong></div>
+        {/if}
+      </div>
+      {#if workspaceFileKind(selectedLeaf.path) === "image" && imageLeaves.length > 1}
+        <div class="image-thumbnail-rail" bind:this={thumbnailRail} role="group" aria-label="Images">
+          {#each imageLeaves as image, index (`${image.id}:${cacheGeneration}`)}
             {@const thumbnail = thumbnailPreviews.get(image.file.path) ?? IDLE_PREVIEW}
-            <button
-              type="button"
-              class="image-thumbnail"
-              class:is-selected={image.id === selectedImageLeaf.id}
-              aria-label={`Show ${image.name}`}
-              aria-pressed={image.id === selectedImageLeaf.id}
-              tabindex={image.id === selectedImageLeaf.id ? 0 : -1}
-              title={image.file.path}
-              data-image-thumbnail
-              use:lazyThumbnail={image.file.path}
-              onclick={() => void selectLeaf(image)}
-              onkeydown={(event) => void handleThumbnailKeydown(event, index)}
-            >
-              {#if thumbnail.status === "ready"}
-                <img src={thumbnail.preview.dataUrl} alt="" loading="lazy" decoding="async" />
-              {:else if thumbnail.status === "error"}
-                <span class="thumbnail-error" title={thumbnail.message}>Retry</span>
-              {:else}
-                <span class="thumbnail-loading" aria-hidden="true"></span>
-              {/if}
+            <button type="button" class="image-thumbnail" class:is-selected={image.id === selectedLeaf.id} aria-label={`Show ${image.name}`} aria-pressed={image.id === selectedLeaf.id} tabindex={image.id === selectedLeaf.id ? 0 : -1} title={image.file.path} use:lazyThumbnail={image.file.path} onclick={() => void selectLeaf(image, false)} onkeydown={event => void handleThumbnailKeydown(event, index)}>
+              {#if thumbnail.status === "ready" && thumbnail.preview.kind === "image"}<img src={thumbnail.preview.dataUrl} alt="" loading="lazy" decoding="async" />{:else}<WorkspaceFileIcon kind="image" />{/if}
             </button>
           {/each}
         </div>
-
-        <div class="image-hero" aria-live="polite">
-          {#if selectedHeroState.status === "ready"}
-            <figure>
-              <img
-                src={selectedHeroState.preview.dataUrl}
-                alt={`Preview of ${selectedImageLeaf.name}`}
-                decoding="async"
-              />
-              <figcaption>
-                <span title={selectedImageLeaf.file.path}>{selectedImageLeaf.file.path}</span>
-                <span>{selectedHeroState.preview.width} × {selectedHeroState.preview.height}</span>
-              </figcaption>
-            </figure>
-          {:else if selectedHeroState.status === "error"}
-            <div class="preview-state preview-error" role="alert">
-              <strong>Preview unavailable</strong>
-              <p>{selectedHeroState.message}</p>
-              <button type="button" class="panel-button" onclick={() => void ensureHero(selectedImageLeaf.file.path, true)}>
-                Retry preview
-              </button>
-            </div>
-          {:else}
-            <div class="preview-state" role="status">
-              <span class="hero-loading" aria-hidden="true"></span>
-              <strong>Loading preview…</strong>
-            </div>
-          {/if}
-        </div>
-      </div>
-
-      <footer class="selection-footer">
-        <div class="selection-summary">
-          <span class="category-icon"><Gallery size={16} aria-hidden="true" /></span>
-          <span class="selection-path" title={selectedImageLeaf.file.path}>{selectedImageLeaf.file.path}</span>
-        </div>
-        <div class="selection-actions">
-          <button type="button" class="panel-button" onclick={() => onOpenDiff(selectedImageLeaf.file.path)}>Review diff</button>
-          <button type="button" class="panel-button" onclick={() => onOpenFile(selectedImageLeaf.file.path)}>Open file</button>
-        </div>
-      </footer>
+      {/if}
+      <footer class="selection-footer"><p class="selection-path" title={selectedLeaf.file.path}>{selectedLeaf.file.path}</p><div class="selection-actions">
+        {#if isTextWorkspaceFile(selectedLeaf.path) && selectedLeaf.file.operation !== "generate"}<button type="button" class="panel-button" onclick={() => onOpenDiff(selectedLeaf.file.path)}>Review diff</button>{/if}
+        <button type="button" class="panel-button" onclick={() => onOpenFile(selectedLeaf.file.path)}>Open file</button>
+      </div></footer>
     </div>
   {:else}
-    <div class="tree-scroll">
-      <div bind:this={treeElement} class="changed-file-tree" role="tree" aria-label="Changed files">
-        {#each visibleRows as row, index (row.node.id)}
-          <button
-            type="button"
-            role="treeitem"
-            class="tree-row"
-            class:is-selected={row.node.kind === "file" && row.node.id === selectedFileId}
-            aria-level={row.depth}
-            aria-expanded={row.node.kind === "directory" ? expandedDirectoryIds.has(row.node.id) : undefined}
-            aria-selected={row.node.kind === "file" ? row.node.id === selectedFileId : undefined}
-            tabindex={row.node.id === activeNodeId || (!activeNodeId && index === 0) ? 0 : -1}
-            title={row.node.kind === "file" ? row.node.file.path : row.node.path}
-            data-tree-node-id={row.node.id}
-            style={`--tree-indent: ${(row.depth - 1) * 17}px`}
-            onfocus={() => { activeNodeId = row.node.id; }}
-            onclick={() => row.node.kind === "directory" ? toggleDirectory(row.node.id) : void selectLeaf(row.node)}
-            onkeydown={(event) => void handleTreeKeydown(event, row, index)}
-          >
-            {#if row.node.kind === "directory"}
-              <span class="tree-chevron" class:is-expanded={expandedDirectoryIds.has(row.node.id)}>
-                <AltArrowRight size={14} aria-hidden="true" />
-              </span>
-              <span class="category-icon"><Folder size={16} aria-hidden="true" /></span>
-              <span class="tree-name">{row.node.name}</span>
-            {:else}
-              {@const disposition = fileDispositionLabel(row.node.file)}
-              <span class="tree-spacer" aria-hidden="true"></span>
-              <span class="category-icon">
-                {#if isRasterImagePath(row.node.path)}
-                  <Gallery size={16} aria-hidden="true" />
-                {:else}
-                  <Document size={16} aria-hidden="true" />
-                {/if}
-              </span>
-              <span class="tree-name">{row.node.name}</span>
-              <span class="disposition disposition-{disposition.toLowerCase()}">
-                {#if disposition === "Created"}
-                  <AddCircle size={13} aria-hidden="true" />
-                {:else if disposition === "Edited"}
-                  <Pen size={13} aria-hidden="true" />
-                {:else}
-                  <Diskette size={13} aria-hidden="true" />
-                {/if}
-                <span>{disposition}</span>
-              </span>
-            {/if}
-          </button>
-        {/each}
-      </div>
-    </div>
-
-    {#if selectedLeaf}
-      <footer class="selection-footer">
-        <div class="selection-summary">
-          <span class="category-icon">
-            {#if isRasterImagePath(selectedLeaf.path)}
-              <Gallery size={16} aria-hidden="true" />
-            {:else}
-              <Document size={16} aria-hidden="true" />
-            {/if}
-          </span>
-          <span class="selection-path" title={selectedLeaf.file.path}>{selectedLeaf.file.path}</span>
-        </div>
-        <div class="selection-actions">
-          <button type="button" class="panel-button" onclick={() => onOpenDiff(selectedLeaf.file.path)}>Review diff</button>
-          <button type="button" class="panel-button" onclick={() => onOpenFile(selectedLeaf.file.path)}>Open file</button>
-        </div>
-      </footer>
-    {/if}
+    <div class="tree-scroll"><div bind:this={treeElement} class="changed-file-tree" role="tree" aria-label="Files and artifacts">
+      {#each visibleRows as row, index (row.node.id)}
+        <button type="button" role="treeitem" class="tree-row" class:is-selected={row.node.kind === "file" && row.node.id === selectedFileId} aria-level={row.depth} aria-expanded={row.node.kind === "directory" ? expandedDirectoryIds.has(row.node.id) : undefined} aria-selected={row.node.kind === "file" ? row.node.id === selectedFileId : undefined} tabindex={row.node.id === activeNodeId || (!activeNodeId && index === 0) ? 0 : -1} title={row.node.kind === "file" ? row.node.file.path : row.node.path} data-tree-node-id={row.node.id} style={`--tree-indent: ${(row.depth - 1) * 14}px`} onfocus={() => { activeNodeId = row.node.id; }} onclick={() => row.node.kind === "directory" ? toggleDirectory(row.node.id) : void selectLeaf(row.node)} onkeydown={event => void handleTreeKeydown(event, row, index)}>
+          {#if row.node.kind === "directory"}
+            <span class="tree-chevron" class:is-expanded={expandedDirectoryIds.has(row.node.id)}><AltArrowRight size={14} aria-hidden="true" /></span><Folder size={16} aria-hidden="true" /><span class="tree-name">{row.node.name}</span>
+          {:else}
+            <span class="tree-spacer" aria-hidden="true"></span><WorkspaceFileIcon kind={workspaceFileKind(row.node.path)} /><span class="tree-label"><span class="tree-name">{row.node.name}</span><span class="file-kind">{workspaceFileKind(row.node.path)}</span></span><span class="disposition">{fileDispositionLabel(row.node.file)}</span>
+          {/if}
+        </button>
+      {/each}
+    </div></div>
+    {#if selectedLeaf}<footer class="selection-footer"><p class="selection-path" title={selectedLeaf.file.path}>{selectedLeaf.file.path}</p><div class="selection-actions"><button type="button" class="panel-button" onclick={() => void selectLeaf(selectedLeaf!)}>Preview</button><button type="button" class="panel-button" onclick={() => onOpenFile(selectedLeaf.file.path)}>Open file</button></div></footer>{/if}
   {/if}
 </section>
 
 <style>
-  .file-activity-panel {
-    display: flex;
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    flex-direction: column;
-    color: var(--foreground);
-    background: var(--shell);
-  }
-
-  .panel-header {
-    flex: 0 0 auto;
-    border-bottom: 1px solid var(--line);
-    padding: 14px 16px;
-  }
-
-  .panel-header h2,
-  .detail-heading h3 {
-    margin: 0;
-    color: var(--foreground-strong);
-    font: 600 0.875rem/1.25 var(--font-sans);
-  }
-
-  .panel-header p,
-  .detail-heading p {
-    margin: 3px 0 0;
-    color: var(--foreground-muted);
-    font-size: 0.75rem;
-    line-height: 1.35;
-  }
-
-  .tree-scroll {
-    min-height: 0;
-    flex: 1 1 auto;
-    overflow: auto;
-    padding: 8px;
-    overscroll-behavior: contain;
-  }
-
-  .changed-file-tree {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .tree-row {
-    display: flex;
-    width: 100%;
-    min-height: 34px;
-    align-items: center;
-    gap: 7px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-small);
-    padding: 5px 8px 5px calc(7px + var(--tree-indent));
-    color: var(--foreground);
-    background: transparent;
-    text-align: start;
-    cursor: pointer;
-  }
-
-  .tree-row:hover {
-    background: var(--shell-hover);
-  }
-
-  .tree-row.is-selected {
-    border-color: var(--accent-boundary);
-    color: var(--selection-foreground);
-    background: var(--selection-surface);
-  }
-
-  .tree-row:focus-visible,
-  .image-thumbnail:focus-visible,
-  .panel-button:focus-visible,
-  .back-button:focus-visible {
-    outline: 2px solid var(--accent-boundary);
-    outline-offset: 1px;
-  }
-
-  .tree-chevron,
-  .tree-spacer,
-  .category-icon {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .tree-chevron,
-  .tree-spacer {
-    width: 14px;
-    height: 18px;
-  }
-
-  .tree-chevron {
-    transition: transform 100ms ease;
-  }
-
-  .tree-chevron.is-expanded {
-    transform: rotate(90deg);
-  }
-
-  .category-icon {
-    width: 18px;
-    height: 18px;
-    color: var(--foreground-muted);
-  }
-
-  .tree-row.is-selected .category-icon {
-    color: currentColor;
-  }
-
-  .tree-name,
-  .selection-path,
-  .detail-heading h3,
-  .image-hero figcaption span:first-child {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .tree-name {
-    flex: 1 1 auto;
-    font: 0.8125rem/1.3 var(--font-sans);
-  }
-
-  .disposition {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 4px;
-    color: var(--foreground-muted);
-    font-size: 0.6875rem;
-    line-height: 1;
-  }
-
-  .disposition-created {
-    color: var(--success);
-  }
-
-  .disposition-edited {
-    color: var(--foreground);
-  }
-
-  .panel-state {
-    display: flex;
-    min-height: 176px;
-    flex: 1 1 auto;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 7px;
-    padding: 24px 16px;
-    color: var(--foreground-muted);
-  }
-
-  .panel-state strong,
-  .preview-state strong {
-    color: var(--foreground);
-    font-size: 0.8125rem;
-  }
-
-  .panel-state p,
-  .preview-state p {
-    max-width: 54ch;
-    margin: 0;
-    font-size: 0.8125rem;
-    line-height: 1.5;
-  }
-
-  .panel-error,
-  .preview-error {
-    color: var(--foreground);
-  }
-
-  .image-detail {
-    display: flex;
-    min-height: 0;
-    flex: 1 1 auto;
-    flex-direction: column;
-  }
-
-  .detail-header {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    gap: 10px;
-    border-bottom: 1px solid var(--line-soft);
-    padding: 10px 12px;
-  }
-
-  .back-button {
-    display: inline-flex;
-    width: fit-content;
-    min-height: 28px;
-    align-items: center;
-    gap: 5px;
-    border: 0;
-    border-radius: var(--radius-small);
-    padding: 3px 5px 3px 2px;
-    color: var(--foreground);
-    background: transparent;
-    cursor: pointer;
-    font-size: 0.75rem;
-  }
-
-  .back-button:hover {
-    background: var(--shell-hover);
-  }
-
-  .detail-heading,
-  .selection-summary,
-  .selection-actions {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .detail-heading > div {
-    min-width: 0;
-  }
-
-  .image-browser {
-    display: flex;
-    min-height: 0;
-    flex: 1 1 auto;
-    gap: 10px;
-    padding: 10px;
-    background: var(--chat-canvas);
-  }
-
-  .image-thumbnail-rail {
-    display: flex;
-    width: 68px;
-    min-width: 68px;
-    min-height: 0;
-    flex-direction: column;
-    gap: 7px;
-    overflow-y: auto;
-    padding: 2px;
-    overscroll-behavior: contain;
-  }
-
-  .image-thumbnail {
-    display: flex;
-    width: 62px;
-    height: 62px;
-    min-height: 62px;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-small);
-    padding: 3px;
-    color: var(--foreground-muted);
-    background: var(--shell-raised);
-    cursor: pointer;
-  }
-
-  .image-thumbnail:hover {
-    border-color: var(--foreground-muted);
-  }
-
-  .image-thumbnail.is-selected {
-    border-color: var(--accent-boundary);
-    box-shadow: 0 0 0 1px var(--accent-boundary);
-  }
-
-  .image-thumbnail img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .thumbnail-loading,
-  .hero-loading {
-    display: block;
-    border-radius: var(--radius-small);
-    background: var(--shell-hover);
-  }
-
-  .thumbnail-loading {
-    width: 100%;
-    height: 100%;
-  }
-
-  .thumbnail-error {
-    padding: 4px;
-    font-size: 0.6875rem;
-  }
-
-  .image-hero {
-    display: flex;
-    min-width: 0;
-    min-height: 0;
-    flex: 1 1 auto;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-small);
-    background: var(--shell);
-  }
-
-  .image-hero figure {
-    display: flex;
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    margin: 0;
-    flex-direction: column;
-  }
-
-  .image-hero figure > img {
-    width: 100%;
-    min-height: 0;
-    flex: 1 1 auto;
-    object-fit: contain;
-  }
-
-  .image-hero figcaption {
-    display: flex;
-    flex: 0 0 auto;
-    justify-content: space-between;
-    gap: 12px;
-    border-top: 1px solid var(--line-soft);
-    padding: 7px 9px;
-    color: var(--foreground-muted);
-    font: 0.6875rem/1.35 var(--font-mono);
-  }
-
-  .image-hero figcaption span:first-child {
-    flex: 1 1 auto;
-  }
-
-  .image-hero figcaption span:last-child {
-    flex: 0 0 auto;
-  }
-
-  .preview-state {
-    display: flex;
-    max-width: 34ch;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 18px;
-    color: var(--foreground-muted);
-    text-align: center;
-  }
-
-  .hero-loading {
-    width: 38px;
-    height: 38px;
-  }
-
-  .selection-footer {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    gap: 9px;
-    border-top: 1px solid var(--line);
-    padding: 10px 12px;
-    background: var(--shell-raised);
-  }
-
-  .selection-path {
-    flex: 1 1 auto;
-    color: var(--foreground);
-    font: 0.75rem/1.35 var(--font-mono);
-  }
-
-  .selection-actions {
-    justify-content: flex-end;
-  }
-
-  .panel-button {
-    min-height: 30px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-small);
-    padding: 5px 9px;
-    color: var(--foreground);
-    background: transparent;
-    cursor: pointer;
-    font-size: 0.75rem;
-    line-height: 1.2;
-  }
-
-  .panel-button:hover:not(:disabled) {
-    background: var(--shell-hover);
-  }
-
-  @media (max-width: 420px) {
-    .tree-row {
-      padding-inline-end: 6px;
-    }
-
-    .disposition span {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0 0 0 0);
-      white-space: nowrap;
-    }
-
-    .image-browser {
-      gap: 7px;
-      padding: 8px;
-    }
-
-    .image-thumbnail-rail {
-      width: 56px;
-      min-width: 56px;
-    }
-
-    .image-thumbnail {
-      width: 50px;
-      height: 50px;
-      min-height: 50px;
-    }
-  }
+  .file-activity-panel { container-type: inline-size; display: flex; width: 100%; height: 100%; min-height: 0; flex-direction: column; color: var(--foreground); background: var(--shell); font: 14px/1.5 var(--font-ui); }
+  .panel-header { flex: 0 0 auto; border-bottom: 1px solid var(--line); padding: 16px; }
+  .panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h2, h3 { margin: 0; color: var(--foreground-strong); font-size: 16px; font-weight: 600; }
+  .panel-heading > span, .panel-header > p, .detail-heading p { color: var(--foreground-muted); font-size: 12px; }
+  .panel-header > p, .detail-heading p { margin: 3px 0 0; }
+  .file-search { box-sizing: border-box; width: 100%; min-height: 36px; margin-top: 14px; border: 1px solid var(--line); border-radius: var(--radius-small); padding: 7px 9px; background: var(--shell-raised); color: var(--foreground); font: inherit; font-size: 13px; }
+  .file-search::placeholder { color: var(--foreground-muted); }
+  .file-filters { display: flex; gap: 5px; overflow-x: auto; margin-top: 10px; padding: 2px; scrollbar-width: thin; }
+  .file-filters button { display: flex; gap: 5px; flex: 0 0 auto; min-height: 32px; border: 1px solid var(--line-soft); border-radius: var(--radius-small); padding: 4px 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; cursor: pointer; }
+  .file-filters button span { color: var(--foreground-muted); font-variant-numeric: tabular-nums; }
+  .file-filters button.is-active { border-color: var(--accent-boundary); background: var(--selection-surface); color: var(--selection-foreground); }
+  .file-filters button.is-active span { color: inherit; }
+  .tree-scroll { min-height: 0; flex: 1 1 auto; overflow: auto; padding: 10px; overscroll-behavior: contain; }
+  .changed-file-tree { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+  .tree-row { display: flex; width: 100%; min-height: 40px; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: var(--radius-small); padding: 7px 7px 7px calc(4px + var(--tree-indent)); color: var(--foreground); background: transparent; text-align: start; cursor: pointer; }
+  .tree-row:hover, button:hover:not(:disabled) { background: var(--shell-hover); }
+  .tree-row.is-selected { color: var(--selection-foreground); background: var(--selection-surface); border-color: var(--accent-boundary); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--focus-inner); outline-offset: 2px; box-shadow: 0 0 0 4px var(--focus-outer); }
+  .tree-chevron, .tree-spacer { display: inline-flex; width: 12px; height: 16px; flex: 0 0 auto; align-items: center; }
+  .tree-chevron { transition: transform 100ms ease; }
+  .tree-chevron.is-expanded { transform: rotate(90deg); }
+  .tree-row :global(svg), .detail-heading :global(svg) { flex-shrink: 0; }
+  .tree-label { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; }
+  .tree-name, h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-name { font: 13px/1.4 var(--font-ui); }
+  .file-kind, .disposition { color: var(--foreground-muted); font: 11px/1.5 var(--font-ui); }
+  .file-kind { text-transform: capitalize; }
+  .disposition { flex: 0 0 auto; }
+  .tree-row.is-selected :is(.file-kind, .disposition) { color: inherit; }
+  .panel-state { display: flex; min-height: 160px; flex: 1 1 auto; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; padding: 24px 16px; color: var(--foreground-muted); }
+  .panel-state strong, .preview-state strong { color: var(--foreground); }
+  .panel-state p, .preview-state p { margin: 0; overflow-wrap: anywhere; }
+  .file-detail { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+  .detail-navigation { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; }
+  .back-button, .step-controls button { display: inline-flex; min-height: 32px; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: var(--radius-small); padding: 5px; color: var(--foreground); background: transparent; cursor: pointer; font: inherit; font-size: 12px; }
+  .step-controls { display: flex; align-items: center; gap: 4px; }
+  .step-controls > span { margin-right: 4px; color: var(--foreground-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .step-controls button { width: 32px; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .detail-heading { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 4px 16px 14px; }
+  .detail-heading > div { min-width: 0; }
+  .detail-heading h3 { font-size: 14px; }
+  .detail-heading p { text-transform: capitalize; }
+  .preview-area { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: auto; margin: 0 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-small); background: var(--chat-canvas); }
+  .image-preview { display: flex; min-height: 160px; flex: 1 1 auto; margin: 0; }
+  .image-preview img { width: 100%; min-width: 0; min-height: 0; object-fit: contain; }
+  video { width: 100%; max-height: 100%; margin-block: auto; background: #000; }
+  .audio-preview { display: flex; min-height: 180px; flex: 1 1 auto; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 16px 10px; }
+  .audio-preview strong { max-width: 100%; overflow-wrap: anywhere; text-align: center; font-size: 13px; }
+  audio { width: 100%; min-width: 0; }
+  .text-preview { width: 100%; min-width: 0; min-height: 150px; flex: 1 1 auto; overflow: auto; margin: 0; border: 0; padding: 12px; color: var(--foreground); background: transparent; resize: none; font: 12px/1.6 var(--font-mono); tab-size: 4; }
+  .preview-note { margin: 0; padding: 10px 12px; border-top: 1px solid var(--line-soft); color: var(--foreground-muted); font-size: 12px; overflow-wrap: anywhere; }
+  .preview-metadata { display: flex; flex-wrap: wrap; flex: 0 0 auto; gap: 4px 12px; border-top: 1px solid var(--line-soft); padding: 8px 10px; color: var(--foreground-muted); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+  .preview-state { display: flex; min-height: 180px; flex: 1 1 auto; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; color: var(--foreground-muted); text-align: center; font-size: 13px; }
+  .image-thumbnail-rail { display: flex; width: auto; min-width: 0; min-height: 0; flex: 0 0 auto; gap: 8px; overflow-x: auto; padding: 12px 14px; overscroll-behavior: contain; }
+  .image-thumbnail { display: flex; width: 64px; height: 48px; flex: 0 0 auto; align-items: center; justify-content: center; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-small); padding: 2px; color: var(--foreground-muted); background: var(--shell-raised); cursor: pointer; }
+  .image-thumbnail.is-selected { border-color: var(--accent-boundary); box-shadow: 0 0 0 1px var(--accent-boundary); }
+  .image-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
+  .selection-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 16px; margin-top: 12px; background: var(--shell); }
+  .selection-path { margin: 0 0 9px; color: var(--foreground-muted); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+  .selection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .panel-button { min-height: 34px; border: 1px solid var(--line); border-radius: var(--radius-small); padding: 6px 10px; color: var(--foreground); background: transparent; cursor: pointer; font: inherit; font-size: 12px; }
+  @container (max-width: 300px) { .disposition { display: none; } .tree-row { gap: 5px; } }
+  @media (prefers-reduced-motion: reduce) { .tree-chevron { transition: none; } }
+  @media (forced-colors: active) { .tree-row.is-selected, .file-filters button.is-active, .image-thumbnail.is-selected { outline: 2px solid Highlight; } }
 </style>

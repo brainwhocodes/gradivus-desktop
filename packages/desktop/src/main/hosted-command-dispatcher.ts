@@ -454,11 +454,11 @@ export class HostedCommandDispatcher {
 					await this.#host.loadFileDiff(record.id, command.payload.target),
 				);
 			}
-			case "loadWorkspaceImage": {
+			case "loadWorkspaceFilePreview": {
 				const record = requiredSession(authorized);
-				return this.#projection.projectHostedImage(
+				return this.#projection.projectHostedFilePreview(
 					record,
-					await this.#host.loadWorkspaceImage(record.id, command.payload.target, command.payload.maxDimension),
+					await this.#host.loadWorkspaceFilePreview(record.id, command.payload.target, command.payload.maxDimension),
 				);
 			}
 			case "openWorkspaceFile": {

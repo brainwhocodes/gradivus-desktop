@@ -2,36 +2,37 @@
 	import AddCircle from "@solar-icons/svelte/linear/add-circle";
 	import ArrowRightUp from "@solar-icons/svelte/linear/arrow-right-up";
 	import Diskette from "@solar-icons/svelte/linear/diskette";
-	import DocumentText from "@solar-icons/svelte/linear/document-text";
 	import Eye from "@solar-icons/svelte/linear/eye";
-	import Gallery from "@solar-icons/svelte/linear/gallery";
 	import Pen2 from "@solar-icons/svelte/linear/pen-2";
 	import type {
 		TurnFileDisposition,
 		TurnFileSummary,
 		TurnFileSummaryEntry,
 	} from "../../turn-file-summary";
+	import { isTextWorkspaceFile } from "../../workspace-file-types";
+	import WorkspaceFileIcon from "../atoms/WorkspaceFileIcon.svelte";
 
 	interface Props {
 		summary: TurnFileSummary;
 		onreview: (path: string) => void;
 		onopen: (path: string) => void;
-		onimage: (path: string) => void;
+		onpreview: (path: string) => void;
 	}
 
 	interface FileGroup {
 		disposition: TurnFileDisposition;
-		label: "Created" | "Edited" | "Written";
+		label: "Created" | "Edited" | "Written" | "Generated";
 		files: TurnFileSummaryEntry[];
 	}
 
 	const GROUPS: ReadonlyArray<Omit<FileGroup, "files">> = [
+		{ disposition: "generated", label: "Generated" },
 		{ disposition: "created", label: "Created" },
 		{ disposition: "edited", label: "Edited" },
 		{ disposition: "written", label: "Written" },
 	];
 
-	let { summary, onreview, onopen, onimage }: Props = $props();
+	let { summary, onreview, onopen, onpreview }: Props = $props();
 	const groups = $derived(
 		GROUPS.map(group => ({
 			...group,
@@ -40,8 +41,8 @@
 	);
 
 	function primaryAction(file: TurnFileSummaryEntry): void {
-		if (file.kind === "image") onimage(file.path);
-		else onreview(file.path);
+		if (isTextWorkspaceFile(file.path) && file.disposition !== "generated") onreview(file.path);
+		else onpreview(file.path);
 	}
 </script>
 
@@ -49,10 +50,10 @@
 	<section
 		class="turn-file-summary"
 		data-outcome={summary.outcome}
-		aria-label={`${summary.files.length} file${summary.files.length === 1 ? "" : "s"} changed in this turn`}
+		aria-label={`${summary.files.length} file${summary.files.length === 1 ? "" : "s"} produced in this turn`}
 	>
 		<header class="turn-file-summary-header">
-			<strong>Files changed</strong>
+			<strong>Files and artifacts</strong>
 			<span class="turn-file-summary-total">{summary.files.length}</span>
 		</header>
 
@@ -78,11 +79,11 @@
 								type="button"
 								class="turn-file-primary-action"
 								title={file.path}
-								aria-label={file.kind === "image" ? `Preview image ${file.path}` : `Review changes to ${file.path}`}
+								aria-label={isTextWorkspaceFile(file.path) && file.disposition !== "generated" ? `Review changes to ${file.path}` : `Preview ${file.path}`}
 								onclick={() => primaryAction(file)}
 							>
 								<span class="turn-file-kind" aria-hidden="true">
-									{#if file.kind === "image"}<Gallery size={15} />{:else}<DocumentText size={15} />{/if}
+									<WorkspaceFileIcon kind={file.kind} size={15} />
 								</span>
 								<code>{file.path}</code>
 								<span class="turn-file-review-mark" aria-hidden="true"><Eye size={14} /></span>
@@ -91,7 +92,7 @@
 								type="button"
 								class="turn-file-open-action"
 								title={`Open ${file.path}`}
-								aria-label={`Open ${file.path} in the workspace editor`}
+								aria-label={`Open ${file.path}`}
 								onclick={() => onopen(file.path)}
 							>
 								<ArrowRightUp size={14} aria-hidden="true" />

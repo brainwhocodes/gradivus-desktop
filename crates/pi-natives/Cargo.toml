@@ -23,6 +23,7 @@ default = []
 wayland-pipewire = ["dep:pipewire"]
 
 [dependencies]
+anydoc.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 arboard.workspace = true

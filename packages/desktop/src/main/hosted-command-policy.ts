@@ -673,7 +673,7 @@ export const CHAT_COMMAND_POLICY = {
 		validator: "DesktopHost.loadFileDiff relative in-root target",
 		projector: "projectHostedFileDiff",
 	},
-	loadWorkspaceImage: {
+	loadWorkspaceFilePreview: {
 		requiredScopes: ["chat.read", "files.read"],
 		requiresActiveGrant: true,
 		requiresDesktopPresent: false,
@@ -681,10 +681,10 @@ export const CHAT_COMMAND_POLICY = {
 		surface: "chat",
 		allowedStates: READY_OR_RUNNING,
 		confirmation: "none",
-		payloadType: "HostedChatPayload<'loadWorkspaceImage'>",
-		resultType: "HostedFileView",
-		validator: "DesktopHost.loadWorkspaceImage relative in-root target",
-		projector: "projectHostedImage",
+		payloadType: "HostedChatPayload<'loadWorkspaceFilePreview'>",
+		resultType: "HostedWorkspaceFilePreview",
+		validator: "DesktopHost.loadWorkspaceFilePreview in-root target or session-authorized generated artifact",
+		projector: "projectHostedFilePreview",
 	},
 	openWorkspaceFile: {
 		requiredScopes: ["files.read", "desktop.present"],

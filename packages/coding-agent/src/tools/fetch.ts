@@ -15,7 +15,7 @@ import type { AgentStorage } from "../session/agent-storage";
 import { DEFAULT_MAX_BYTES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
-import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
+import { CONVERTIBLE_EXTENSIONS, documentExtensionForMime } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
@@ -43,16 +43,6 @@ import { cfgProvidersFetch } from "../session/settings";
 // =============================================================================
 
 const FETCH_DEFAULT_MAX_LINES = 300;
-// MIME types markit can convert — one per registered converter (pdf, docx,
-// pptx, xlsx, epub). Legacy `application/msword`, `application/vnd.ms-*`, and
-// `application/rtf` are intentionally absent: markit has no converter for them.
-const CONVERTIBLE_MIMES = new Set([
-	"application/pdf",
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-	"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-	"application/epub+zip",
-]);
 
 const NOTEBOOK_MIMES = new Set(["application/x-ipynb+json"]);
 const NOTEBOOK_EXTENSIONS = new Set([".ipynb"]);
@@ -227,7 +217,7 @@ function getExtensionHint(url: string, contentDisposition?: string): string {
  * Check if content type is convertible via markit.
  */
 function isConvertible(mime: string, extensionHint: string): boolean {
-	if (CONVERTIBLE_MIMES.has(mime)) return true;
+	if (documentExtensionForMime(mime)) return true;
 	if (mime === "application/octet-stream" && CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	if (CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	return false;
@@ -786,7 +776,7 @@ function isArchiveHint(mime: string, extensionHint: string): boolean {
  */
 function shouldSkipBodyDownload(contentType: string): boolean {
 	return (
-		CONVERTIBLE_MIMES.has(contentType) ||
+		Boolean(documentExtensionForMime(contentType)) ||
 		NOTEBOOK_MIMES.has(contentType) ||
 		SQLITE_MIMES.has(contentType) ||
 		ARCHIVE_MIMES.has(contentType) ||
@@ -1036,13 +1026,14 @@ async function handleSpecialUrls(
 	timeout: number,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	session?: ToolSession,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const result = await handler(url, timeout, signal, storage);
+		const result = await handler(url, timeout, signal, storage, session);
 		if (result) return result;
 	}
 	return null;
@@ -1064,6 +1055,7 @@ async function renderUrl(
 	storage: AgentStorage | null,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
+	session?: ToolSession,
 ): Promise<FetchRenderResult> {
 	const notes: string[] = [];
 	const fetchedAt = new Date().toISOString();
@@ -1090,7 +1082,7 @@ async function renderUrl(
 
 	// Step 1: Try special handlers for known sites (unless raw mode)
 	if (!raw) {
-		const specialResult = await handleSpecialUrls(url, timeout, signal, storage);
+		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, session);
 		if (specialResult) return specialResult;
 	}
 
@@ -1227,29 +1219,20 @@ async function renderUrl(
 	if (!skipConvertibleBinaryRetry && isConvertible(mime, extHint)) {
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
-			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
-			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
-			if (converted.ok) {
-				if (converted.content.trim().length > 50) {
-					notes.push("Converted with markit");
-					const output = finalizeOutput(converted.content);
-					return {
-						url,
-						finalUrl,
-						contentType: mime,
-						method: "markit",
-						content: output.content,
-						fetchedAt,
-						truncated: output.truncated,
-						notes,
-					};
-				}
-				notes.push("markit conversion produced no usable output");
-			} else if (converted.error) {
-				notes.push(`markit conversion failed: ${converted.error}`);
-			} else {
-				notes.push("markit conversion failed");
-			}
+			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint || documentExtensionForMime(mime) || "";
+			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal, session);
+			notes.push(converted.ok ? "Converted locally with AnyDoc; vision recovery when needed" : `Document conversion incomplete: ${converted.error ?? "no usable text"}`);
+			const output = finalizeOutput(converted.content);
+			return {
+				url,
+				finalUrl,
+				contentType: mime,
+				method: converted.ok ? "document" : "document-incomplete",
+				content: output.content,
+				fetchedAt,
+				truncated: output.truncated,
+				notes,
+			};
 		} else if (binary.error) {
 			notes.push(`Binary fetch failed: ${binary.error}`);
 		} else {
@@ -1472,7 +1455,7 @@ async function renderUrl(
 				const binary = await fetchBinary(docUrl, timeout, signal);
 				if (binary.ok) {
 					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
+					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal, session);
 					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
 						notes.push(`Extracted and converted document: ${docUrl}`);
 						const output = finalizeOutput(converted.content);
@@ -1488,7 +1471,7 @@ async function renderUrl(
 						};
 					}
 					if (!converted.ok && converted.error) {
-						notes.push(`markit conversion failed: ${converted.error}`);
+						notes.push(`AnyDoc conversion incomplete: ${converted.error}`);
 					}
 				} else if (binary.error) {
 					notes.push(`Binary fetch failed: ${binary.error}`);
@@ -1634,6 +1617,7 @@ export async function fetchReadUrl(
 		storage,
 		session.fetch,
 		webpExclusionForModel(session.getActiveModel?.()),
+		session,
 	);
 	const output = buildUrlReadOutput(result, result.content);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;

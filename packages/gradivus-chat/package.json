@@ -14,6 +14,7 @@
     "./contracts": "./src/lib/contracts.ts",
     "./projection": "./src/lib/projection.ts",
     "./transcript-limits": "./src/lib/transcript-limits.ts",
+    "./workspace-file-types": "./src/lib/workspace-file-types.ts",
     "./ui": "./src/lib/ui/index.ts",
     "./styles/chat.scss": "./src/styles/chat.scss"
   },

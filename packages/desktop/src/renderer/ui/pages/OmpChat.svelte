@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ChatWorkspace, ModalShell, type HostedAppearanceSettings } from "@gradivus/chat";
+	import { ChatWorkspace, GradivusMark, ModalShell, type HostedAppearanceSettings } from "@gradivus/chat";
 	import { onMount } from "svelte";
 	import type { GradivusSettings, UpdateGradivusSettingsInput } from "../../../shared/contracts";
 	import type { ResolvedTheme } from "../../../shared/theme-palette";
@@ -221,6 +221,7 @@
 				confirmClose={appSettings?.confirmCloseTab ?? true}
 				{theme}
 				terminalSettings={appSettings?.terminal}
+				onhide={() => (terminalOpen = false)}
 			/>
 		</div>
 	{/if}
@@ -238,18 +239,24 @@
 			<header class="local-chat-consent-heading">
 				<p class="eyebrow">Local app connection</p>
 				<h2 id="local-chat-consent-title">{consentRequest.title}</h2>
-				<p><strong>{consentRequest.clientName}</strong> at <code>{consentRequest.origin}</code></p>
+				<div class="local-chat-consent-client">
+					<GradivusMark size={34} />
+					<div><strong>{consentRequest.clientName}</strong><code>{consentRequest.origin}</code></div>
+				</div>
 			</header>
 			<section aria-labelledby="local-chat-consent-access">
 				<h3 id="local-chat-consent-access">Requested access</h3>
 				<ul class="local-chat-consent-scopes">
 					{#each consentRequest.scopes as scope (scope.scope)}
-						<li>{scope.label}</li>
+						<li><span class="consent-scope-marker" aria-hidden="true">✓</span><span>{scope.label}</span></li>
 					{/each}
 				</ul>
 			</section>
 			<p class="local-chat-risk-notice">{consentRequest.riskNotice}</p>
 			<p class="local-chat-security-note">{consentRequest.securityNote}</p>
+			{#if !consentRequest.scopes.some(scope => scope.scope === "desktop.present")}
+				<p class="local-chat-additional-access"><strong>Additional access is not requested</strong><span>Opening Desktop pickers, files or Accounts requires a separate approval.</span></p>
+			{/if}
 			{#if consentError}<p class="settings-feedback settings-feedback-error" role="alert">{consentError}</p>{/if}
 			<div class="dialog-actions">
 				<button

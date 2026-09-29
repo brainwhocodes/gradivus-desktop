@@ -11,6 +11,7 @@ Native Rust functionality via N-API.
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
 - **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
 - **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
+- **Documents**: Local AnyDoc Markdown extraction for Office, OpenDocument, RTF, EPUB, CSV, and PDF, with OCR-page metadata and bounded embedded images for caller-managed vision recovery
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
@@ -20,7 +21,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { documentToMarkdown, encodeSixel, find, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -43,6 +44,10 @@ const sequence = encodeSixel(pngBytes, widthPx, heightPx);
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
+
+// Scan document text locally; errors/needs-OCR remain explicit, with no hosted OCR upload
+const document = await documentToMarkdown(documentBytes, ".docx", abortSignal);
+console.log(document.markdown, document.error, document.pagesNeedingOcr);
 ```
 
 ## Building

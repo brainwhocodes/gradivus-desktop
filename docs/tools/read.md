@@ -97,7 +97,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - image metadata / inline image
    - summarized macOS `sample` or V8 `.cpuprofile` report
    - editable notebook text
-   - markit-converted document
+   - locally extracted document text with vision recovery when necessary
    - binary-file notice unless `:raw` was explicit
    - structural summary for parseable code/prose
    - streamed text/line-range read
@@ -197,10 +197,13 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Documents
 
-- `CONVERTIBLE_EXTENSIONS` in `packages/coding-agent/src/tools/read.ts` covers `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.rtf`, `.epub`.
-- `convertFileWithMarkit()` converts the file to text/markdown; line-range and `:raw` selectors then apply to the converted output (`file.pdf:50-100`, `:5-16,40-80`).
-- For PDFs, embedded images are surfaced as browsable handles. markit emits a `<!-- image: <id> (page N, WxHpt) -->` region for each embedded image; `read.ts` rewrites it into a `read <pdf>:<id>.png` hint (as inline code, so spaces/parens in the path can't break markdown). Reading that handle (`doc.pdf:p11-img0.png`) extracts the image — passing markit an `imageDir` that lands in a session-artifact cache (`<artifacts>/pdf-assets/<key>/`, keyed by size+mtime, converted once per file) — and returns it through the normal image-loading path. `doc.pdf:` lists the extractable members; an unknown member errors with the available list. Requested members are matched against extracted basenames, so `..`/separators cannot escape the cache.
-- Conversion failures return a text block like `[Cannot read .pdf file: ...]`.
+- `CONVERTIBLE_EXTENSIONS` in `packages/coding-agent/src/utils/markit.ts` covers PDF; Word (`.doc`, `.docx`, `.docm`); PowerPoint (`.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm`); Excel (`.xls`, `.xlsx`, `.xlsm`, `.xlsb`); OpenDocument (`.odt`, `.ods`, `.odp`); RTF, EPUB, and CSV.
+- Text-only scans use [Firecrawl AnyDoc](https://github.com/firecrawl/anydoc) locally through the native addon. Successful local text does not require a model or a hosted OCR service. Line-range and `:raw` selectors apply to the converted Markdown (`file.pdf:50-100`, `:5-16,40-80`), not binary source bytes.
+- Empty text, extraction errors, broken PDF font encodings, and pages needing OCR trigger the existing vision pipeline: configured `modelRoles.vision` first, then a vision-capable active/default model. PDF pages are rendered in Chromium; mixed PDFs retain native text and insert recovered pages in source order. Image submission settings and cancellation still apply.
+- Non-PDF full-page recovery needs a local LibreOffice executable (`soffice.com`, `soffice`, or `libreoffice`) on `PATH`. Without it, recoverable embedded images may be transcribed, but the result is explicitly **partial**, not a full document scan. The source is preserved and missing render/model capabilities are reported.
+- Input is capped at 64 MiB. Vision recovery is bounded to 12 pages/assets and 180 seconds; incomplete coverage is labeled. Only complete local extraction is cached. AnyDoc resource-limit errors are not bypassed by external rendering.
+- PDF image-member syntax remains available for visual reads: `doc.pdf:` renders page 1 and `doc.pdf:p2-img0.png` renders page 2 through Chromium, rather than extracting a specific embedded image. Explicit rich Office image extraction continues to use the existing converters.
+- Conversion failures report their cause and preserve any available text; they never claim that an empty or partially recovered document was fully read.
 
 ### Jupyter notebooks
 

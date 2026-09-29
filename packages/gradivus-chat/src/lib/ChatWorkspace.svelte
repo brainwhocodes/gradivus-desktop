@@ -5,6 +5,8 @@
   import Bolt from "@solar-icons/svelte/linear/bolt";
   import ClockCircle from "@solar-icons/svelte/linear/clock-circle";
   import CloseCircle from "@solar-icons/svelte/linear/close-circle";
+  import Folder from "@solar-icons/svelte/linear/folder";
+  import UsersGroupRounded from "@solar-icons/svelte/linear/users-group-rounded";
   import Pen2 from "@solar-icons/svelte/linear/pen-2";
   import Stop from "@solar-icons/svelte/linear/stop";
   import type { ChatApi } from "./chat-api";
@@ -26,6 +28,7 @@
     type HostedAgentSettingTab as AgentSettingTab,
     type HostedAgentSettingValue as AgentSettingValue,
     type HostedFileView,
+    type HostedWorkspaceFilePreview,
     type HostedInterruptMode as InterruptMode,
     type HostedModelOption as ModelOption,
     type HostedOpenRouterModelRouting as OpenRouterModelRouting,
@@ -92,7 +95,6 @@
     TurnFileSummaryView as TurnFileSummary,
   } from "./ui";
 
-  type WorkspaceImagePreview = Extract<HostedFileView, { kind: "image" }>;
   type FileDiffView = Extract<HostedFileView, { kind: "diff" }>;
   type ResolvedTheme = "dark" | "light";
   type PromptResultEvent = Extract<HostedChatEvent, { type: "prompt_result" }>;
@@ -990,6 +992,31 @@
 
   onMount(() => {
     unsubscribe = api.onEvent(handleEvent);
+    const unsubscribeReconnect = api.onReconnect?.((snapshot) => {
+      bootstrap = normalizeBootstrap(snapshot);
+      const survivingIds = new Set(snapshot.sessions.map(session => session.id));
+      sessionLiveStatus = new Map([...sessionLiveStatus].filter(([id]) => survivingIds.has(id)));
+      if (survivingIds.has(activeId)) return;
+      const nextId = snapshot.activeSessionId && survivingIds.has(snapshot.activeSessionId)
+        ? snapshot.activeSessionId
+        : snapshot.sessions[0]?.id;
+      if (nextId) {
+        void selectSession(nextId);
+      } else {
+        if (current) draftBySession.set(current.record.id, draft);
+        discardVisibleAttachments();
+        current = undefined;
+        sessionSelectionToken += 1;
+        activeId = "";
+        timelineSessionSource = undefined;
+        availableCommands = [];
+        availableModels = [];
+        draft = "";
+        inspectorOpen = false;
+        closePlanReview();
+        resetAgentHubState("");
+      }
+    });
     agentHubPaneResizeObserver = new ResizeObserver(syncAgentHubWindowGeometry);
     if (transcriptPane) agentHubPaneResizeObserver.observe(transcriptPane);
     const compactQuery = window.matchMedia("(max-width: 759px)");
@@ -1009,6 +1036,7 @@
     return () => {
       discardVisibleAttachments();
       unsubscribe?.();
+      unsubscribeReconnect?.();
       compactQuery.removeEventListener("change", syncCompactLayout);
       clearTimelineProgrammaticScroll();
       timelineResizeObserver?.disconnect();
@@ -1054,6 +1082,7 @@
     modelError = "";
     try {
       const snapshot = await api.openSession(id);
+      if (requestToken !== sessionSelectionToken || activeId !== id) return;
       current = snapshot;
       syncSnapshotPlanReview(snapshot);
       agentHubSnapshot = { agents: [] };
@@ -3311,7 +3340,7 @@
     }
   }
 
-  function openImageInFiles(path: string): void {
+  function openFileInInspector(path: string): void {
     fileInspectorTarget = path;
     openInspector("files");
   }
@@ -3384,11 +3413,9 @@
       showError(error);
     }
   }
-  async function loadWorkspaceImagePreview(path: string, maxDimension: number): Promise<WorkspaceImagePreview> {
+  async function loadWorkspaceFilePreview(path: string, maxDimension: number): Promise<HostedWorkspaceFilePreview> {
     if (!current) throw new Error("No active chat");
-    const result = await api.loadWorkspaceImage(current.record.id, path, maxDimension);
-    if (result.kind !== "image") throw new Error("Desktop returned an invalid image preview.");
-    return result;
+    return api.loadWorkspaceFilePreview(current.record.id, path, maxDimension);
   }
 
   async function loadReasoning(item: TimelineItem): Promise<void> {
@@ -3467,6 +3494,8 @@
         current = snapshot;
         timelineSessionSource = event.sessionId;
         availableCommands = snapshot.commands ?? [];
+        if (snapshot.agentHub) applyAgentHubSnapshot(event.sessionId, snapshot.agentHub);
+        else void refreshAgentHub(event.sessionId);
         updateSessionStatus(
           event.sessionId,
           snapshot.state === "running" ? "running" : snapshot.state === "error" ? "error" : "idle",
@@ -3789,14 +3818,14 @@
         selectedPath={fileInspectorTarget}
         onOpenFile={(path: string) => void openSelectedFile(path)}
         onOpenDiff={(path: string) => void openFileDiff(path)}
-        loadImagePreview={loadWorkspaceImagePreview}
+        loadPreview={loadWorkspaceFilePreview}
       />
     {/if}
   </RunInspector>
 {/snippet}
 
 <div bind:this={appShellElement} class="app-shell">
-  <div class="settings-workspace-source" inert={blockingSurfaceOpen} aria-hidden={blockingSurfaceOpen}>
+  <div class="settings-workspace-source" class:is-settings-hidden={settingsRoute.open} inert={blockingSurfaceOpen} aria-hidden={blockingSurfaceOpen}>
   <div class="workspace-grid" class:inspector-open={inspectorOpen}>
     {#if !compactLayout}
     <SessionRail
@@ -3856,6 +3885,24 @@
             </div>
           {/if}
         </div>
+        {#if current}
+          <nav class="transcript-inspector-links" aria-label="Run details">
+            <button
+              type="button"
+              class:is-active={inspectorOpen && inspectorTab === "agents"}
+              aria-pressed={inspectorOpen && inspectorTab === "agents"}
+              aria-label={`${inspectorOpen && inspectorTab === "agents" ? "Close" : "Open"} Agent Hub${agentHubUnreadCount > 0 ? `, ${agentHubUnreadCount} unread` : ""}`}
+              onclick={() => toggleInspector("agents")}
+            ><UsersGroupRounded size={17} aria-hidden="true" /><span class="inspector-link-label">Agents</span>{#if agentHubUnreadCount > 0}<span class="inspector-link-count">{agentHubUnreadCount}</span>{/if}</button>
+            <button
+              type="button"
+              class:is-active={inspectorOpen && inspectorTab === "files"}
+              aria-pressed={inspectorOpen && inspectorTab === "files"}
+              aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} files` : ""}`}
+              onclick={() => toggleInspector("files")}
+            ><Folder size={17} aria-hidden="true" /><span class="inspector-link-label">Files</span>{#if fileActivityCount > 0}<span class="inspector-link-count">{fileActivityCount}</span>{/if}</button>
+          </nav>
+        {/if}
       </header>
       {#if !current}
         <StateCard variant="welcome"><span class="eyebrow">Workspace</span><h2>Make the next useful thing.</h2><p>Choose a local repository or folder to start a conversation with OMP. Tool calls, diffs, commands, reasoning, and edits stay paired in one reviewable timeline.</p><button class="primary-button" onclick={() => void createSession()} disabled={loading}>Choose a workspace <span class="button-arrow"><ArrowRight size={14} aria-hidden="true" /></span></button><div class="prompt-suggestions"><span>Start with</span><button onclick={() => draft = "Inspect this repository and identify the next implementation step."}>“Inspect this repository…”</button></div>
@@ -3926,7 +3973,7 @@
                 summary={fileSummary}
                 onreview={(path: string) => void openFileDiff(path)}
                 onopen={(path: string) => void openSelectedFile(path)}
-                onimage={openImageInFiles}
+                onpreview={openFileInInspector}
               />
             {/if}
           {/each}
@@ -4042,7 +4089,7 @@
             providerSelectedKey={activeProvider}
             providerDisabled={settingsBusy.has("model") || !canCompose || modelProviders.length === 0}
             modelOptions={composerModelDropdownOptions}
-            modelSelectedKey={`${activeProvider}/${activeModelId}`}
+            modelSelectedKey={activeModelId ? `${activeProvider}/${activeModelId}` : ""}
             modelDisabled={settingsBusy.has("model") || !canCompose || modelsForActiveProvider.length === 0}
             onProviderSelect={handleProviderDropdownSelect}
             onModelSelect={handleModelDropdownSelect}
@@ -4076,11 +4123,6 @@
             contextLimit={contextLimit ?? undefined}
             contextTokensPerSecond={current.tokensPerSecond ?? undefined}
             contextModelName={selectedModelOption?.name || current.model || "Provider default"}
-            inspectorOpen={inspectorOpen}
-            inspectorTab={inspectorTab}
-            agentUnreadCount={agentHubUnreadCount}
-            fileActivityCount={fileActivityCount}
-            onToggleInspector={toggleInspector}
             compactDisabled={Boolean(current.isStreaming || current.isCompacting || (current.queuedMessageCount ?? 0) > 0 || parityBusy)}
             handoffDisabled={Boolean(current.isStreaming || parityBusy)}
             retryDisabled={Boolean(isTurnActive || parityBusy)}

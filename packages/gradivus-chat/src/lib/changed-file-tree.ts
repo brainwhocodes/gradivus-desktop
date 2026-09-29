@@ -31,7 +31,6 @@ interface MutableDirectory {
 	files: Map<string, TimelineFileChange>;
 }
 
-const RASTER_IMAGE_EXTENSION = /\.(?:gif|jpe?g|png|webp)$/i;
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function normalizedSegments(path: string): string[] {
@@ -82,10 +81,15 @@ export function buildChangedFileTree(files: readonly TimelineFileChange[]): Chan
 	}
 
 	const root = createMutableDirectory("", "");
+	const generated: ChangedFileTreeLeaf[] = [];
 	for (const [path, file] of latestByPath) {
 		const segments = path.split("/");
 		const fileName = segments.pop();
 		if (!fileName) continue;
+		if (file.operation === "generate" && segments[0] === "@artifacts") {
+			generated.push({ kind: "file", id: `file:${path}`, name: fileName, path, file });
+			continue;
+		}
 		let directory = root;
 		for (const segment of segments) {
 			const childPath = directory.path ? `${directory.path}/${segment}` : segment;
@@ -98,7 +102,17 @@ export function buildChangedFileTree(files: readonly TimelineFileChange[]): Chan
 		}
 		directory.files.set(fileName, file);
 	}
-	return finalizeDirectory(root);
+	const nodes = finalizeDirectory(root);
+	if (generated.length > 0) {
+		nodes.push({
+			kind: "directory",
+			id: "generated:@artifacts",
+			name: "Generated",
+			path: "@artifacts",
+			children: generated.sort(sortNodes),
+		});
+	}
+	return nodes.sort(sortNodes);
 }
 
 function appendChangedFileLeaves(nodes: readonly ChangedFileTreeNode[], leaves: ChangedFileTreeLeaf[]): void {
@@ -154,11 +168,8 @@ export function flattenChangedFileTree(
 	return rows;
 }
 
-export function isRasterImagePath(path: string): boolean {
-	return RASTER_IMAGE_EXTENSION.test(path);
-}
-
-export function fileDispositionLabel(file: TimelineFileChange): "Created" | "Edited" | "Written" {
+export function fileDispositionLabel(file: TimelineFileChange): "Created" | "Edited" | "Written" | "Generated" {
+	if (file.operation === "generate") return "Generated";
 	if (file.operation === "edit" || file.disposition === "edited") return "Edited";
 	if (file.disposition === "created") return "Created";
 	return "Written";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HostedTimelineItem as TimelineItem } from "../src/lib/contracts";
-import { projectTurnFileSummaries, turnFileKind } from "../src/lib/turn-file-summary";
+import { projectTurnFileSummaries } from "../src/lib/turn-file-summary";
 
 describe("turn file summary projection", () => {
 	it("deduplicates repeated changes and keeps the most truthful turn-level disposition", () => {
@@ -33,7 +33,7 @@ describe("turn file summary projection", () => {
 		expect(summaries.get("assistant-1")).toEqual({
 			assistantItemId: "assistant-1",
 			outcome: "complete",
-			files: [{ path: "src/new-panel.ts", disposition: "created", kind: "document" }],
+			files: [{ path: "src/new-panel.ts", disposition: "created", kind: "code" }],
 		});
 	});
 
@@ -62,10 +62,10 @@ describe("turn file summary projection", () => {
 
 		expect(Array.from(summaries.keys())).toEqual(["assistant-1", "assistant-2"]);
 		expect(summaries.get("assistant-1")?.files).toEqual([
-			{ path: "src/shared.ts", disposition: "edited", kind: "document" },
+			{ path: "src/shared.ts", disposition: "edited", kind: "code" },
 		]);
 		expect(summaries.get("assistant-2")?.files).toEqual([
-			{ path: "src/shared.ts", disposition: "edited", kind: "document" },
+			{ path: "src/shared.ts", disposition: "edited", kind: "code" },
 		]);
 	});
 
@@ -183,12 +183,31 @@ describe("turn file summary projection", () => {
 
 		expect(summaries.size).toBe(0);
 	});
-});
-
-describe("turn file kind", () => {
-	it("uses broad image and document categories", () => {
-		expect(turnFileKind("screens/hero.webp")).toBe("image");
-		expect(turnFileKind("screens\\hero.JPEG")).toBe("image");
-		expect(turnFileKind("src/image-component.ts")).toBe("document");
+	it("keeps successful generated media in the turn while excluding failed generation", () => {
+		const summaries = projectTurnFileSummaries([
+			{
+				id: "generated",
+				kind: "tool",
+				status: "complete",
+				files: [
+					{ path: "@artifacts/one/concept.avif", operation: "generate" },
+					{ path: "media/demo.webm", operation: "write" },
+					{ path: "media/narration.wav", operation: "write" },
+				],
+			},
+			{
+				id: "failed",
+				kind: "tool",
+				status: "error",
+				isError: true,
+				files: [{ path: "@artifacts/two/failed.png", operation: "generate" }],
+			},
+			{ id: "assistant", kind: "assistant", status: "complete" },
+		]);
+		expect(summaries.get("assistant")?.files).toEqual([
+			{ path: "@artifacts/one/concept.avif", disposition: "generated", kind: "image" },
+			{ path: "media/demo.webm", disposition: "written", kind: "video" },
+			{ path: "media/narration.wav", disposition: "written", kind: "audio" },
+		]);
 	});
 });

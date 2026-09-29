@@ -1,15 +1,12 @@
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, loadPage } from "./types";
 import { convertWithMarkit, fetchBinary } from "./utils";
+import { ToolAbortError } from "../../tools/tool-errors";
 
 /**
  * Handle IACR ePrint Archive URLs
  */
-export const handleIacr: SpecialHandler = async (
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-): Promise<RenderResult | null> => {
+export const handleIacr: SpecialHandler = async (url, timeout, signal, _storage, session): Promise<RenderResult | null> => {
 	try {
 		const parsed = new URL(url);
 		if (parsed.hostname !== "eprint.iacr.org") return null;
@@ -69,11 +66,9 @@ export const handleIacr: SpecialHandler = async (
 			notes.push("Fetching PDF for full content...");
 			const pdfResult = await fetchBinary(pdfUrl, timeout, signal);
 			if (pdfResult.ok) {
-				const converted = await convertWithMarkit(pdfResult.buffer, ".pdf", timeout, signal);
-				if (converted.ok && converted.content.length > 500) {
-					md += `---\n\n## Full Paper\n\n${converted.content}\n`;
-					notes.push("PDF converted via markit");
-				}
+				const converted = await convertWithMarkit(pdfResult.buffer, ".pdf", timeout, signal, session);
+				if (converted.ok) md += `---\n\n## Paper transcription\n\n${converted.content}\n`;
+				notes.push(converted.ok ? "PDF converted locally with AnyDoc/vision" : `PDF unavailable: ${converted.error}`);
 			}
 		}
 
@@ -83,7 +78,9 @@ export const handleIacr: SpecialHandler = async (
 			fetchedAt,
 			notes: notes.length ? notes : ["Fetched from IACR ePrint Archive"],
 		});
-	} catch {}
+	} catch {
+		if (signal?.aborted) throw new ToolAbortError();
+	}
 
 	return null;
 };

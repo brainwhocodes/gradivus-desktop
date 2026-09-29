@@ -1,16 +1,7 @@
-/**
- * Coverage for the document conversion cache layered over the markit wrappers
- * (src/utils/markit + src/utils/markit-cache). Successful conversions are cached
- * by content hash + normalized extension so repeated reads of unchanged bytes
- * reuse converted markdown; failed, empty, and imageDir conversions are never
- * cached. The underlying converter (`Markit.prototype.convert`) is mocked so the
- * tests assert cache hit/miss/skipped behavior and converter call counts.
- */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Markit } from "@oh-my-pi/pi-coding-agent/markit";
 import { convertBufferWithMarkit, convertFileWithMarkit } from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { pruneMarkitConversionCache } from "@oh-my-pi/pi-coding-agent/utils/markit-cache";
 import { __resetDirsFromEnvForTests, getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -41,7 +32,6 @@ describe("document conversion cache", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		restoreEnv("PI_CODING_AGENT_DIR", originalPiCodingAgentDir);
 		restoreEnv("OMP_PROFILE", originalOmpProfile);
 		restoreEnv("PI_PROFILE", originalPiProfile);
@@ -50,72 +40,40 @@ describe("document conversion cache", () => {
 		await fs.rm(testDir, { recursive: true, force: true });
 	});
 
-	it("caches successful buffer conversions by content hash and normalized extension", async () => {
-		const convert = vi.spyOn(Markit.prototype, "convert").mockResolvedValue({ markdown: "cached body" });
-		const bytes = new TextEncoder().encode("hello pdf bytes");
-
-		const first = await convertBufferWithMarkit(bytes, "pdf");
-		expect(first).toEqual({ ok: true, content: "cached body", cache: "miss" });
-
-		const second = await convertBufferWithMarkit(bytes, ".pdf");
-		expect(second).toEqual({ ok: true, content: "cached body", cache: "hit" });
-
-		expect(convert).toHaveBeenCalledTimes(1);
+	it("reuses locally converted text across normalized extension spellings", async () => {
+		const bytes = new TextEncoder().encode("{\\rtf1\\ansi Cached document body}");
+		const first = await convertBufferWithMarkit(bytes, "rtf");
+		const second = await convertBufferWithMarkit(bytes, ".RTF");
+		expect(first.ok).toBe(true);
+		expect(first.content).toContain("Cached document body");
+		expect(second.content).toBe(first.content);
+		expect(first.cache).toBe("miss");
+		expect(second.cache).toBe("hit");
 	});
 
-	it("does not cache failed conversions", async () => {
-		const convert = vi.spyOn(Markit.prototype, "convert");
-		convert.mockRejectedValueOnce(new Error("boom"));
-		const bytes = new TextEncoder().encode("retry me");
+	it("does not present malformed documents as successful cached text", async () => {
+		const bytes = new TextEncoder().encode("not a PDF");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = await convertBufferWithMarkit(bytes, ".pdf");
+			expect(result.ok).toBe(false);
+			expect(result.content).toBe("");
+			expect(result.cache).toBe("skipped");
+		}
+	});
 
-		const first = await convertBufferWithMarkit(bytes, ".pdf");
-		expect(first.ok).toBe(false);
-
-		convert.mockResolvedValueOnce({ markdown: "recovered" });
-		const second = await convertBufferWithMarkit(bytes, ".pdf");
-		expect(second.ok).toBe(true);
-		expect(second.content).toBe("recovered");
+	it("invalidates file conversions when source bytes change", async () => {
+		const docPath = path.join(testDir, "doc.rtf");
+		await Bun.write(docPath, "{\\rtf1\\ansi First revision}");
+		const first = await convertFileWithMarkit(docPath);
+		await Bun.write(docPath, "{\\rtf1\\ansi Second revision}");
+		const second = await convertFileWithMarkit(docPath);
+		const repeated = await convertFileWithMarkit(docPath);
+		expect(first.content).toContain("First revision");
+		expect(second.content).toContain("Second revision");
+		expect(second.content).not.toContain("First revision");
 		expect(second.cache).toBe("miss");
-
-		expect(convert).toHaveBeenCalledTimes(2);
-	});
-
-	it("invalidates file conversions by content hash", async () => {
-		const convert = vi.spyOn(Markit.prototype, "convert");
-		const docPath = path.join(testDir, "doc.pdf");
-
-		await fs.writeFile(docPath, new TextEncoder().encode("v1"));
-		convert.mockResolvedValueOnce({ markdown: "first" });
-		const v1 = await convertFileWithMarkit(docPath);
-		expect(v1.cache).toBe("miss");
-		expect(v1.content).toBe("first");
-
-		await fs.writeFile(docPath, new TextEncoder().encode("v2"));
-		convert.mockResolvedValueOnce({ markdown: "second" });
-		const v2 = await convertFileWithMarkit(docPath);
-		expect(v2.cache).toBe("miss");
-		expect(v2.content).toBe("second");
-
-		const v2Again = await convertFileWithMarkit(docPath);
-		expect(v2Again.cache).toBe("hit");
-		expect(v2Again.content).toBe("second");
-
-		expect(convert).toHaveBeenCalledTimes(2);
-	});
-
-	it("skips cache for imageDir conversions", async () => {
-		const convert = vi.spyOn(Markit.prototype, "convert").mockResolvedValue({ markdown: "image body" });
-		const docPath = path.join(testDir, "image-doc.docx");
-		await fs.writeFile(docPath, new TextEncoder().encode("image bytes"));
-		const imageDir = path.join(testDir, "images");
-
-		const first = await convertFileWithMarkit(docPath, undefined, { imageDir });
-		expect(first.cache).toBe("skipped");
-
-		const second = await convertFileWithMarkit(docPath, undefined, { imageDir });
-		expect(second.cache).toBe("skipped");
-
-		expect(convert).toHaveBeenCalledTimes(2);
+		expect(repeated.content).toBe(second.content);
+		expect(repeated.cache).toBe("hit");
 	});
 
 	it("sweeps orphaned .tmp files during prune", async () => {

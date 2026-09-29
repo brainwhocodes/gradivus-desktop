@@ -1922,8 +1922,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				entityLabel: "notebook",
 			});
 		} else if (shouldConvertWithMarkit) {
-			// Convert document via markit.
-			const result = await convertFileWithMarkit(absolutePath, signal);
+			// Local AnyDoc text extraction, then real page/image vision recovery.
+			const result = await convertFileWithMarkit(absolutePath, signal, { session: this.session });
 			if (result.ok) {
 				const renderedContent = result.content;
 				// Route the converted markdown through the in-memory text builder
@@ -1940,7 +1940,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					entityLabel: "document",
 				});
 			} else if (result.error) {
-				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
+				content = [{ type: "text", text: `[Cannot completely read ${ext} file: ${result.error}]\n${result.content ? `\nPartial extracted text:\n${result.content}` : ""}` }];
 			} else {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: conversion failed]` }];
 			}

@@ -977,10 +977,10 @@ function registerIpc(): void {
 		const { host: h } = await ensureServices();
 		return h.loadFileDiff(id, target);
 	});
-	ipcMain.handle("gradivus:workspace-image", async (event, id: unknown, target: unknown, maxDimension: unknown) => {
+	ipcMain.handle("gradivus:workspace-file-preview", async (event, id: unknown, target: unknown, maxDimension: unknown) => {
 		assertTrustedSender(event);
 		const { host: h } = await ensureServices();
-		return h.loadWorkspaceImage(id, target, maxDimension);
+		return h.loadWorkspaceFilePreview(id, target, maxDimension);
 	});
 	ipcMain.handle("gradivus:clipboard-write", (event, value: unknown) => {
 		assertTrustedSender(event);

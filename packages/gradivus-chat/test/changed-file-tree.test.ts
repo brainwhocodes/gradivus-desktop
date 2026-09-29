@@ -3,9 +3,7 @@ import {
 	buildChangedFileTree,
 	collectChangedFileDirectoryIds,
 	collectChangedFileLeaves,
-	fileDispositionLabel,
 	flattenChangedFileTree,
-	isRasterImagePath,
 } from "../src/lib/changed-file-tree";
 import type { HostedTimelineFileChange as TimelineFileChange } from "../src/lib/contracts";
 
@@ -59,19 +57,21 @@ describe("changed file tree", () => {
 		expect(allExpanded.map(row => row.node.name)).toEqual(["src", "ui", "panel.ts", "main.ts", "README.md"]);
 	});
 
-	it("recognizes the supported raster image leaves without an extension icon taxonomy", () => {
-		for (const path of ["hero.PNG", "photo.jpg", "photo.jpeg", "animation.gif", "preview.webp"]) {
-			expect(isRasterImagePath(path), path).toBe(true);
-		}
-		for (const path of ["vector.svg", "design.avif", "notes.md", "png"]) {
-			expect(isRasterImagePath(path), path).toBe(false);
-		}
-	});
-
-	it("uses truthful disposition labels for current and historical changes", () => {
-		expect(fileDispositionLabel({ path: "new.ts", operation: "write", disposition: "created" })).toBe("Created");
-		expect(fileDispositionLabel({ path: "old.ts", operation: "write", disposition: "edited" })).toBe("Edited");
-		expect(fileDispositionLabel(change("patched.ts", "edit"))).toBe("Edited");
-		expect(fileDispositionLabel(change("historical.ts", "write"))).toBe("Written");
+	it("groups generated artifacts without losing distinct outputs that share a filename", () => {
+		const first = change("@artifacts/first/preview.png", "generate");
+		const second = change("@artifacts/second/preview.png", "generate");
+		const nodes = buildChangedFileTree([first, second, change("assets/preview.png", "write")]);
+		const generated = nodes.find(node => node.id === "generated:@artifacts");
+		expect(generated?.kind).toBe("directory");
+		if (generated?.kind !== "directory") throw new Error("Missing generated group");
+		expect(collectChangedFileLeaves(generated.children).map(leaf => [leaf.name, leaf.file.path])).toEqual([
+			["preview.png", first.path],
+			["preview.png", second.path],
+		]);
+		expect(
+			collectChangedFileLeaves(nodes)
+				.map(leaf => leaf.file.path)
+				.sort(),
+		).toEqual([first.path, second.path, "assets/preview.png"].sort());
 	});
 });

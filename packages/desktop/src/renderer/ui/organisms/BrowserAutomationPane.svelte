@@ -74,7 +74,7 @@
 		<div class="browser-automation-lease">
 			<strong>{automationState.lease.access === "control" ? "Control" : "Read"} access</strong>
 			<span>{automationState.lease.healthy ? "Authorized for this OMP runtime" : "Authorization lost"}</span>
-			<code>Epoch {automationState.lease.documentEpoch}</code>
+			<span>This pane · current chat</span>
 		</div>
 		<div class="browser-automation-actions">
 			{#if automationState.lease.access === "observe"}
@@ -83,7 +83,11 @@
 			<button type="button" class="secondary-button" disabled={Boolean(busy)} onclick={() => void revoke()}>{busy === "revoke" ? "Revoking…" : "Revoke"}</button>
 		</div>
 	{:else}
-		<p>Authorization is memory-only and bound to this pane, session, page epoch, and OMP runtime.</p>
+		<p>Choose what the agent can do in this browser pane. Access applies to the current chat and ends when its page or runtime changes.</p>
+		<dl class="browser-automation-capabilities">
+			<div><dt>Read</dt><dd>Inspect page content without interacting with it.</dd></div>
+			<div><dt>Control</dt><dd>Read the page, click controls, type and navigate.</dd></div>
+		</dl>
 		<div class="browser-automation-actions">
 			<button type="button" class="secondary-button" disabled={Boolean(busy)} onclick={() => void authorize("observe")}>{busy === "observe" ? "Waiting…" : "Allow Read"}</button>
 			<button type="button" class="primary-button" disabled={Boolean(busy)} onclick={() => void authorize("control")}>{busy === "control" ? "Waiting…" : "Allow Control"}</button>

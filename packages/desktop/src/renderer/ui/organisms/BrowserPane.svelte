@@ -98,8 +98,9 @@
 	const agentHubId = $derived(`browser-agent-hub-${pane.id}`);
 	const agentHubTitleId = $derived(`${agentHubId}-title`);
 	let agentHubOpen = $state(false);
-	let agentHubPane = $state<HTMLElement>();
-	let agentHubReturnFocus = $state<HTMLElement>();
+	let paneElement = $state<HTMLDivElement>();
+	let paneContent = $state<HTMLDivElement>();
+	let panelReturnFocus: HTMLElement | undefined;
 	let queueOpen = $state(false);
 	let findQuery = $state("");
 	let automationOpen = $state(false);
@@ -108,7 +109,7 @@
 	$effect(() => {
 		const queueCount = queuedTasks.length;
 		if (previousQueueCount === 0 && queueCount > 0) {
-			agentHubOpen = false;
+			closePanels(false);
 			queueOpen = true;
 		} else if (queueCount === 0) {
 			queueOpen = false;
@@ -131,49 +132,44 @@
 		}),
 	);
 
-	function toggleAutomation(): void {
-		automationOpen = !automationOpen;
-		if (automationOpen) {
-			closeAgentHub(false);
-			queueOpen = false;
-		}
-	}
-
-
-	function closeAgentHub(restoreFocus = true): void {
-		if (!agentHubOpen) return;
-		const returnFocus = agentHubReturnFocus;
+	function closePanels(restoreFocus = true): void {
+		const returnFocus = panelReturnFocus ?? paneElement?.querySelector<HTMLElement>(".browser-more-actions");
 		agentHubOpen = false;
-		agentHubReturnFocus = undefined;
+		automationOpen = false;
+		queueOpen = false;
+		panelReturnFocus = undefined;
 		if (restoreFocus) void tick().then(() => returnFocus?.focus());
 	}
 
-	function toggleAgentHub(trigger: HTMLButtonElement): void {
-		if (agentHubOpen) {
-			closeAgentHub();
-			return;
-		}
-		queueOpen = false;
-		automationOpen = false;
-		agentHubReturnFocus = trigger;
-		agentHubOpen = true;
+	function openPanel(panel: "automation" | "agents" | "queue", trigger: HTMLButtonElement): void {
+		const wasOpen = panel === "automation" ? automationOpen : panel === "agents" ? agentHubOpen : queueOpen;
+		closePanels(false);
+		if (wasOpen) return;
+		panelReturnFocus = trigger;
+		automationOpen = panel === "automation";
+		agentHubOpen = panel === "agents";
+		queueOpen = panel === "queue";
 		void tick().then(() => {
-			agentHubPane?.querySelector<HTMLElement>(".selection-queue-close")?.focus();
+			paneContent?.querySelector<HTMLElement>("aside .selection-queue-close, .browser-automation-pane > header button")?.focus();
 		});
 	}
 
-
-	function handleAgentHubKeydown(event: KeyboardEvent): void {
-		if (!agentHubOpen || event.key !== "Escape") return;
+	function handlePanelKeydown(event: KeyboardEvent): void {
+		if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+		if (!active || (!agentHubOpen && !automationOpen && !queueOpen)) return;
+		const target = event.target;
+		// Other panes and editable controls own their Escape behavior (drafts, find, IME).
+		if (!(target instanceof HTMLElement) || !paneElement?.contains(target)) return;
+		if (target.closest("input, textarea, select, [role='menu'], [contenteditable]:not([contenteditable='false'])")) return;
 		event.preventDefault();
 		event.stopPropagation();
-		closeAgentHub();
+		closePanels();
 	}
 </script>
-<svelte:window onkeydown={handleAgentHubKeydown} />
+<svelte:window onkeydown={handlePanelKeydown} />
 
 
-<div class="browser-pane" class:is-focused={focused} role="group" aria-label="Browser pane" onpointerdown={onactivate}>
+<div bind:this={paneElement} class="browser-pane" class:is-focused={focused} class:has-find={findOpen} role="group" aria-label="Browser pane" onpointerdown={onactivate}>
 	<BrowserToolbar
 		canGoBack={browserState?.canGoBack}
 		canGoForward={browserState?.canGoForward}
@@ -188,17 +184,13 @@
 		queueCount={queuedTasks.length}
 		queueOpen={queueOpen}
 		automationOpen={automationOpen}
-		automationAccess={automationState?.lease?.access}
+		automationAccess={automationState?.lease?.healthy ? automationState.lease.access : undefined}
 		oncontrol={oncontrol}
 		ontoggleselection={ontoggleselection}
 		onopenfind={onopenfind}
-		onopenagenthub={toggleAgentHub}
-		onopenautomation={toggleAutomation}
-		onopenqueue={() => {
-			closeAgentHub(false);
-			automationOpen = false;
-			queueOpen = true;
-		}}
+		onopenagenthub={(trigger) => openPanel("agents", trigger)}
+		onopenautomation={(trigger) => openPanel("automation", trigger)}
+		onopenqueue={(trigger) => openPanel("queue", trigger)}
 		onnavigate={onnavigate}
 		onsplit={onsplit}
 		onclosepane={onclosepane}
@@ -207,7 +199,7 @@
 		<BrowserFindBar bind:value={findQuery} findState={findState} {onfind} onclose={onstopfind} />
 	{/if}
 
-	<div class="browser-pane-content">
+	<div bind:this={paneContent} class="browser-pane-content">
 		<div class="browser-surface-host">
 			<BrowserSurface
 				paneId={pane.id}
@@ -226,11 +218,10 @@
 				paneId={pane.id}
 				automationState={automationState}
 				onstate={onautomationstate}
-				onclose={() => { automationOpen = false; }}
+				onclose={closePanels}
 			/>
 		{:else if agentHubOpen}
 			<aside
-				bind:this={agentHubPane}
 				id={agentHubId}
 				class="selection-queue-pane browser-agent-hub-pane"
 				aria-labelledby={agentHubTitleId}
@@ -241,7 +232,7 @@
 							<span class="eyebrow">Page targeting</span>
 							<h2 id={agentHubTitleId}>Agent Hub</h2>
 						</div>
-						<IconButton class="selection-queue-close" icon={CloseCircle} size={15} label="Close browser Agent Hub" onclick={closeAgentHub} />
+						<IconButton class="selection-queue-close" icon={CloseCircle} size={15} label="Close browser Agent Hub" onclick={closePanels} />
 					</div>
 					<p class="browser-agent-hub-target">
 						{#if pageAgents.length === 0}
@@ -284,7 +275,7 @@
 				running={queueRunning}
 				onrun={onrunqueue}
 				onclear={onclearqueue}
-				onclose={() => { queueOpen = false; }}
+				onclose={closePanels}
 			/>
 		{/if}
 	</div>

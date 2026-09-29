@@ -21,6 +21,24 @@
   export let confirmClose = true;
   export let theme: ResolvedTheme = "dark";
   export let terminalSettings: GradivusSettings["terminal"] | undefined = undefined;
+  export let onhide: (() => void) | undefined = undefined;
+
+  let viewportHeight = window.innerHeight;
+  let drawerHeight = Math.round(Math.min(320, viewportHeight * 0.6));
+  let resizeStart: { y: number; height: number } | undefined;
+
+  $: if (drawerHeight > Math.max(220, Math.round(viewportHeight * 0.6))) resizeDrawer(viewportHeight * 0.6);
+
+  function resizeDrawer(height: number): void {
+    drawerHeight = Math.round(Math.max(220, Math.min(viewportHeight * 0.6, height)));
+    void tick().then(() => renderer?.fit());
+  }
+
+  function handleResizeKey(event: KeyboardEvent): void {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    resizeDrawer(event.key === "Home" ? 220 : event.key === "End" ? window.innerHeight * 0.6 : drawerHeight + (event.key === "ArrowUp" ? 24 : -24));
+  }
 
   let selectedTabId = "";
   let selectedPane: WorkspacePane | undefined;
@@ -396,8 +414,35 @@
   });
 </script>
 
+<svelte:window bind:innerHeight={viewportHeight} />
+
 <section class="chat-terminal" aria-label="Workspace terminal tabs">
-  <div id="chat-terminal-drawer" class="chat-terminal-drawer" hidden={!open}>
+  <div id="chat-terminal-drawer" class="chat-terminal-drawer" style={`--terminal-drawer-height: ${drawerHeight}px`} hidden={!open}>
+    <div
+      class="terminal-resize-handle"
+      role="slider"
+      aria-label="Resize local terminal"
+      aria-orientation="vertical"
+      aria-valuemin={220}
+      aria-valuemax={Math.round(viewportHeight * 0.6)}
+      aria-valuenow={drawerHeight}
+      tabindex="0"
+      onkeydown={handleResizeKey}
+      onpointerdown={(event) => {
+        event.preventDefault();
+        event.currentTarget.focus();
+        resizeStart = { y: event.clientY, height: event.currentTarget.parentElement?.getBoundingClientRect().height ?? drawerHeight };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onpointermove={(event) => { if (resizeStart) resizeDrawer(resizeStart.height + resizeStart.y - event.clientY); }}
+      onpointerup={() => { resizeStart = undefined; }}
+      onlostpointercapture={() => { resizeStart = undefined; }}
+    ></div>
+    <div class="terminal-drawer-heading">
+      <strong>Local terminal</strong>
+      <span>Shell activity stays outside chat context</span>
+      {#if onhide}<button type="button" class="secondary-button" aria-label="Hide terminal drawer" onclick={onhide}>Hide</button>{/if}
+    </div>
     <header class="terminal-tabs-bar">
       <div class="terminal-tablist" role="tablist" aria-label="Workspace terminals">
         {#each terminalTabs as tab (tab.id)}
@@ -462,27 +507,3 @@
     </div>
   </ModalShell>
 {/if}
-
-<style>
-  .chat-terminal { width: 100%; }
-  .chat-terminal-drawer { display: flex; flex-direction: column; height: min(38vh, 380px); min-height: 200px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-medium); background: var(--terminal-background); box-shadow: 0 12px 30px var(--terminal-shadow); }
-  .chat-terminal-drawer[hidden] { display: none; }
-  .terminal-tabs-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; padding: 4px; border-bottom: 1px solid var(--line); background: var(--shell-raised); }
-  .terminal-tablist { display: flex; align-items: center; min-width: 0; overflow-x: auto; }
-  .terminal-tablist button { flex: none; min-height: 28px; max-width: 180px; overflow: hidden; border: 1px solid transparent; border-radius: var(--radius-small); padding: 4px 9px; color: var(--foreground-muted); background: transparent; text-overflow: ellipsis; white-space: nowrap; }
-  .terminal-tablist button.active { border-color: var(--accent-boundary); color: var(--foreground); background: var(--selection-surface); }
-  .terminal-tablist button:focus-visible, .terminal-tab-actions button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-  .terminal-tab-actions { display: flex; align-items: center; gap: 4px; flex: none; }
-  .terminal-tab-actions :global(button) { min-width: 24px; min-height: 28px; }
-  .terminal-rename { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
-  .terminal-rename label { color: var(--foreground-muted); font-size: 12px; }
-  .terminal-rename input { min-width: 160px; height: 30px; border: 1px solid var(--line); border-radius: var(--radius-small); padding: 0 8px; color: var(--foreground); background: var(--shell); }
-  .chat-terminal-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
-  .chat-terminal-canvas { width: 100%; min-height: 0; flex: 1; overflow: hidden; background: var(--terminal-background); font-family: var(--font-mono); }
-  .terminal-empty { display: grid; place-content: center; gap: 4px; flex: 1; text-align: center; color: var(--foreground-muted); }
-  .chat-terminal-error, .terminal-relaunch-note { margin: 0; border-top: 1px solid var(--line); padding: 6px 8px; color: var(--foreground); background: var(--danger-surface); font-size: 12px; }
-  .terminal-relaunch-note { background: var(--warning-surface); }
-  .chat-terminal-restart { align-self: flex-start; min-height: 28px; margin: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-small); padding: 5px 9px; background: transparent; color: var(--terminal-foreground); cursor: pointer; }
-  .chat-terminal-restart:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-  @media (max-width: 760px) { .chat-terminal-drawer { height: 44vh; } .terminal-tabs-bar { align-items: stretch; flex-direction: column; } .terminal-tab-actions { display: grid; grid-template-columns: repeat(4, 1fr); } }
-</style>

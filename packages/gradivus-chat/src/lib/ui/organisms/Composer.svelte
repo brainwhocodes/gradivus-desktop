@@ -54,15 +54,10 @@
 		contextModelName: string;
 		planMode?: { enabled: boolean; planFilePath?: string; workflow?: string };
 		planRefinementAwaiting?: boolean;
-		inspectorOpen: boolean;
-		inspectorTab: "agents" | "files";
-		agentUnreadCount: number;
-		fileActivityCount: number;
 		commandShortcuts: SlashCommand[];
 		commandsAvailable: boolean;
 		onCommand: (command: SlashCommand) => void;
 		onAllCommands: () => void;
-		onToggleInspector: (tab: "agents" | "files") => void;
 		compactDisabled: boolean;
 		handoffDisabled: boolean;
 		retryDisabled: boolean;
@@ -115,15 +110,10 @@
 		contextModelName,
 		planMode,
 		planRefinementAwaiting = false,
-		inspectorOpen,
-		inspectorTab,
-		agentUnreadCount,
-		fileActivityCount,
 		commandShortcuts,
 		commandsAvailable,
 		onCommand,
 		onAllCommands,
-		onToggleInspector,
 		compactDisabled,
 		handoffDisabled,
 		retryDisabled,
@@ -257,21 +247,6 @@
         if (files) onStageFiles(files, insertionIndex);
       }}
     />
-    <button
-      bind:this={attachmentAddButtonEl}
-      type="button"
-      class="attachment-add-button"
-      aria-label="Attach files"
-      title="Attach files"
-      disabled={attachDisabled}
-      onclick={() => {
-        rememberAttachmentInsertion();
-        attachmentInputEl?.click();
-      }}
-    >
-      <Paperclip size={16} aria-hidden="true" />
-      <span>Attach</span>
-    </button>
     {#if attachments.length > 0}
       <div class="attachment-chip-list" aria-label="Attached files">
         {#each attachments as attachment, index (attachment.id)}
@@ -336,20 +311,20 @@
   </div>
   <div class="composer-actions">
     <div class="composer-tools">
-      <nav class="composer-inspector-links" aria-label="Run details">
-        <button
-          type="button"
-          class:is-active={inspectorOpen && inspectorTab === "agents"}
-          aria-label={`${inspectorOpen && inspectorTab === "agents" ? "Close" : "Open"} Agent Hub${agentUnreadCount > 0 ? `, ${agentUnreadCount} unread` : ""}`}
-          onclick={() => onToggleInspector("agents")}
-        >Agents{#if agentUnreadCount > 0}<span>{agentUnreadCount}</span>{/if}</button>
-        <button
-          type="button"
-          class:is-active={inspectorOpen && inspectorTab === "files"}
-          aria-label={`${inspectorOpen && inspectorTab === "files" ? "Close" : "Open"} Files${fileActivityCount > 0 ? `, ${fileActivityCount} changed` : ""}`}
-          onclick={() => onToggleInspector("files")}
-        >Files{#if fileActivityCount > 0}<span>{fileActivityCount}</span>{/if}</button>
-      </nav>
+    <button
+      bind:this={attachmentAddButtonEl}
+      type="button"
+      class="attachment-add-button"
+      aria-label="Attach files"
+      title="Attach files"
+      disabled={attachDisabled}
+      onclick={() => {
+        rememberAttachmentInsertion();
+        attachmentInputEl?.click();
+      }}
+    >
+      <Paperclip size={16} aria-hidden="true" />
+    </button>
       <RuntimePicker
         {providerOptions}
         {providerSelectedKey}

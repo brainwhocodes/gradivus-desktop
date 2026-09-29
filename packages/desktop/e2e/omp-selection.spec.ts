@@ -548,7 +548,7 @@ async function readCapture(file: string): Promise<Array<{ images?: Array<{ mimeT
 	}
 }
 
-test("opens a fresh BrowserView card with independent defaults and stable native surface", async () => {
+test("opens a fresh BrowserView card with independent defaults and stable native surface", async ({}, testInfo) => {
 	const userData = await createUserData("gradivus-e2e-card-");
 	const workspace = path.join(userData, "workspace");
 	await prepare(userData, workspace, "fixture-selection-card");
@@ -557,9 +557,34 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 		const page = await app.firstWindow();
 		await openFixture(page, app);
 		const pane = page.getByRole("group", { name: "Browser pane" }).first();
-		const browserAgentHubButton = pane.getByRole("button", { name: "Open browser Agent Hub, 0 Page Agents" });
+		const browserActions = pane.getByRole("button", { name: "More browser actions", exact: true });
+		const browserAgentHubButton = pane.getByRole("menuitem", { name: "Open browser Agent Hub, 0 Page Agents" });
 		const fullBrowserView = await nativeView(app);
 		if (!fullBrowserView) throw new Error("Fixture browser view did not attach before opening browser Agent Hub");
+		await browserActions.click();
+		const actionMenu = pane.getByRole("menu", { name: "Browser actions" });
+		await expect(actionMenu).toBeVisible();
+		const menuBounds = await actionMenu.boundingBox();
+		if (!menuBounds) throw new Error("Browser action menu has no bounds");
+		await expect.poll(async () => (await nativeView(app))?.bounds.y ?? 0).toBeGreaterThanOrEqual(Math.floor(menuBounds.y + menuBounds.height));
+		expect((await nativeView(app))?.id).toBe(fullBrowserView.id);
+		await page.keyboard.press("Escape");
+		await expect(browserActions).toBeFocused();
+		await expect.poll(async () => (await nativeView(app))?.bounds).toEqual(fullBrowserView.bounds);
+		const accessButton = pane.getByRole("button", { name: "Open Agent access, Off", exact: true });
+		await accessButton.click();
+		const accessPanel = pane.getByRole("complementary", { name: "Browser automation access" });
+		await expect(accessPanel).toBeVisible();
+		const address = pane.getByRole("textbox", { name: "Address", exact: true });
+		await address.fill("draft stays local");
+		await address.press("Escape");
+		await expect(address).toHaveValue(fullBrowserView.url);
+		await expect(accessPanel).toBeVisible();
+		await accessPanel.getByRole("button", { name: "Close", exact: true }).focus();
+		await page.keyboard.press("Escape");
+		await expect(accessPanel).toBeHidden();
+		await expect(accessButton).toBeFocused();
+		await browserActions.click();
 		await browserAgentHubButton.click();
 		const browserAgentHub = pane.getByRole("complementary", { name: "Agent Hub" });
 		await expect(browserAgentHub).toBeVisible();
@@ -568,7 +593,7 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 		await expect.poll(async () => (await nativeView(app))?.bounds.width ?? 0).toBeLessThan(fullBrowserView.bounds.width);
 		await page.keyboard.press("Escape");
 		await expect(browserAgentHub).toBeHidden();
-		await expect(browserAgentHubButton).toBeFocused();
+		await expect(browserActions).toBeFocused();
 		await expect.poll(async () => (await nativeView(app))?.bounds.width ?? 0).toBe(fullBrowserView.bounds.width);
 		const selectorButton = pane.getByRole("button", { name: "Select page element with Page Agent" });
 		await expect(selectorButton).toBeEnabled({ timeout: 15_000 });
@@ -612,6 +637,14 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 		await expect.poll(() => cardState(app), { timeout: 10_000 }).toMatchObject({ visible: true, role: "dialog", target: "<button>", instruction: "", agent: "task", capture: "dom", action: /Ask OMP|Inline/i, selector: "#fixture-action", background: /./, color: /./ });
 		const card = await cardState(app);
 		expect(card?.label).not.toBe("");
+		const capture = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].capturePage()).toPNG().toString("base64"));
+		await fs.writeFile(testInfo.outputPath("desktop-page-agent.png"), Buffer.from(capture, "base64"));
+		const browserCapture = await app.evaluate(async ({ webContents }, id) => {
+			const contents = webContents.fromId(id);
+			if (!contents) throw new Error("Native browser contents disappeared before capture");
+			return (await contents.capturePage()).toPNG().toString("base64");
+		}, before.id);
+		await fs.writeFile(testInfo.outputPath("desktop-page-agent-native.png"), Buffer.from(browserCapture, "base64"));
 		await expectEnhancedContrast(page, "body");
 		const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze();
 		expect(axe.violations.filter(violation => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
@@ -620,16 +653,17 @@ test("opens a fresh BrowserView card with independent defaults and stable native
 		await clickCard(app, ".btn-action-dropdown");
 		await clickCard(app, ".btn-cancel");
 		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(false);
-		const populatedHubButton = pane.getByRole("button", { name: "Open browser Agent Hub, 1 Page Agent" });
+		await browserActions.click();
+		const populatedHubButton = pane.getByRole("menuitem", { name: "Open browser Agent Hub, 1 Page Agent" });
 		await populatedHubButton.click();
 		const pageAgentList = browserAgentHub.getByRole("list", { name: "Page Agents created by element targeting" });
 		await expect(pageAgentList.getByRole("listitem")).toHaveCount(1);
 		await expect(pageAgentList).toContainText("Page Agent");
 		await expect(pageAgentList).not.toContainText("Fixture Verifier");
 		await page.keyboard.press("Escape");
-		await expect(populatedHubButton).toBeFocused();
-		await page.getByRole("tab", { name: /Gradivus/ }).click();
-		const chatAgentHubButton = page.locator(".transcript-actions").getByRole("button", { name: /Open Agent Hub/ });
+		await expect(browserActions).toBeFocused();
+		await page.getByRole("tab", { name: "Gradivus", exact: true }).click();
+		const chatAgentHubButton = page.getByRole("button", { name: "Open Agent Hub", exact: true });
 		await chatAgentHubButton.click();
 		const chatAgentHub = page.getByRole("complementary", { name: "Run inspector" });
 		await expect(chatAgentHub).toContainText("Fixture Verifier");
@@ -649,7 +683,8 @@ test("starting a second pane cancels the first card and leaves one active card",
 		await page.setViewportSize({ width: 1440, height: 900 });
 		await selectElement(page, app);
 		const panes = page.getByRole("group", { name: "Browser pane" });
-		await panes.nth(0).getByRole("button", { name: "Split browser right" }).click();
+		await panes.nth(0).getByRole("button", { name: "More browser actions", exact: true }).click();
+		await panes.nth(0).getByRole("menuitem", { name: "Split browser right" }).click();
 		await expect(panes).toHaveCount(2);
 		await selectElement(page, app, "#fixture-secondary", 1, false);
 		await expect.poll(() => inspectorRootCount(app), { timeout: 10_000 }).toBe(1);
@@ -691,6 +726,16 @@ test("repeated queued picks retain role, capture, selector, URL and report statu
 		if (!beforeDock) throw new Error("Fixture browser view did not attach before queue docking");
 		await expect.poll(() => nativeView(app).then(view => view?.bounds.height ?? 0), { timeout: 10_000 }).toBe(beforeDock.bounds.height);
 		await expect.poll(() => nativeView(app).then(view => view?.bounds.width ?? 0), { timeout: 10_000 }).toBeLessThan(beforeDock.bounds.width);
+		await queue.getByRole("button", { name: "Close selection queue", exact: true }).focus();
+		await page.keyboard.press("Escape");
+		await expect(queue).toBeHidden();
+		const browserActions = page.getByRole("button", { name: "More browser actions", exact: true });
+		await expect(browserActions).toBeFocused();
+		await browserActions.click();
+		await page.getByRole("menuitem", { name: "Open selection queue, 1 item", exact: true }).click();
+		await expect(queue).toBeVisible();
+		await expect(queue.getByRole("button", { name: "Close selection queue", exact: true })).toBeFocused();
+		expect((await nativeView(app))?.id).toBe(beforeDock.id);
 
 		await clickFixture(app, "#fixture-secondary");
 		await expect.poll(() => cardState(app), { timeout: 10_000 }).toMatchObject({
@@ -805,9 +850,12 @@ test("cancel, restart, navigate and close leave no stale inspector root", async 
 		await address.fill(`${browserUrl}?navigation=1`);
 		await address.press("Enter");
 		await expect.poll(() => cardRootExists(app), { timeout: 10_000 }).toBe(false);
-		await pane.getByRole("button", { name: "Split browser right" }).click();
+		await pane.getByRole("button", { name: "More browser actions", exact: true }).click();
+		await pane.getByRole("menuitem", { name: "Split browser right" }).click();
 		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(2);
-		await page.getByRole("group", { name: "Browser pane" }).nth(0).getByRole("button", { name: "Close browser pane" }).click();
+		const firstPane = page.getByRole("group", { name: "Browser pane" }).nth(0);
+		await firstPane.getByRole("button", { name: "More browser actions", exact: true }).click();
+		await firstPane.getByRole("menuitem", { name: "Close browser pane" }).click();
 		await expect(page.getByRole("group", { name: "Browser pane" })).toHaveCount(1);
 	} finally {
 		await teardownElectronTest(app, userData);

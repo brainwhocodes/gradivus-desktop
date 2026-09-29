@@ -127,6 +127,7 @@
 </script>
 
 <div class={`markdown-body ${className}`}>
+	<div class="markdown-rendered" use:copyCodeBlocks>{@html rendered.html}</div>
 	{#if showResponseCopy && !streaming && onCopyText}
 		<div class="markdown-response-actions">
 			<button
@@ -142,5 +143,4 @@
 			{#if responseStatus}<span class="markdown-response-copy-status" role="status" aria-live="polite">{responseStatus}</span>{/if}
 		</div>
 	{/if}
-	<div class="markdown-rendered" use:copyCodeBlocks>{@html rendered.html}</div>
 </div>

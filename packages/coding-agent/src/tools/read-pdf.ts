@@ -15,6 +15,7 @@ const PDF_RENDER_TIMEOUT_MS = 30_000;
 // before capturing; otherwise the screenshot can contain only the viewer shell.
 const PDF_SCREENSHOT_CODE = `
 let viewerFrame;
+let pageCount;
 await wait(async () => {
 	for (const frame of page.frames()) {
 		try {
@@ -25,14 +26,15 @@ await wait(async () => {
 					?.shadowRoot?.querySelector("viewer-page-selector")
 					?.shadowRoot?.querySelector("#pagelength")
 					?.textContent;
-				if (Number(pageLength) > 0 && !toolbar?.hasAttribute("loading_")) return true;
+				if (Number(pageLength) > 0 && !toolbar?.hasAttribute("loading_")) return Number(pageLength);
 
 				const plugin = document.querySelector('embed[type="application/x-google-chrome-pdf"]');
 				const sizer = document.querySelector("#sizer");
-				return plugin !== null && sizer !== null && sizer.clientWidth > 0 && sizer.clientHeight > 0;
+				return plugin !== null && sizer !== null && sizer.clientWidth > 0 && sizer.clientHeight > 0 ? -1 : 0;
 			});
 			if (loaded) {
 				viewerFrame = frame;
+				pageCount = loaded > 0 ? loaded : undefined;
 				return true;
 			}
 		} catch {}
@@ -49,7 +51,8 @@ await viewerFrame.evaluate(() => {
 	);
 	return promise;
 });
-return await tab.screenshot({ fullPage: true, silent: true });
+await tab.screenshot({ fullPage: false, silent: true });
+return { pageCount };
 `;
 
 /** A legacy PDF image-member path interpreted as a page screenshot request. */
@@ -74,13 +77,18 @@ export function splitPdfImageReadPath(readPath: string): PdfImageReadTarget | nu
 	return { pdfPath, member, page };
 }
 
+export interface PdfPageScreenshot extends ScreenshotResult {
+	/** Total reported by Chromium, absent if the viewer cannot expose it. */
+	pageCount?: number;
+}
+
 /** Render one PDF page through the browser capability's shared headless Chromium. */
 export async function renderPdfPageScreenshot(
 	session: ToolSession,
 	absolutePdfPath: string,
 	page: number,
 	signal?: AbortSignal,
-): Promise<ScreenshotResult> {
+): Promise<PdfPageScreenshot> {
 	const [{ acquireBrowser, holdBrowser, releaseBrowser }, { acquireTab, releaseTab, runInTab }] = await Promise.all([
 		import("./browser/registry"),
 		import("./browser/tab-supervisor"),
@@ -93,6 +101,7 @@ export async function renderPdfPageScreenshot(
 	const renderSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const tabName = `read-pdf-${Bun.randomUUIDv7()}`;
 	const url = pathToFileURL(absolutePdfPath);
+	if (!Number.isSafeInteger(page) || page < 1) throw new ToolError("PDF page must be a positive integer.");
 	url.hash = `page=${page}&toolbar=0&navpanes=0&view=Fit`;
 
 	let browserLease = false;
@@ -127,7 +136,16 @@ export async function renderPdfPageScreenshot(
 		});
 		const screenshot = result.screenshots.at(-1);
 		if (!screenshot) throw new ToolError(`Chromium did not capture PDF page ${page}.`);
-		return screenshot;
+		const value = result.returnValue;
+		const pageCount =
+			typeof value === "object" && value !== null && "pageCount" in value &&
+			typeof value.pageCount === "number" && Number.isSafeInteger(value.pageCount) && value.pageCount > 0
+				? value.pageCount
+				: undefined;
+		if (pageCount !== undefined && page > pageCount) {
+			throw new ToolError(`PDF page ${page} is outside this ${pageCount}-page document.`);
+		}
+		return { ...screenshot, pageCount };
 	} catch (error) {
 		if (signal?.aborted) throw new ToolAbortError();
 		if (timeoutSignal.aborted) {

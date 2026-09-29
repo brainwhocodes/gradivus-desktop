@@ -35,7 +35,7 @@ pub fn pdf_to_markdown(input: Uint8Array) -> task::Promise<PdfMarkdownResult> {
 	task::blocking("pdf.to_markdown", (), move |_| convert_pdf(&input))
 }
 
-fn convert_pdf(input: &[u8]) -> Result<PdfMarkdownResult> {
+pub(crate) fn convert_pdf(input: &[u8]) -> Result<PdfMarkdownResult> {
 	let options = PdfOptions::new()
 		.markdown(MarkdownOptions { include_page_numbers: true, ..Default::default() });
 	let converted = process_pdf_mem_with_options(input, options)

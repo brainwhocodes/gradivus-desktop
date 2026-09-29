@@ -1304,6 +1304,32 @@ export interface DiffStreamResult {
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
 
+/** An embedded image, not a rendered document page. */
+export interface DocumentImage {
+  origin: string
+  mimeType: string
+  data: Buffer
+}
+
+/** AnyDoc output. Failure metadata must never be mistaken for extracted text. */
+export interface DocumentMarkdownResult {
+  markdown: string
+  error?: string
+  errorCode?: string
+  /** Present only for PDFs, including NeedsOcr errors. */
+  pageCount?: number
+  pagesNeedingOcr: Array<number>
+  images: Array<DocumentImage>
+  /** Includes images omitted by the transfer budget. */
+  imageCount: number
+}
+
+/**
+ * Convert with Firecrawl AnyDoc locally; no hosted OCR or network requests.
+ * Input is copied before dispatch to isolate JavaScript buffer mutation.
+ */
+export declare function documentToMarkdown(input: Uint8Array, extension: string, signal?: unknown | undefined | null): Promise<DocumentMarkdownResult>
+
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in
  * `text` with no files.

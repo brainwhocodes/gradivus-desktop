@@ -33,6 +33,7 @@ import type {
 	HostedTimelineToolActivity,
 	HostedTodoPhase,
 	HostedTodoState,
+	HostedWorkspaceFilePreview,
 } from "./contracts";
 
 export const GRADIVUS_CHAT_PROTOCOL_VERSION = 1 as const;
@@ -181,9 +182,9 @@ export interface HostedChatOperationMap {
 	agentHubClear: { payload: { sessionId: string; agentId: string }; result: null };
 	agentHubRevive: { payload: { sessionId: string; agentId: string }; result: null };
 	loadFileDiff: { payload: { sessionId: string; target: string }; result: HostedFileView };
-	loadWorkspaceImage: {
+	loadWorkspaceFilePreview: {
 		payload: { sessionId: string; target: string; maxDimension: number };
-		result: HostedFileView;
+		result: HostedWorkspaceFilePreview;
 	};
 	openWorkspaceFile: { payload: { sessionId: string; target: string }; result: HostedNativeActionResult };
 	getAgentSettings: { payload: { sessionId?: string }; result: HostedAgentSetting[] };
@@ -300,7 +301,7 @@ export const HOSTED_CHAT_OPERATION_NAMES = {
 	agentHubClear: true,
 	agentHubRevive: true,
 	loadFileDiff: true,
-	loadWorkspaceImage: true,
+	loadWorkspaceFilePreview: true,
 	openWorkspaceFile: true,
 	getAgentSettings: true,
 	setAgentSetting: true,

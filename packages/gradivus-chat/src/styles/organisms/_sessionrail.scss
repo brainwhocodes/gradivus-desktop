@@ -3,24 +3,74 @@
 	min-width: 0;
 	min-height: 0;
 	flex-direction: column;
-	border-right: 1px solid var(--line);
+	border-right: 1px solid var(--line-soft);
 	background: var(--shell);
 }
 
 .rail-heading {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 16px 16px 10px;
+	gap: 10px;
+	min-height: 76px;
+	padding: 18px 20px;
 }
 
 .rail-heading h1 {
 	margin: 0;
-	font: 700 20px/1.1 var(--font-display);
+	font: 650 19px/1.2 var(--font-display);
 	letter-spacing: -0.03em;
 	color: var(--foreground-strong);
 }
+
+.rail-start {
+	display: grid;
+	gap: 10px;
+	padding: 0 14px 18px;
+}
+
+.rail-new-chat {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	min-height: var(--control-height);
+	border: 1px solid var(--accent-boundary);
+	border-radius: var(--radius-small);
+	color: var(--accent-foreground);
+	background: var(--accent);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.rail-new-chat:hover:not(:disabled) { background: var(--accent-hover); }
+
+.rail-search {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	min-height: var(--control-height);
+	padding: 0 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	color: var(--foreground-muted);
+	background: var(--chat-canvas);
+}
+
+.rail-search svg { flex: 0 0 auto; }
+
+.rail-search input {
+	width: 100%;
+	min-width: 0;
+	min-height: var(--control-height);
+	border: 0;
+	padding: 0;
+	color: var(--foreground);
+	background: transparent;
+	font-size: 13px;
+}
+
+.rail-search input::placeholder { color: var(--foreground-muted); }
 
 
 .workspace-tree {
@@ -41,28 +91,18 @@
 	flex: 0 0 auto;
 	flex-direction: column;
 	border-radius: var(--radius-medium);
-	background: var(--shell-raised);
-	border: 1px solid var(--line-soft);
+	background: transparent;
+	border: 0;
 	overflow: hidden;
 
-	&.is-active-workspace {
-		border-color: var(--accent-boundary);
-		background: var(--selection-surface);
-		color: var(--selection-foreground);
-	}
-
-	&.is-active-workspace > .workspace-folder-header {
-		background: var(--selection-surface);
-	}
 }
 
 .workspace-folder-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 6px 10px;
-	background: var(--shell-raised);
-	border-bottom: 1px solid var(--line-soft);
+	padding: 0 2px 4px;
+	background: transparent;
 
 	.folder-title-wrap {
 		display: flex;
@@ -72,7 +112,7 @@
 		overflow: hidden;
 
 		width: 100%;
-		min-height: 24px;
+		min-height: 36px;
 		border: 0;
 		padding: 0;
 		color: inherit;
@@ -102,8 +142,8 @@
 
 		.folder-name {
 			font-family: var(--font-sans);
-			font-size: 14px;
-			font-weight: 700;
+			font-size: 12px;
+			font-weight: 600;
 			color: var(--foreground-strong);
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -111,8 +151,8 @@
 		}
 
 		.folder-count {
-			font-family: var(--font-mono);
-			font-size: 14px;
+			font-family: var(--font-sans);
+			font-size: 11px;
 			color: var(--foreground-muted);
 			background: var(--shell-hover);
 			padding: 1px 5px;
@@ -141,8 +181,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 24px;
-		height: 24px;
+		width: 32px;
+		height: 36px;
 		padding: 0;
 		border: 1px solid var(--line);
 		border-radius: 4px;
@@ -290,6 +330,7 @@
 		flex: 1 1 0%;
 
 		.session-tree-title {
+			grid-column: 1 / -1;
 			font-family: var(--font-sans);
 			font-size: 14px;
 			font-weight: 600;
@@ -300,15 +341,17 @@
 		}
 
 		.session-tree-time {
-			font-family: var(--font-mono);
-			font-size: 14px;
+			grid-column: 2;
+			grid-row: 2;
+			font-family: var(--font-sans);
+			font-size: 11px;
 			color: var(--foreground-muted);
 			flex: 0 0 auto;
 		}
 
 		.session-plan-review {
 			grid-column: 1 / -1;
-			font-size: 10px;
+			font-size: 11px;
 			font-weight: 700;
 			color: var(--accent-boundary);
 		}
@@ -369,8 +412,8 @@
 	gap: 8px;
 	width: 100%;
 	min-width: 0;
-	min-height: 32px;
-	border: 0;
+	min-height: 44px;
+	border: 1px solid transparent;
 	border-radius: var(--radius-small);
 	padding: 6px 8px;
 	color: inherit;
@@ -397,9 +440,8 @@
 	box-shadow: none;
 }
 
-.session-tree-row.selected .session-select-button,
-.session-tree-row.is-running .session-select-button {
-	border: 1px solid var(--accent-boundary);
+.session-tree-row.selected .session-select-button {
+	border: 1px solid transparent;
 	color: var(--selection-foreground);
 	background: var(--selection-surface);
 	box-shadow: inset 2px 0 0 var(--accent-boundary);
@@ -418,10 +460,11 @@
 }
 
 .session-state-copy {
-	grid-column: 1 / -1;
+	grid-column: 1;
+	grid-row: 2;
 	overflow: hidden;
 	color: var(--foreground-muted);
-	font-size: 10px;
+	font-size: 11px;
 	font-weight: 700;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -434,7 +477,8 @@
 }
 
 .rail-empty {
-	padding: 30px 10px;
+	flex: 1 1 0%;
+	padding: 18px;
 	color: var(--foreground-muted);
 	font-size: 12px;
 }
@@ -448,7 +492,7 @@
 	flex: 0 0 auto;
 	flex-direction: column;
 	gap: 4px;
-	border-top: 1px solid var(--line);
+	border-top: 1px solid var(--line-soft);
 	padding: 8px;
 	background: var(--shell);
 }
@@ -465,7 +509,7 @@
 	padding: 6px 8px;
 	color: var(--foreground-muted);
 	background: transparent;
-	font: 650 12px/1.2 var(--font-sans);
+	font: 500 13px/1.3 var(--font-sans);
 	text-align: left;
 	cursor: pointer;
 	transition:
@@ -527,6 +571,8 @@
 }
 
 @media (max-width: 760px) {
+	.rail-start { padding-top: 14px; }
+	.rail-new-chat, .rail-search, .rail-search input { min-height: 44px; }
 	.session-tree-row {
 		padding: 0;
 	}

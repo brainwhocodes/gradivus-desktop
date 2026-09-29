@@ -7,6 +7,7 @@
 
 ### Added
 
+- Added local AnyDoc text extraction for Office, OpenDocument, RTF, EPUB, CSV, and PDF reads, attachments, and fetched documents, with vision recovery when text extraction fails or needs OCR.
 - Added the opt-in `privileged_exec` plugin tool with process-local sudo credential sharing and masked UI prompts that never enter session transcripts.
 - Added credential-free RPC settings discovery and mutation commands so external hosts can render validated OMP preferences without exposing secrets.
 - Added provider exclusions for native image generation so hosts can prevent unsupported providers from being selected as fallbacks or per-request overrides.

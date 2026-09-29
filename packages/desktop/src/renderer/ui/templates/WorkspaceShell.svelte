@@ -60,7 +60,7 @@
 		if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") {
 			return;
 		}
-		const tablist = (event.currentTarget as HTMLElement).closest('[role="tablist"]');
+		const tablist = (event.currentTarget as HTMLElement).closest('.workspace-tabs');
 		const tabs = Array.from(tablist?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []);
 		const currentIndex = tabs.indexOf(event.currentTarget as HTMLElement);
 		if (currentIndex < 0 || tabs.length === 0) return;
@@ -90,22 +90,20 @@
 
 <header class="shell-titlebar" aria-label="Window bar">
 	<div class="shell-brand window-drag" aria-label="Gradivus">
-		<GradivusMark size={21} />
+		<GradivusMark size={26} />
+		<strong>Gradivus</strong>
 	</div>
-	<div class="window-controls">
-		<WindowControls maximized={maximized} onminimize={onminimize} ontogglemaximize={ontogglemaximize} onclose={onclose} />
-	</div>
-</header>
 
 <div class="tab-strip">
-	<div class="workspace-tabs" role="tablist" aria-label="Workspace tabs">
+	<!-- Own only the tab controls; per-tab close and action controls remain separate in the accessibility tree. -->
+	<div class="workspace-tablist" role="tablist" aria-label="Workspace tabs" aria-owns={["workspace-tab-chat", ...browserTabs.map(tab => `workspace-tab-${tab.id}`)].join(" ")}></div>
+	<div class="workspace-tabs">
 		<WorkspaceTabMolecule
 			variant="chat"
 			active={activeTabId === chatTabId}
 			title="Gradivus"
 			tabId="workspace-tab-chat"
 			controlsId="workspace-panel-chat"
-			pill="native"
 			attentionLabel={chatAttentionCount > 0 ? `${chatAttentionCount} pending plan ${chatAttentionCount === 1 ? "review" : "reviews"}` : undefined}
 			tabindex={activeTabId === chatTabId ? 0 : -1}
 			onactivate={onactivatechat}
@@ -148,6 +146,10 @@
 	<IconButton class="new-browser" icon={AddSquare} size={18} label="Open browser tab" title="Open browser tab (Ctrl+T)" disabled={!hydrated} onclick={onaddbrowser} />
 	<IconButton class="reopen-browser" icon={Refresh} size={17} label="Reopen closed browser tab" title="Reopen closed browser tab (Ctrl+Shift+T)" disabled={!canReopen} onclick={onreopen} />
 </div>
+	<div class="window-controls">
+		<WindowControls maximized={maximized} onminimize={onminimize} ontogglemaximize={ontogglemaximize} onclose={onclose} />
+	</div>
+</header>
 <main class="workspace-stage">
 	{@render children()}
 </main>

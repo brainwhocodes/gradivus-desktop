@@ -98,7 +98,7 @@ function formatImageBlock(localUrl: string, description: string): string {
 
 /**
  * Resolve a vision-capable model, mirroring image-question priority
- * (`@vision` → `@default` → active → first image-capable available), but
+ * (`@vision` → active → `@default` → first image-capable available), but
  * never returning a text-only model.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
@@ -113,8 +113,8 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 	};
 	return (
 		resolvePattern("@vision") ??
-		resolvePattern("@default") ??
 		resolvePattern(deps.activeModelString) ??
+		resolvePattern("@default") ??
 		available.find(model => sendsImageInputOnWire(model))
 	);
 }

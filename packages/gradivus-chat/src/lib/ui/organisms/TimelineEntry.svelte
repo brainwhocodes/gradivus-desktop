@@ -3,6 +3,8 @@
   import DangerCircle from "@solar-icons/svelte/linear/danger-circle";
   import Pen2 from "@solar-icons/svelte/linear/pen-2";
   import Stars from "@solar-icons/svelte/linear/stars";
+  import UserRounded from "@solar-icons/svelte/linear/user-rounded";
+  import GradivusMark from "../../components/GradivusMark.svelte";
   import type {
     HostedSessionKind as SessionKind,
     HostedTimelineImage as TimelineImage,
@@ -153,8 +155,13 @@
 </script>
 
 <article class="timeline-item item-{item.kind}" data-timeline-id={item.id} class:has-error={item.isError} class:is-running={item.status === "running"} class:is-queued={queued}>
-  <div class="timeline-gutter"><span>{gutterLabel(item)}</span></div>
+  <div class="timeline-gutter">
+    {#if item.kind === "assistant"}<span class="message-avatar" aria-hidden="true"><GradivusMark size={28} /></span>
+    {:else if item.kind === "user"}<span class="message-avatar user-avatar" aria-hidden="true"><UserRounded size={17} /></span>
+    {:else}<span>{gutterLabel(item)}</span>{/if}
+  </div>
   <div class="timeline-body">
+    {#if item.kind === "assistant" || item.kind === "user"}<div class="message-author">{item.kind === "user" ? "You" : "Gradivus"}</div>{/if}
     {#if item.kind === "tool"}
       <div class="activity-row" class:is-running={item.status === "running"} class:has-error={item.status === "error" || item.isError}>
         {#if item.status === "running"}
